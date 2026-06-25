@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 from .. import config as _cfg
-from ..core.ai_providers import chat_json, LLMError
+from ..core.ai_providers import chat_json, batch_chat, LLMError
+from ..core.json_utils import extract_json_safe
 
 _SYS = (
     "Ты — инженер-эколог, эксперт по проектной документации (ПМООС/ООС) "
@@ -25,6 +26,25 @@ _PROMPT = (
 )
 
 
+def _messages(remark_text: str, n: int) -> list[dict]:
+    return [
+        {"role": "system", "content": _SYS},
+        {"role": "user", "content": _PROMPT.format(remark=remark_text.strip(), n=n)},
+    ]
+
+
+def _merge(remark_text: str, extra_raw, n: int) -> list[str]:
+    """Исходный запрос + перефразировки, дедуп с сохранением порядка."""
+    base = [remark_text.strip()]
+    extra = [str(x).strip() for x in (extra_raw or []) if str(x).strip()]
+    seen = {base[0].lower()}
+    for q in extra:
+        if q.lower() not in seen:
+            base.append(q)
+            seen.add(q.lower())
+    return base[: n + 1]
+
+
 def expand_query(remark_text: str, cfg: _cfg.Config, *, n: int = 3, module: str = "module4") -> list[str]:
     """Возвращает список запросов: исходный + перефразировки.
 
@@ -35,18 +55,34 @@ def expand_query(remark_text: str, cfg: _cfg.Config, *, n: int = 3, module: str 
     if n <= 0:
         return base
     try:
-        msg = [
-            {"role": "system", "content": _SYS},
-            {"role": "user", "content": _PROMPT.format(remark=remark_text.strip(), n=n)},
-        ]
-        data = chat_json(cfg, msg, expect="array", module=module, role="expand")
-        extra = [str(x).strip() for x in (data or []) if str(x).strip()]
-        # дедуп с сохранением порядка
-        seen = {base[0].lower()}
-        for q in extra:
-            if q.lower() not in seen:
-                base.append(q)
-                seen.add(q.lower())
-        return base[: n + 1]
+        data = chat_json(cfg, _messages(remark_text, n), expect="array",
+                         module=module, role="expand")
+        return _merge(remark_text, data, n)
     except (LLMError, Exception):
         return base
+
+
+def expand_query_batch(remark_texts: list[str], cfg: _cfg.Config, *, n: int = 3,
+                       module: str = "module4") -> list[list[str]]:
+    """ПАРАЛЛЕЛЬНОЕ расширение для списка замечаний (оптимизация М4).
+
+    Раньше расширение шло по одному замечанию последовательно — для 75 замечаний
+    это 75 блокирующих вызовов LLM ещё до генерации ответов. Здесь все запросы
+    уходят разом через batch_chat (пул потоков ai.concurrency). Мягкая деградация:
+    при ошибке по конкретному замечанию возвращаем только его исходный текст.
+    """
+    if n <= 0 or not remark_texts:
+        return [[t.strip()] for t in remark_texts]
+    jobs = [_messages(t, n) for t in remark_texts]
+    try:
+        results = batch_chat(
+            cfg, jobs, module=module, role="expand", json_mode=True,
+            processor=lambda txt: extract_json_safe(txt, default=[], expect="array"),
+        )
+    except Exception:  # noqa: BLE001
+        return [[t.strip()] for t in remark_texts]
+    out: list[list[str]] = []
+    for t, res in zip(remark_texts, results):
+        data = res.get("result") if res.get("ok") else None
+        out.append(_merge(t, data, n))
+    return out

@@ -1,4 +1,4 @@
-"""ПМООС-RAG v0.16.0 «Modular» — единый интерфейс (Streamlit).
+"""ПМООС-RAG v0.17.0 «Faster» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются по отдельности из папки modules/ (CLI).
@@ -24,7 +24,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from pmoos import __version__
+from pmoos import __version__, __codename__
 from pmoos.config import load_config
 from pmoos.paths import project_paths
 from pmoos.projects import list_projects, register_project
@@ -61,7 +61,7 @@ def _save_uploads(project: str, files) -> int:
 # ─────────────────────────────── сайдбар ───────────────────────────────
 def sidebar() -> tuple[str, str]:
     st.sidebar.title("🌍 ПМООС-RAG")
-    st.sidebar.caption(f"v{__version__} «Modular»")
+    st.sidebar.caption(f"v{__version__} «{__codename__}»")
 
     projects = list_projects()
     mode = st.sidebar.radio("Проект", ["Выбрать", "Создать новый"],

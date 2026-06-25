@@ -62,8 +62,13 @@ def verify_models() -> None:
     print(f"[check] эмбеддер OK: модель={emb.model_name}, dim={emb.dim}, "
           f"устройство={emb.device}", flush=True)
 
-    # освобождаем память (важно для 8 ГБ VRAM) перед загрузкой reranker
+    # освобождаем память (важно для 8 ГБ VRAM) перед загрузкой reranker.
+    # ВАЖНО: с v0.17 модели кэшируются в процессном реестре _MODELS (синглтон),
+    # поэтому обнуления emb._model недостаточно — нужно убрать сильную ссылку и
+    # из реестра, иначе gc/empty_cache не освободят VRAM.
     try:
+        from pmoos.index.embeddings import _MODELS as _EMB_MODELS
+        _EMB_MODELS.pop(emb._model_key(), None)
         emb._model = None
         import gc
         gc.collect()

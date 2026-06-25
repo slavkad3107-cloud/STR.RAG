@@ -160,9 +160,11 @@ def run_block1(project: str, cfg: Config | None = None, *,
         hits_per = retr.batch_search(project, queries, sections=src_codes or None,
                                      top=int(cfg.get("retrieval.top_k", 8)))
         # №10-5: к какому ТОМУ ООС относится замечание — лёгкий поиск top-1
-        # только по разделу OOS (томов может быть несколько)
+        # только по разделу OOS (томов может быть несколько). Расширение запроса
+        # здесь не нужно (ищем сам том, top-1) — экономим вызовы LLM.
         try:
-            oos_per = retr.batch_search(project, queries, sections=["OOS"], top=1)
+            oos_per = retr.batch_search(project, queries, sections=["OOS"], top=1,
+                                        use_expansion=False)
         except Exception:  # noqa: BLE001
             oos_per = []
     finally:

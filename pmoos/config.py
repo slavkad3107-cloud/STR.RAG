@@ -137,6 +137,7 @@ DEFAULT_AI: dict[str, Any] = {
     "temperature": 0.1,
     "max_tokens": 4096,
     "use_cache": True,         # кэш ответов ИИ на диск
+    "json_repair_retry": True, # один повтор «верни ТОЛЬКО JSON» при сбое парсинга
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -148,10 +149,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "batch_size": 16,
         "use_safetensors": True, # фикс CVE-2025-32434 (torch.load)
         "max_length": 1024,
+        # half-точность эмбеддера на GPU: ~2× скорость, вдвое меньше VRAM.
+        # OPT-IN (по умолчанию False): слегка меняет векторы; при включении
+        # рекомендуется переиндексация (ключ кэша учитывает fp16). Приоритет —
+        # стабильность выдачи.
+        "fp16": False,
     },
     "reranker": {
         "enabled": True,
         "model": "BAAI/bge-reranker-v2-m3",
+        # half-точность кросс-энкодера на GPU: безопасно (логиты считаются заново
+        # каждый раз, нет рассинхрона с индексом), даёт выигрыш VRAM/скорости.
+        "fp16": True,
     },
     "retrieval": {
         "top_k": 8,

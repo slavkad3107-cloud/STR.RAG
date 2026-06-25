@@ -29,17 +29,27 @@ _LOCK = threading.Lock()
 
 
 # --- дисковый кэш ответов ---------------------------------------------------
+# Одно переиспользуемое соединение на процесс (оптимизация): раньше каждый
+# get/put открывал и закрывал sqlite — под batch_chat (десятки параллельных
+# запросов) это лишние connect/close на каждый вызов. WAL + busy_timeout делают
+# одно общее соединение безопасным; запись/чтение сериализуем общим _LOCK.
+_CACHE_CON: sqlite3.Connection | None = None
+
+
 def _cache_db() -> sqlite3.Connection:
-    p = data_root() / "llm_cache.sqlite"
-    con = sqlite3.connect(str(p), check_same_thread=False)
-    try:
-        con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA synchronous=NORMAL")
-        con.execute("PRAGMA busy_timeout=5000")
-    except Exception:  # noqa: BLE001
-        pass
-    con.execute("CREATE TABLE IF NOT EXISTS cache (k TEXT PRIMARY KEY, v TEXT)")
-    return con
+    global _CACHE_CON
+    if _CACHE_CON is None:
+        p = data_root() / "llm_cache.sqlite"
+        con = sqlite3.connect(str(p), check_same_thread=False)
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
+            con.execute("PRAGMA busy_timeout=5000")
+        except Exception:  # noqa: BLE001
+            pass
+        con.execute("CREATE TABLE IF NOT EXISTS cache (k TEXT PRIMARY KEY, v TEXT)")
+        _CACHE_CON = con
+    return _CACHE_CON
 
 
 def _cache_key(provider: str, model: str, messages: list[Message], **params) -> str:
@@ -53,9 +63,7 @@ def _cache_key(provider: str, model: str, messages: list[Message], **params) -> 
 def _cache_get(key: str) -> str | None:
     try:
         with _LOCK:
-            con = _cache_db()
-            row = con.execute("SELECT v FROM cache WHERE k=?", (key,)).fetchone()
-            con.close()
+            row = _cache_db().execute("SELECT v FROM cache WHERE k=?", (key,)).fetchone()
         return row[0] if row else None
     except Exception:
         return None
@@ -67,7 +75,6 @@ def _cache_put(key: str, value: str) -> None:
             con = _cache_db()
             con.execute("INSERT OR REPLACE INTO cache (k, v) VALUES (?, ?)", (key, value))
             con.commit()
-            con.close()
     except Exception:
         pass
 
@@ -202,9 +209,33 @@ def chat(cfg: Config, messages: list[Message], *, module: str | None = None,
 
 def chat_json(cfg: Config, messages: list[Message], *, expect: str = "auto", **kw) -> Any:
     """Вызов ИИ с разбором JSON. Сначала пробуем JSON-режим, затем устойчивый
-    парсер. Это и есть лечение «не удалось извлечь сбалансированный JSON»."""
+    парсер. Это и есть лечение «не удалось извлечь сбалансированный JSON».
+
+    Если распарсить не удалось — ОДИН повтор с жёстким требованием «верни ТОЛЬКО
+    JSON» (без кэша, чтобы не закрепить плохой ответ). Повтор включается
+    ai.json_repair_retry (по умолчанию True)."""
     txt = chat(cfg, messages, json_mode=True, **kw)
-    return extract_json(txt, expect=expect)
+    try:
+        return extract_json(txt, expect=expect)
+    except Exception:
+        if not cfg.get("ai.json_repair_retry", True):
+            raise
+        schema_hint = {"object": "JSON-объект", "array": "JSON-массив"}.get(expect, "валидный JSON")
+        retry_msgs = list(messages)
+        # Эхо прошлого ответа добавляем ТОЛЬКО если последняя роль не assistant —
+        # иначе у anthropic/gemini получилось бы два assistant подряд (ошибка
+        # чередования ролей). Текущие вызывающие заканчиваются на user.
+        last_role = next((m.get("role") for m in reversed(retry_msgs) if m.get("content")), None)
+        if last_role != "assistant":
+            retry_msgs.append({"role": "assistant", "content": (txt or "")[:2000]})
+        retry_msgs.append({"role": "user", "content": (
+            f"Твой предыдущий ответ не распарсился как {schema_hint}. "
+            f"Верни ТОЛЬКО {schema_hint} по требуемой схеме — без markdown, "
+            f"без ```-ограждений и без каких-либо пояснений.")})
+        kw2 = dict(kw)
+        kw2["use_cache"] = False  # не кэшируем повторный запрос
+        txt2 = chat(cfg, retry_msgs, json_mode=True, **kw2)
+        return extract_json(txt2, expect=expect)
 
 
 def batch_chat(cfg: Config, jobs: Iterable[list[Message]], *, processor: Callable[[str], Any] | None = None,

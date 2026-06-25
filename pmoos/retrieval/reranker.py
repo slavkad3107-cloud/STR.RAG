@@ -9,10 +9,16 @@ device берём из конфигурации (auto -> cuda на 3070ti).
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from ..config import Config
 from ..core.device import resolve_device
+
+# Синглтон загруженных кросс-энкодеров НА ПРОЦЕСС (см. пояснение в embeddings.py):
+# не перегружать реранкер в VRAM при каждом запуске Модуля 4.
+_MODEL_LOCK = threading.Lock()
+_MODELS: dict[tuple, object] = {}
 
 
 class Reranker:
@@ -20,15 +26,26 @@ class Reranker:
         self.cfg = cfg
         self.model_name = cfg.get("reranker.model", "BAAI/bge-reranker-v2-m3")
         self.enabled = bool(cfg.get("reranker.enabled", True))
+        self.device = resolve_device(cfg.get("embedding.device", "auto"))
+        self.fp16 = bool(cfg.get("reranker.fp16", True)) and self.device == "cuda"
         self._model = None
+
+    def _model_key(self) -> tuple:
+        return (self.model_name, self.device, self.fp16)
 
     def _load(self):
         if self._model is not None:
             return self._model
+        key = self._model_key()
+        with _MODEL_LOCK:
+            cached = _MODELS.get(key)
+            if cached is not None:
+                self._model = cached
+                return self._model
         import os
         from sentence_transformers import CrossEncoder
 
-        device = resolve_device(self.cfg.get("embedding.device", "auto"))
+        device = self.device
         token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
         # ВАЖНО: НЕ передаём cache_folder/cache_dir — у CrossEncoder в
         # sentence-transformers 3.3 такого параметра нет (был краш TypeError).
@@ -71,6 +88,18 @@ class Reranker:
                 self._model = _try(False)
             else:
                 raise
+        # FP16: половинная точность кросс-энкодера на GPU (вдвое меньше VRAM,
+        # быстрее предсказание). Внутренняя transformers-модель — в .model.
+        if self.fp16:
+            try:
+                self._model.model.half()
+            except Exception as e:  # noqa: BLE001
+                print(f"[reranker] fp16 не применён ({e}) — остаюсь в fp32", flush=True)
+                self.fp16 = False
+        # Кладём под ТЕМ ЖЕ ключом, по которому искали (key выше), иначе при сбое
+        # .half() запись ушла бы под другой ключ и синглтон не сработал бы.
+        with _MODEL_LOCK:
+            _MODELS[key] = self._model
         return self._model
 
     def rerank(self, query: str, candidates: list[dict], *, top: int = 8,

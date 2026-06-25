@@ -17,14 +17,45 @@ from typing import Any
 from ..config import Config
 from ..index.embeddings import Embedder
 from ..index.vectorstore import VectorStore, collection_name
-from .query_expansion import expand_query
+from ..normatives.engine import find_references
+from .query_expansion import expand_query, expand_query_batch
 from .reranker import Reranker
 
 _WORD = re.compile(r"[\w\-]+", re.UNICODE)
+_WS = re.compile(r"\s+")
+
+
+def _norm_code(ref: str) -> str:
+    """Единый токен нормативного обозначения: нижний регистр, без пробелов и №.
+
+    Срезаем и завершающие '-'/'/' — регэксп нормативов жадно их захватывает
+    («СП 47.13330-» на границе чанка), и без среза токен документа не совпал бы
+    с токеном запроса («СП 47.13330»)."""
+    return _WS.sub("", (ref or "").lower()).replace("№", "").rstrip("-/")
 
 
 def _tok(text: str) -> list[str]:
-    return [t.lower() for t in _WORD.findall(text or "")]
+    """Токенизация для BM25.
+
+    Обычный паттерн [\\w\\-]+ рвёт нормативные коды по '/', '.' и пробелам
+    («СанПиН 2.2.1/2.1.1.1200-03» → 'санпин','2','2','1',…), и точное совпадение
+    кода между замечанием и документом теряется. Поэтому ДОПОЛНИТЕЛЬНО к обычным
+    словам добавляем целые нормативные обозначения одним токеном (через тот же
+    реестр-регэксп, что и движок нормативов) — так BM25 ловит точные короды.
+    """
+    text = text or ""
+    toks = [t.lower() for t in _WORD.findall(text)]
+    # find_references — чистый regex; цифр нет → нормативного кода точно нет,
+    # пропускаем дорогой проход (заметно дешевле на сборке BM25-корпуса).
+    if any(c.isdigit() for c in text):
+        try:
+            for ref in find_references(text):
+                code = _norm_code(ref)
+                if code:
+                    toks.append(code)
+        except Exception:  # noqa: BLE001
+            pass
+    return toks
 
 
 def expand_hits(hits: list[dict], index: dict, *, neighbors: int = 1,
@@ -194,14 +225,20 @@ class HybridRetriever:
     def search(self, project: str, query: str, *, top: int | None = None,
                candidates: int | None = None, sections: list[str] | None = None,
                exclude_sections: list[str] | None = None,
-               use_expansion: bool | None = None) -> list[dict]:
+               use_expansion: bool | None = None,
+               expansions: list[str] | None = None) -> list[dict]:
         top = top or int(self.cfg.get("retrieval.top_k", 8))
         candidates = candidates or int(self.cfg.get("retrieval.candidates", 40))
         use_expansion = self.cfg.get("retrieval.use_query_expansion", True) if use_expansion is None else use_expansion
 
-        queries = [query]
-        if use_expansion:
+        # expansions можно передать готовыми (батчевый путь из batch_search —
+        # расширения посчитаны параллельно). Иначе считаем здесь по одному.
+        if expansions is not None:
+            queries = expansions or [query]
+        elif use_expansion:
             queries = expand_query(query, self.cfg, n=int(self.cfg.get("retrieval.expansions", 3)))
+        else:
+            queries = [query]
 
         lists: list[list[dict]] = []
         for q in queries:
@@ -233,8 +270,33 @@ class HybridRetriever:
     def batch_search(self, project: str, queries: list[str], **kw) -> list[list[dict]]:
         """Подготавливает корпус один раз и ищет по списку замечаний.
 
-        Корпус BM25 и модель эмбеддингов загружаются единожды — это и есть
-        батчевый retrieval, о котором писали ревью-ИИ (75 замечаний без
-        повторной загрузки тяжёлых ресурсов)."""
+        Корпус BM25 и модель эмбеддингов загружаются единожды. Дополнительно
+        (оптимизация М4):
+          * расширение запросов считается ПАРАЛЛЕЛЬНО для всех замечаний разом
+            (expand_query_batch) вместо N последовательных вызовов LLM;
+          * все уникальные запросы предварительно эмбеддятся одним батчем —
+            прогрев дискового кэша, чтобы per-query поиск шёл из кэша.
+        """
         self._load_corpus(project)
-        return [self.search(project, q, **kw) for q in queries]
+
+        use_expansion = kw.pop("use_expansion", None)
+        if use_expansion is None:
+            use_expansion = self.cfg.get("retrieval.use_query_expansion", True)
+
+        # 1) параллельное расширение (или просто исходные запросы)
+        if use_expansion:
+            all_expansions = expand_query_batch(
+                queries, self.cfg, n=int(self.cfg.get("retrieval.expansions", 3)))
+        else:
+            all_expansions = [[q] for q in queries]
+
+        # 2) прогрев кэша эмбеддингов одним батчем по всем уникальным запросам
+        try:
+            uniq = list(dict.fromkeys(q for exp in all_expansions for q in exp))
+            if uniq:
+                self.embedder.embed_queries(uniq)
+        except Exception:  # noqa: BLE001
+            pass
+
+        return [self.search(project, q, expansions=exp, **kw)
+                for q, exp in zip(queries, all_expansions)]

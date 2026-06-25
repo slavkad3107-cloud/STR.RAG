@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -44,14 +45,25 @@ def _tokens(text: str) -> set[str]:
     return {t for t in toks if len(t) >= 4 and t not in _STOP}
 
 
-def kb_size() -> int:
-    p = _store_path()
-    if not p.exists():
-        return 0
-    return sum(1 for _ in p.open("r", encoding="utf-8"))
+# --- кэш записей KB (оптимизация) ------------------------------------------
+# Раньше весь expertise.jsonl читался и токенизировался заново на КАЖДОЕ
+# замечание (fewshot_block в цикле) — O(замечания × записи_KB), что становится
+# квадратичным при цели 100–500 проектов. Теперь records и предвычисленные
+# token-наборы кэшируются и перечитываются только при изменении файла.
+_RECORDS_LOCK = threading.Lock()
+_RECORDS_CACHE: dict[str, Any] = {"sig": object(), "records": [], "tokens": []}
 
 
-def _iter_records() -> list[dict]:
+def _file_sig(p: Path):
+    try:
+        st = p.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _read_raw() -> list[dict]:
+    """Чтение записей напрямую с диска (без кэша) — для веток с перезаписью."""
     p = _store_path()
     if not p.exists():
         return []
@@ -67,8 +79,41 @@ def _iter_records() -> list[dict]:
     return out
 
 
+def _load_cached() -> tuple[list[dict], list[set]]:
+    """(records, предвычисленные токены замечаний); перечитывается лишь при
+    изменении файла (mtime/size). Возвращаемые списки — НЕ мутировать."""
+    p = _store_path()
+    sig = _file_sig(p)
+    with _RECORDS_LOCK:
+        if _RECORDS_CACHE["sig"] == sig:
+            return _RECORDS_CACHE["records"], _RECORDS_CACHE["tokens"]
+    records = _read_raw()
+    tokens = [_tokens(r.get("remark", "")) for r in records]
+    with _RECORDS_LOCK:
+        _RECORDS_CACHE.update(sig=sig, records=records, tokens=tokens)
+    return records, tokens
+
+
+def _invalidate_cache() -> None:
+    """Форсировать перечитывание кэша при следующем _load_cached.
+
+    Страховка от грубой гранулярности mtime (FAT/exFAT/сетевые ФС): не полагаемся
+    только на (mtime, size) — после записи в record_one явно сбрасываем сигнатуру."""
+    with _RECORDS_LOCK:
+        _RECORDS_CACHE["sig"] = object()
+
+
+def kb_size() -> int:
+    return len(_load_cached()[0])
+
+
+def _iter_records() -> list[dict]:
+    # обратная совместимость: отдаём кэшированные записи (только для чтения)
+    return _load_cached()[0]
+
+
 def _seen_keys() -> set[str]:
-    return {f"{r.get('project')}|{r.get('number')}" for r in _iter_records()}
+    return {f"{r.get('project')}|{r.get('number')}" for r in _load_cached()[0]}
 
 
 def record_one(*, remark: str, answer: str, correction: str = "", section: str = "",
@@ -80,8 +125,9 @@ def record_one(*, remark: str, answer: str, correction: str = "", section: str =
         return False
     key = f"{project}|{number}"
     if key in _seen_keys():
-        # обновим существующую запись (перезапись answer) — простая реализация:
-        records = _iter_records()
+        # обновим существующую запись (перезапись answer) — простая реализация.
+        # Читаем СВЕЖИЕ записи с диска (не кэш), т.к. ниже мутируем и перезаписываем.
+        records = _read_raw()
         changed = False
         for r in records:
             if f"{r.get('project')}|{r.get('number')}" == key:
@@ -94,6 +140,7 @@ def record_one(*, remark: str, answer: str, correction: str = "", section: str =
             with _store_path().open("w", encoding="utf-8") as f:
                 for r in records:
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            _invalidate_cache()
         return changed
     rec = {
         "remark": remark, "answer": answer, "correction": correction,
@@ -102,6 +149,7 @@ def record_one(*, remark: str, answer: str, correction: str = "", section: str =
     }
     with _store_path().open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    _invalidate_cache()
     return True
 
 
@@ -137,13 +185,14 @@ def similar_past(remark_text: str, *, k: int = 2, exclude_project: str | None = 
     q = _tokens(remark_text)
     if not q:
         return []
+    rt_low = (remark_text or "").strip().lower()
+    records, tokens = _load_cached()  # токены замечаний предвычислены один раз
     scored: list[tuple[float, dict]] = []
-    for r in _iter_records():
+    for r, d in zip(records, tokens):
         if exclude_project and r.get("project") == exclude_project:
             continue
-        if (r.get("remark", "").strip().lower() == (remark_text or "").strip().lower()):
+        if r.get("remark", "").strip().lower() == rt_low:
             continue  # не подсказывать самим собой
-        d = _tokens(r.get("remark", ""))
         if not d:
             continue
         inter = q & d

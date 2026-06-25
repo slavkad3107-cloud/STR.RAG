@@ -25,6 +25,14 @@ from ..paths import emb_cache_path
 
 _LOCK = threading.Lock()
 
+# Синглтон загруженных моделей НА ПРОЦЕСС (оптимизация): не перегружать ~2 ГБ в
+# VRAM при каждом запуске модуля / каждом ререндере Streamlit. Ключ учитывает
+# имя модели, устройство, fp16 и max_length — при смене настроек грузится нужная
+# модель, а не отдаётся старая. Streamlit ререндерит скрипт, но НЕ перезапускает
+# процесс, поэтому модульный кэш переживает ререндеры.
+_MODEL_LOCK = threading.Lock()
+_MODELS: dict[tuple, object] = {}
+
 
 def pick_device(requested: str = "auto") -> str:
     if requested and requested != "auto":
@@ -121,15 +129,37 @@ class Embedder:
         self.batch_size = int(cfg.get("embedding.batch_size", 16))
         self.max_length = int(cfg.get("embedding.max_length", 1024))
         self.use_safetensors = bool(cfg.get("embedding.use_safetensors", True))
+        # fp16 включаем только на cuda (на cpu half() медленнее и местами не
+        # поддерживается). ~2× скорость кодирования и вдвое меньше VRAM.
+        # По умолчанию ВЫКЛ (opt-in): half-точность слегка меняет векторы, а
+        # приоритет пользователя — стабильность выдачи. Включается осознанно;
+        # при включении ключ кэша эмбеддингов учитывает fp16 (см. _cache_model_id),
+        # и рекомендуется переиндексация для консистентности с базой Qdrant.
+        self.fp16 = bool(cfg.get("embedding.fp16", False)) and self.device == "cuda"
         self._model = None
         self._dim: int | None = None
         self._cache: _EmbCache | None = None
 
+    def _model_key(self) -> tuple:
+        return (self.model_name, self.device, self.fp16, self.max_length)
+
     def _load(self):
         if self._model is not None:
             return self._model
+        key = self._model_key()
+        with _MODEL_LOCK:
+            cached = _MODELS.get(key)
+            if cached is not None:
+                # В реестре храним (модель, фактический fp16). Восстанавливаем
+                # фактическую точность: если у первого экземпляра .half() упал
+                # (модель осталась fp32), повторный экземпляр НЕ должен считать
+                # себя fp16 — иначе _cache_model_id() писал бы fp32-векторы под
+                # fp16-ключ кэша. (Срабатывает лишь при opt-in fp16 + сбое half.)
+                self._model, self.fp16 = cached
+                return self._model
         from sentence_transformers import SentenceTransformer
-        print(f"[embeddings] загрузка {self.model_name} на {self.device}", flush=True)
+        print(f"[embeddings] загрузка {self.model_name} на {self.device}"
+              f"{' (fp16)' if self.fp16 else ''}", flush=True)
         token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
         # Кэш моделей НЕ задаём параметром: единый каталог определяется HF_HOME
         # (config.py: <данные>/models/hub) — тот же, куда качают setup_models.py
@@ -166,6 +196,21 @@ class Embedder:
             self._model.max_seq_length = self.max_length
         except Exception:
             pass
+        # FP16: половинная точность для инференса на GPU (bge-m3 устойчив к этому).
+        if self.fp16:
+            try:
+                self._model.half()
+            except Exception as e:  # noqa: BLE001
+                print(f"[embeddings] fp16 не применён ({e}) — остаюсь в fp32", flush=True)
+                self.fp16 = False
+        # ВАЖНО: кладём модель под ТЕМ ЖЕ ключом, по которому искали (key выше).
+        # Если .half() упал и self.fp16 стал False, пересчёт self._model_key()
+        # дал бы другой ключ — будущие Embedder (с fp16=True) не нашли бы модель
+        # в реестре и грузили бы её заново. Фиксируем ключ один раз.
+        # Значение — кортеж (модель, фактический fp16), чтобы повторные экземпляры
+        # узнали реальную точность (см. восстановление при cache-hit выше).
+        with _MODEL_LOCK:
+            _MODELS[key] = (self._model, self.fp16)
         return self._model
 
     @property
@@ -183,6 +228,14 @@ class Embedder:
         if self._cache is None:
             self._cache = _EmbCache(self.dim)
         return self._cache
+
+    def _cache_model_id(self) -> str:
+        """Идентификатор модели для ключа дискового кэша эмбеддингов.
+
+        Включает fp16, чтобы векторы half- и full-точности НЕ сталкивались в
+        кэше (иначе один и тот же текст мог вернуть fp32-вектор из кэша или
+        fp16 при промахе — рассинхрон точности запрос/документ)."""
+        return f"{self.model_name}|fp16" if self.fp16 else self.model_name
 
     def _encode(self, texts: list[str]) -> np.ndarray:
         model = self._load()
@@ -213,7 +266,8 @@ class Embedder:
         if not use_cache:
             return self._encode(texts)
         cache = self._cache_obj()
-        keys = [cache.key(self.model_name, t) for t in texts]
+        mid = self._cache_model_id()
+        keys = [cache.key(mid, t) for t in texts]
         have = cache.get_many(list(dict.fromkeys(keys)))
         miss_idx = [i for i, k in enumerate(keys) if k not in have]
         if miss_idx:
