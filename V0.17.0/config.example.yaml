@@ -1,0 +1,87 @@
+# ============================================================
+#  ПМООС-RAG — пример конфигурации (config.yaml)
+#  Положите отредактированный файл в  ~/.pmoos-rag/config.yaml
+#  (каталог данных PMOOS_DATA_DIR). Ключи API сюда НЕ пишем — они в .env.
+#
+#  ВАЖНО про модели: значения answer/review/extract/expand — это имена
+#  моделей на момент написания. Проверьте и при необходимости замените
+#  на актуальные у вашего провайдера. Роли:
+#    answer/review  — максимальное КАЧЕСТВО (ответы и проверка);
+#    extract/expand — дешёвые операции (парсинг, классификация, перефраз).
+#
+#  Авто-смена модели: при смене провайдера модель подбирается автоматически
+#  по этой таблице. Можно переопределить провайдер для модуля в секции
+#  ai.modules, напр.:  ai: { modules: { module4: { provider: gemini } } }
+# ============================================================
+
+object_type: площадной
+ai:
+  default_provider: deepseek
+  providers:
+    deepseek:
+      base_url: https://api.deepseek.com
+      answer: deepseek-reasoner
+      review: deepseek-reasoner
+      extract: deepseek-chat
+      expand: deepseek-chat
+      supports_json_mode: true
+    openai:
+      base_url: https://api.openai.com/v1
+      answer: gpt-4o
+      review: gpt-4o
+      extract: gpt-4o-mini
+      expand: gpt-4o-mini
+      supports_json_mode: true
+    gemini:
+      base_url: ''
+      answer: gemini-1.5-pro
+      review: gemini-1.5-pro
+      extract: gemini-1.5-flash
+      expand: gemini-1.5-flash
+      supports_json_mode: true
+    anthropic:
+      base_url: https://api.anthropic.com
+      answer: claude-3-5-sonnet-latest
+      review: claude-3-5-sonnet-latest
+      extract: claude-3-5-haiku-latest
+      expand: claude-3-5-haiku-latest
+      supports_json_mode: false
+    ollama:
+      base_url: http://localhost:11434
+      answer: qwen2.5:7b-instruct
+      review: qwen2.5:7b-instruct
+      extract: qwen2.5:7b-instruct
+      expand: qwen2.5:7b-instruct
+      supports_json_mode: true
+  modules: {}
+  concurrency: 4
+  temperature: 0.1
+  max_tokens: 4096
+  use_cache: true
+embedding:
+  model: BAAI/bge-m3
+  device: auto
+  batch_size: 16
+  use_safetensors: true
+  max_length: 1024
+reranker:
+  enabled: true
+  model: BAAI/bge-reranker-v2-m3
+retrieval:
+  top_k: 8
+  candidates: 40
+  use_bm25: true
+  use_rerank: true
+  use_query_expansion: true
+  expansions: 3
+chunking:
+  size: 1200
+  overlap: 200
+  min_chunk: 80
+qdrant:
+  mode: embedded
+  url: http://localhost:6333
+ocr:
+  enabled: true
+  min_text_chars: 200
+  lang: rus+eng

@@ -1,0 +1,53 @@
+# PMOOS-RAG dependencies.
+# NOTE: this file is intentionally ASCII-only. pip on Russian Windows reads
+# requirements.txt with the cp1251 locale codec, and non-ASCII (Cyrillic)
+# comments make pip crash with UnicodeDecodeError before any download.
+#
+# IMPORTANT: PyTorch is installed SEPARATELY and FIRST (see install.bat) from
+# the CUDA index:
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# torch is NOT listed here on purpose, so pip does not pull a CPU-only build.
+# torch>=2.6 is required (fixes CVE-2025-32434, safetensors weight loading).
+
+# --- UI / launch ---
+streamlit>=1.49
+
+# --- scientific core (needed by PyTorch/pandas; installed early) ---
+numpy>=1.26,<2.3
+
+# --- RAG: vector DB, embeddings, reranker, hybrid search ---
+# IMPORTANT: transformers/sentence-transformers are PINNED below versions that
+# require torch>=2.7 (newest transformers references torch.float8_e8m0fnu and
+# crashes on torch 2.6 with "Could not import module 'PreTrainedModel'").
+qdrant-client>=1.9
+sentence-transformers>=3.0,<3.4
+transformers>=4.41,<4.50
+huggingface_hub>=0.24,<0.30
+accelerate>=0.30,<1.4
+rank-bm25>=0.2.2
+
+# --- document parsing / OCR ---
+pymupdf>=1.24
+pdfplumber>=0.11
+python-docx>=1.1
+openpyxl>=3.1
+pandas>=2.0
+pytesseract>=0.3.10
+pillow>=10.0
+
+# --- dependency graph and visualization ---
+networkx>=3.2
+pyvis>=0.3.2
+
+# --- configuration / keys ---
+python-dotenv>=1.0
+pyyaml>=6.0
+
+# --- AI providers ---
+openai>=1.30
+anthropic>=0.30
+google-generativeai>=0.7
+requests>=2.31
+
+# --- utilities ---
+tqdm>=4.66

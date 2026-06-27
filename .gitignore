@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# окружение / ключи
+.env
+
+# локальные данные/индексы/модели (хранятся в %USERPROFILE%\.pmoos-rag)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+qdrant/
+models/
+
+# ОС / редакторы
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
