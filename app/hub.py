@@ -1,7 +1,10 @@
-"""ПМООС-RAG v0.17.0 «Faster» — единый интерфейс (Streamlit).
+"""ПМООС-RAG v0.18.0 «Split» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
-Модули также запускаются по отдельности из папки modules/ (CLI).
+Модули также запускаются ОТДЕЛЬНО:
+  • как Streamlit-приложения — run_ui_module.bat или
+    streamlit run app/modules_ui/moduleN.py (переиспользуют функции этого файла);
+  • как CLI — из папки modules/ (run_module.bat).
 
 Здесь учтены требования пользователя:
   #4  — убран «запрос смежникам» (его здесь нет);
@@ -30,7 +33,33 @@ from pmoos.paths import project_paths
 from pmoos.projects import list_projects, register_project
 import app.components as C  # type: ignore
 
-st.set_page_config(page_title="ПМООС-RAG", page_icon="🌍", layout="wide")
+# set_page_config НЕ на уровне модуля: иначе hub.py нельзя импортировать из
+# отдельных модульных приложений (app/modules_ui/*) без побочного эффекта.
+# Вызывается в main() и в каждом модульном приложении ПЕРВОЙ Streamlit-командой.
+PAGE_TITLE = "ПМООС-RAG"
+PAGE_ICON = "🌍"
+
+
+def apply_font_css(cfg) -> None:
+    """Размер шрифта из config (ui.font_size). Вызывать ПОСЛЕ set_page_config."""
+    fs = int(cfg.get("ui.font_size", 19))
+    st.markdown(
+        f"""
+        <style>
+          html, body, [class*="css"], .stMarkdown, .stText, p, li, label,
+          .stTabs [data-baseweb="tab"] {{ font-size: {fs}px !important; }}
+          .stDataFrame, .stTable {{ font-size: {fs - 1}px !important; }}
+          h1 {{ font-size: {fs + 13}px !important; }}
+          h2 {{ font-size: {fs + 7}px !important; }}
+          h3 {{ font-size: {fs + 3}px !important; }}
+          .stButton button, .stDownloadButton button {{ font-size: {fs - 1}px !important; }}
+          section[data-testid="stSidebar"] * {{ font-size: {fs - 2}px !important; }}
+          div[data-testid="stMetricValue"] {{ font-size: {fs + 5}px !important; }}
+          .stSelectbox, .stTextInput input, .stTextArea textarea {{ font-size: {fs - 1}px !important; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ─────────────────────────────── состояние ───────────────────────────────
@@ -747,26 +776,9 @@ def _list_outputs(project: str) -> None:
 
 # ─────────────────────────────── main ───────────────────────────────
 def main() -> None:
+    st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="wide")
     st.session_state["_uid"] = 0  # сброс счётчика ключей на каждый рендер
-    # Размер шрифта настраивается в сайдбаре и хранится в config (ui.font_size).
-    fs = int(_cfg().get("ui.font_size", 19))
-    st.markdown(
-        f"""
-        <style>
-          html, body, [class*="css"], .stMarkdown, .stText, p, li, label,
-          .stTabs [data-baseweb="tab"] {{ font-size: {fs}px !important; }}
-          .stDataFrame, .stTable {{ font-size: {fs - 1}px !important; }}
-          h1 {{ font-size: {fs + 13}px !important; }}
-          h2 {{ font-size: {fs + 7}px !important; }}
-          h3 {{ font-size: {fs + 3}px !important; }}
-          .stButton button, .stDownloadButton button {{ font-size: {fs - 1}px !important; }}
-          section[data-testid="stSidebar"] * {{ font-size: {fs - 2}px !important; }}
-          div[data-testid="stMetricValue"] {{ font-size: {fs + 5}px !important; }}
-          .stSelectbox, .stTextInput input, .stTextArea textarea {{ font-size: {fs - 1}px !important; }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    apply_font_css(_cfg())  # размер шрифта из config (ui.font_size)
     project, object_type = sidebar()
     if not project:
         st.info("Создайте или выберите проект слева, чтобы начать.")
