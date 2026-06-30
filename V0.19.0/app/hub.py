@@ -1,4 +1,4 @@
-"""ПМООС-RAG v0.18.0 «Split» — единый интерфейс (Streamlit).
+"""ПМООС-RAG v0.19.0 «Tuned» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются ОТДЕЛЬНО:

@@ -6,9 +6,41 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from .dependency import load_graph, build_graph, _node_label
+
+# Кэш загруженного графа по mtime graph.json: downstream/explain_cascade
+# вызываются по КАЖДОМУ замечанию (≈150× за прогон М4 на 75 замечаниях), а
+# load_graph читал JSON с диска и заново строил networkx каждый раз.
+_GRAPH_LOCK = threading.Lock()
+_GRAPH_CACHE: dict[str, tuple] = {}
+
+
+def _graph_sig(project: str):
+    from ..paths import project_paths
+    try:
+        return project_paths(project)["graph"].stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _cached_graph(project: str):
+    sig = _graph_sig(project)
+    if sig is None:
+        # graph.json отсутствует → load_graph строит граф на лету из inventory.
+        # НЕ кэшируем: иначе ключ sig=None «залипает» (None==None) и переиндексация
+        # inventory не инвалидирует кэш. Построение на лету дёшево и редко.
+        return load_graph(project)
+    with _GRAPH_LOCK:
+        ent = _GRAPH_CACHE.get(project)
+        if ent is not None and ent[0] == sig:
+            return ent[1]
+    g = load_graph(project)
+    with _GRAPH_LOCK:
+        _GRAPH_CACHE[project] = (sig, g)
+    return g
 
 
 def downstream(project: str, changed_codes: list[str], *, max_depth: int = 5) -> dict[str, Any]:
@@ -22,7 +54,7 @@ def downstream(project: str, changed_codes: list[str], *, max_depth: int = 5) ->
       }
     """
     import networkx as nx
-    g = load_graph(project)
+    g = _cached_graph(project)
     changed = [c for c in changed_codes if c in g]
     affected: dict[str, dict] = {}
 
