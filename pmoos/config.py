@@ -164,7 +164,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "retrieval": {
         "top_k": 8,
-        "candidates": 40,
+        "candidates": 60,  # глубже пул перед реранком (было 40): лучше recall, fp16-реранкер компенсирует стоимость
         "use_bm25": True,
         "use_rerank": True,
         "use_query_expansion": True,

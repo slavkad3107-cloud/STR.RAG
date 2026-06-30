@@ -116,6 +116,7 @@ class _Corpus:
     payloads: list[dict] = field(default_factory=list)
     bm25: Any = None
     by_index: dict = field(default_factory=dict)  # (file, chunk_index) -> {id,text,is_table}
+    tokens: Any = None  # предвычисленные токены для BM25 (персистятся на диск)
 
 
 class HybridRetriever:
@@ -135,12 +136,14 @@ class HybridRetriever:
         except Exception:  # noqa: BLE001
             pass
 
-    def _load_corpus(self, project: str) -> _Corpus:
-        if project in self._corpus_cache:
-            return self._corpus_cache[project]
+    def _corpus_file(self, project: str):
+        from ..paths import project_paths
+        return project_paths(project)["root"] / "bm25_corpus.pkl"
+
+    def _scroll_corpus(self, project: str) -> _Corpus:
+        """Полное чтение коллекции из Qdrant (дорого — только при изменении индекса)."""
         corp = _Corpus()
         try:
-            from qdrant_client.http import models as qm  # noqa: F401
             client = self.store.client()
             name = collection_name(project)
             offset = None
@@ -154,23 +157,78 @@ class HybridRetriever:
                     corp.ids.append(str(p.id))
                     corp.texts.append(pl.get("text", ""))
                     corp.payloads.append(pl)
-                    f = pl.get("file")
-                    ci = pl.get("chunk_index")
-                    if f is not None and ci is not None:
-                        corp.by_index[(f, ci)] = {
-                            "id": str(p.id), "text": pl.get("text", ""),
-                            "is_table": bool(pl.get("is_table")),
-                        }
                 if offset is None:
                     break
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
+        corp.tokens = [_tok(t) for t in corp.texts]
+        return corp
+
+    @staticmethod
+    def _build_by_index(corp: _Corpus) -> None:
+        bx: dict = {}
+        for cid, txt, pl in zip(corp.ids, corp.texts, corp.payloads):
+            f = (pl or {}).get("file")
+            ci = (pl or {}).get("chunk_index")
+            if f is not None and ci is not None:
+                bx[(f, ci)] = {"id": cid, "text": txt, "is_table": bool(pl.get("is_table"))}
+        corp.by_index = bx
+
+    def _build_bm25(self, corp: _Corpus) -> None:
+        if corp.tokens is None:
+            corp.tokens = [_tok(t) for t in corp.texts]
         if corp.texts and self.cfg.get("retrieval.use_bm25", True):
             try:
                 from rank_bm25 import BM25Okapi
-                corp.bm25 = BM25Okapi([_tok(t) for t in corp.texts])
-            except Exception:
+                corp.bm25 = BM25Okapi(corp.tokens)
+            except Exception:  # noqa: BLE001
                 corp.bm25 = None
+
+    def _load_corpus(self, project: str) -> _Corpus:
+        """BM25-корпус с ПЕРСИСТЕНТНЫМ кэшем (оптимизация М4).
+
+        Раньше при каждом запуске пайплайна корпус собирался scroll'ом ВСЕЙ
+        коллекции Qdrant + полной токенизацией. Теперь ids/texts/payloads/tokens
+        кэшируются на диск (root/bm25_corpus.pkl); инвалидация — по числу точек
+        в коллекции (store.count): индекс не менялся → читаем с диска без scroll.
+        """
+        if project in self._corpus_cache:
+            return self._corpus_cache[project]
+        try:
+            count = int(self.store.count(project))
+        except Exception:  # noqa: BLE001
+            count = -1
+
+        corp: _Corpus | None = None
+        fp = self._corpus_file(project)
+        if count > 0 and fp.exists():
+            try:
+                import pickle
+                data = pickle.loads(fp.read_bytes())
+                if (data.get("count") == count and isinstance(data.get("ids"), list)
+                        and len(data["ids"]) == count):
+                    corp = _Corpus(ids=data["ids"], texts=data["texts"],
+                                   payloads=data["payloads"], tokens=data.get("tokens"))
+            except Exception:  # noqa: BLE001
+                corp = None
+
+        if corp is None:  # промах кэша / индекс изменился → читаем Qdrant и сохраняем
+            corp = self._scroll_corpus(project)
+            if corp.ids:
+                try:
+                    import pickle
+                    fp.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = fp.with_suffix(".pkl.tmp")
+                    tmp.write_bytes(pickle.dumps({
+                        "count": len(corp.ids), "ids": corp.ids, "texts": corp.texts,
+                        "payloads": corp.payloads, "tokens": corp.tokens,
+                    }))
+                    tmp.replace(fp)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        self._build_by_index(corp)
+        self._build_bm25(corp)
         self._corpus_cache[project] = corp
         return corp
 

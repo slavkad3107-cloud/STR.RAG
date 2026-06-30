@@ -75,6 +75,40 @@ def collect_emissions(project: str) -> tuple[list[dict], dict]:
     return rows, {"g_s_found": gs_vals, "t_year_found": ty_vals, "quantities": quantities}
 
 
+_ZV_CODE_RE = re.compile(r"^\d{1,4}$")  # код ЗВ — числовой, обычно 3–4 знака
+
+
+def validate_pollutants(rows: list[dict]) -> dict:
+    """Валидация кодов ЗВ перед выгрузкой (оптимизация М6).
+
+    Коды берутся из реестра ЗВ, но перед отправкой в УПРЗА проверяем непустоту,
+    числовой формат кода и дубли — частые причины отклонений/ошибок ввода.
+    Аннотирует каждую строку полем 'status' (in place) и возвращает сводку.
+    """
+    seen: dict[str, int] = {}
+    problems: list[str] = []
+    for r in rows:
+        code = str(r.get("code") or "").strip()
+        # find_pollutants отдаёт '—' для ЗВ без кода в реестре — это «нет кода», а не формат
+        if not code or code == "—":
+            r["status"] = "проверить: нет кода"
+            problems.append(f"«{r.get('name', '?')}» — код ЗВ не определён")
+        elif not _ZV_CODE_RE.match(code):
+            r["status"] = "проверить: формат кода"
+            problems.append(f"«{r.get('name', '?')}» — необычный код «{code}»")
+        else:
+            r["status"] = "ok"
+        seen[code] = seen.get(code, 0) + 1
+    dups = sorted(c for c, n in seen.items() if c and c != "—" and n > 1)
+    for r in rows:
+        if str(r.get("code") or "").strip() in dups and r.get("status") == "ok":
+            r["status"] = "проверить: дубль кода"
+    for c in dups:
+        problems.append(f"код {c} встречается несколько раз")
+    ok = sum(1 for r in rows if r.get("status") == "ok")
+    return {"ok": ok, "to_check": len(rows) - ok, "problems": problems, "duplicates": dups}
+
+
 # ─────────────────────────────── запись файлов ───────────────────────────────
 def _write_sources_csv(path: Path) -> None:
     headers = [
@@ -91,18 +125,19 @@ def _write_sources_csv(path: Path) -> None:
 
 
 def _write_pollutants_csv(path: Path, rows: list[dict]) -> None:
-    headers = ["Код_ЗВ", "Наименование_ЗВ", "Выброс_г_с", "Выброс_т_год", "N_источника"]
+    headers = ["Код_ЗВ", "Наименование_ЗВ", "Выброс_г_с", "Выброс_т_год", "N_источника", "Статус"]
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(headers)
         if not rows:
-            w.writerow(["—", "ЗВ не распознаны — заполните вручную по таблице выбросов ПМООС", "", "", ""])
+            w.writerow(["—", "ЗВ не распознаны — заполните вручную по таблице выбросов ПМООС", "", "", "", ""])
             return
         for r in rows:
-            w.writerow([r["code"], r["name"], r["g_s"], r["t_year"], ""])
+            w.writerow([r["code"], r["name"], r["g_s"], r["t_year"], "", r.get("status", "")])
 
 
-def _write_task_txt(path: Path, project: str, rows: list[dict], extra: dict) -> None:
+def _write_task_txt(path: Path, project: str, rows: list[dict], extra: dict,
+                    validation: dict | None = None) -> None:
     lines = [
         "ЗАДАНИЕ НА ВНЕСЕНИЕ ДАННЫХ В УПРЗА «ЭКОЛОГ» / ИНТЕГРАЛ",
         "=" * 60,
@@ -131,6 +166,15 @@ def _write_task_txt(path: Path, project: str, rows: list[dict], extra: dict) -> 
     else:
         lines.append("  (не распознано автоматически — заполните вручную)")
 
+    if validation:
+        lines += [
+            "",
+            f"ПРОВЕРКА КОДОВ ЗВ: ок — {validation.get('ok', 0)}, "
+            f"требуют проверки — {validation.get('to_check', 0)}.",
+        ]
+        for prob in validation.get("problems", [])[:30]:
+            lines.append(f"  ⚠ {prob}")
+
     if extra.get("g_s_found") or extra.get("t_year_found"):
         lines += [
             "",
@@ -149,6 +193,7 @@ def _write_task_txt(path: Path, project: str, rows: list[dict], extra: dict) -> 
 def build_uprza_export(project: str) -> dict[str, Path]:
     """Сформировать выгрузку для УПРЗА. Возвращает словарь путей."""
     rows, extra = collect_emissions(project)
+    validation = validate_pollutants(rows)  # аннотирует rows полем status (М6)
     out_dir = project_paths(project)["out"]
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -158,6 +203,6 @@ def build_uprza_export(project: str) -> dict[str, Path]:
 
     _write_sources_csv(src)
     _write_pollutants_csv(pol, rows)
-    _write_task_txt(task, project, rows, extra)
+    _write_task_txt(task, project, rows, extra, validation)
 
     return {"istochniki": src, "vybrosy": pol, "zadanie": task}
