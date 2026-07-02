@@ -14,7 +14,7 @@ goto GO
 :ACTLOCAL
 call .venv\Scripts\activate.bat
 :GO
-echo Starting PMOOS-RAG ... a browser tab will open.
+echo Starting STROYPROEKT ... a browser tab will open.
 echo To stop: press Ctrl+C in this window.
 streamlit run app\hub.py
 pause

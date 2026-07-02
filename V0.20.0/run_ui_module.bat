@@ -13,7 +13,7 @@ goto MENU
 call .venv\Scripts\activate.bat
 :MENU
 echo ============================================================
-echo   PMOOS-RAG - run a single MODULE as a Streamlit app
+echo   STROYPROEKT - run a single MODULE as a Streamlit app
 echo   For the full app use run.bat
 echo ============================================================
 echo   1 - Module 1: systematize project docs
