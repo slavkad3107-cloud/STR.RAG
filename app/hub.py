@@ -1,4 +1,4 @@
-"""ПМООС-RAG v0.19.0 «Tuned» — единый интерфейс (Streamlit).
+"""СтройПроект v0.20.0 «Rebrand» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются ОТДЕЛЬНО:
@@ -36,7 +36,7 @@ import app.components as C  # type: ignore
 # set_page_config НЕ на уровне модуля: иначе hub.py нельзя импортировать из
 # отдельных модульных приложений (app/modules_ui/*) без побочного эффекта.
 # Вызывается в main() и в каждом модульном приложении ПЕРВОЙ Streamlit-командой.
-PAGE_TITLE = "ПМООС-RAG"
+PAGE_TITLE = "СтройПроект"
 PAGE_ICON = "🌍"
 
 
@@ -89,7 +89,7 @@ def _save_uploads(project: str, files) -> int:
 
 # ─────────────────────────────── сайдбар ───────────────────────────────
 def sidebar() -> tuple[str, str]:
-    st.sidebar.title("🌍 ПМООС-RAG")
+    st.sidebar.title("🌍 СтройПроект")
     st.sidebar.caption(f"v{__version__} «{__codename__}»")
 
     projects = list_projects()

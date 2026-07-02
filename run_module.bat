@@ -19,7 +19,7 @@ if not "%~1"=="" goto DIRECT
 
 :MENU
 echo ============================================================
-echo   PMOOS-RAG - run a single module (CLI)
+echo   STROYPROEKT - run a single module (CLI)
 echo   For normal work use run.bat (the app). This is advanced.
 echo ============================================================
 echo   1 - Module 1: systematize project docs (inventory)

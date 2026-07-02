@@ -572,7 +572,7 @@ def progress_summary(project: str) -> dict:
 
 def _main() -> int:
     import argparse
-    ap = argparse.ArgumentParser(description="Фоновая индексация PMOOS-RAG")
+    ap = argparse.ArgumentParser(description="Фоновая индексация STROYPROEKT")
     ap.add_argument("--project", required=True)
     ap.add_argument("--object-type", default=None)
     ap.add_argument("--prefetch-models", action="store_true",

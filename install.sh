@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# PMOOS-RAG v0.15.0 — установка (Linux/macOS), устойчивая к медленной сети.
+# STROYPROEKT — установка (Linux/macOS), устойчивая к медленной сети.
 set -e
-echo "=== PMOOS-RAG v0.15.0 — установка ==="
+echo "=== STROYPROEKT — установка ==="
 command -v python3 >/dev/null 2>&1 || { echo "Python 3 не найден"; exit 1; }
 export PIP_DEFAULT_TIMEOUT=120
 

@@ -33,10 +33,10 @@ from .common import (
 
 
 def _add_intro(doc: Document, project: str, object_type: str, n_corr: int, accepted_only: bool) -> None:
-    from .. import __version__
+    from .. import VERSION
     p = doc.add_paragraph()
     run = p.add_run(
-        f"Документ сформирован автоматически системой ПМООС-RAG v{__version__} «Modular» "
+        f"Документ сформирован автоматически системой {VERSION} "
         f"{datetime.now().strftime('%d.%m.%Y %H:%M')}. "
         f"Проект: «{project}». Тип объекта: {object_type}. "
     )
