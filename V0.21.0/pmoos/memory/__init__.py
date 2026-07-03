@@ -101,6 +101,62 @@ def _invalidate_cache() -> None:
     только на (mtime, size) — после записи в record_one явно сбрасываем сигнатуру."""
     with _RECORDS_LOCK:
         _RECORDS_CACHE["sig"] = object()
+        _VEC_CACHE["sig"] = object()
+
+
+# --- векторный поиск похожих замечаний (v0.21) -------------------------------
+# Лексический Jaccard плохо ловит перефразированные замечания. Семантический
+# поиск через bge-m3 (модель уже загружена ретривером М4, эмбеддинги идут через
+# общий дисковый кэш — повторные прогоны почти бесплатны). Мягкая деградация:
+# любая ошибка → прежний лексический путь.
+_VEC_CACHE: dict[str, Any] = {"sig": object(), "vecs": None}
+
+
+def _kb_vectors(records: list[dict]):
+    """Эмбеддинги замечаний базы; пересчёт только при изменении базы."""
+    from ..config import load_config
+    from ..index.embeddings import Embedder
+    with _RECORDS_LOCK:
+        sig = _RECORDS_CACHE["sig"]
+        if _VEC_CACHE["sig"] == sig and _VEC_CACHE["vecs"] is not None:
+            return _VEC_CACHE["vecs"]
+    emb = Embedder(load_config())
+    vecs = emb.embed([r.get("remark", "") for r in records])  # нормированные
+    with _RECORDS_LOCK:
+        _VEC_CACHE.update(sig=sig, vecs=vecs)
+    return vecs
+
+
+def _semantic_similar(remark_text: str, *, k: int, exclude_project: str | None,
+                      min_sim: float) -> list[dict] | None:
+    """Топ-k по косинусной близости bge-m3. None → семантика выключена."""
+    from ..config import load_config
+    cfg = load_config()
+    if not cfg.get("memory.semantic", True):
+        return None
+    records, _ = _load_cached()
+    if not records:
+        return []
+    from ..index.embeddings import Embedder
+    vecs = _kb_vectors(records)
+    qv = Embedder(cfg).embed([remark_text])[0]
+    sims = vecs @ qv  # векторы нормированы → dot = cosine
+    rt_low = (remark_text or "").strip().lower()
+    scored: list[tuple[float, dict]] = []
+    for r, s in zip(records, sims):
+        if exclude_project and r.get("project") == exclude_project:
+            continue
+        if r.get("remark", "").strip().lower() == rt_low:
+            continue
+        if float(s) >= min_sim:
+            scored.append((float(s), r))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    out = []
+    for score, r in scored[:k]:
+        rr = dict(r)
+        rr["score"] = round(score, 3)
+        out.append(rr)
+    return out
 
 
 def kb_size() -> int:
@@ -181,7 +237,20 @@ def record_accepted(project: str) -> int:
 
 def similar_past(remark_text: str, *, k: int = 2, exclude_project: str | None = None,
                  min_score: float = 0.12) -> list[dict]:
-    """Топ-k похожих принятых замечаний из прошлых проектов (лексическая близость)."""
+    """Топ-k похожих принятых замечаний из прошлых проектов.
+
+    Сначала семантический поиск (bge-m3, конфиг memory.semantic, порог
+    memory.min_sim); при выключенной семантике или любой ошибке — прежний
+    лексический Jaccard (работает без GPU/моделей)."""
+    try:
+        from ..config import load_config
+        min_sim = float(load_config().get("memory.min_sim", 0.45))
+        sem = _semantic_similar(remark_text, k=k, exclude_project=exclude_project,
+                                min_sim=min_sim)
+        if sem is not None:
+            return sem
+    except Exception:  # noqa: BLE001
+        pass  # мягкая деградация на лексический путь
     q = _tokens(remark_text)
     if not q:
         return []

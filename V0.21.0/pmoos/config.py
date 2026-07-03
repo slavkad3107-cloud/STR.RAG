@@ -138,6 +138,9 @@ DEFAULT_AI: dict[str, Any] = {
     "max_tokens": 4096,
     "use_cache": True,         # кэш ответов ИИ на диск
     "json_repair_retry": True, # один повтор «верни ТОЛЬКО JSON» при сбое парсинга
+    # Резервный провайдер при сбое основного (сеть/лимиты/API): например "ollama"
+    # (локально, без ключа) или "openai". Пусто = выключено.
+    "fallback_provider": "",
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -175,7 +178,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "chunking": {"size": 1200, "overlap": 200, "min_chunk": 80},
     "qdrant": {"mode": "embedded", "url": "http://localhost:6333"},
-    "memory": {"enabled": True, "k": 2},
+    "memory": {
+        "enabled": True,
+        "k": 2,
+        "semantic": True,   # поиск похожих замечаний эмбеддингами bge-m3 (иначе Jaccard)
+        "min_sim": 0.45,    # порог косинусной близости для few-shot примеров
+    },
     "ocr": {"enabled": True, "min_text_chars": 200, "lang": "rus+eng"},
 }
 
