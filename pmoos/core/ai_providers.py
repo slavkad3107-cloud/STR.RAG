@@ -161,19 +161,12 @@ def _ollama(base_url: str, model: str, messages: list[Message],
 
 
 # --- публичный API ----------------------------------------------------------
-def chat(cfg: Config, messages: list[Message], *, module: str | None = None,
-         role: str = "answer", provider: str | None = None, model: str | None = None,
-         temperature: float | None = None, max_tokens: int | None = None,
-         json_mode: bool = False, use_cache: bool | None = None) -> str:
-    """Главная точка вызова ИИ. Провайдер/модель определяются автоматически
-    под модуль (model_for/resolve_provider), если не заданы явно."""
-    provider = provider or cfg.resolve_provider(module)
+def _chat_once(cfg: Config, messages: list[Message], *, provider: str, role: str,
+               model: str | None, temperature: float, max_tokens: int,
+               json_mode: bool, use_cache: bool) -> str:
+    """Одна попытка вызова конкретного провайдера (без fallback)."""
     model = model or cfg.model_for(provider, role)
-    temperature = cfg.get("ai.temperature", 0.1) if temperature is None else temperature
-    max_tokens = cfg.get("ai.max_tokens", 4096) if max_tokens is None else max_tokens
-    use_cache = cfg.get("ai.use_cache", True) if use_cache is None else use_cache
     json_mode = json_mode and cfg.supports_json_mode(provider)
-
     if not model:
         raise LLMError(f"Не задана модель для провайдера '{provider}' (роль '{role}')")
     if not cfg.has_key(provider):
@@ -205,6 +198,39 @@ def chat(cfg: Config, messages: list[Message], *, module: str | None = None,
     if use_cache and out:
         _cache_put(key, out)
     return out
+
+
+def chat(cfg: Config, messages: list[Message], *, module: str | None = None,
+         role: str = "answer", provider: str | None = None, model: str | None = None,
+         temperature: float | None = None, max_tokens: int | None = None,
+         json_mode: bool = False, use_cache: bool | None = None) -> str:
+    """Главная точка вызова ИИ. Провайдер/модель определяются автоматически
+    под модуль (model_for/resolve_provider), если не заданы явно.
+
+    Fallback-цепочка (v0.21): если основной провайдер упал (сеть/лимиты/API),
+    ОДИН повтор через резервный из ai.fallback_provider (пусто = выключено).
+    Модель резервного берётся его же настройкой той же роли. Явно заданный
+    аргументом provider тоже страхуется (fallback — не для случая «нет ключа
+    у самого fallback» и не когда fallback совпадает с основным)."""
+    provider = provider or cfg.resolve_provider(module)
+    temperature = cfg.get("ai.temperature", 0.1) if temperature is None else temperature
+    max_tokens = cfg.get("ai.max_tokens", 4096) if max_tokens is None else max_tokens
+    use_cache = cfg.get("ai.use_cache", True) if use_cache is None else use_cache
+
+    try:
+        return _chat_once(cfg, messages, provider=provider, role=role, model=model,
+                          temperature=temperature, max_tokens=max_tokens,
+                          json_mode=json_mode, use_cache=use_cache)
+    except Exception as e:  # noqa: BLE001
+        fb = str(cfg.get("ai.fallback_provider", "") or "").strip()
+        if not fb or fb == provider or not cfg.has_key(fb):
+            raise
+        print(f"[ai] провайдер '{provider}' недоступен ({e}) — повтор через '{fb}'",
+              flush=True)
+        # модель основного к резервному не применима — резервный берёт свою (role)
+        return _chat_once(cfg, messages, provider=fb, role=role, model=None,
+                          temperature=temperature, max_tokens=max_tokens,
+                          json_mode=json_mode, use_cache=use_cache)
 
 
 def chat_json(cfg: Config, messages: list[Message], *, expect: str = "auto", **kw) -> Any:

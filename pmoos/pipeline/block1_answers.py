@@ -203,6 +203,31 @@ def run_block1(project: str, cfg: Config | None = None, *,
     results = batch_chat(cfg, jobs, processor=_process, module="module4",
                          role="answer", json_mode=True)
 
+    # JSON-повтор в ПАКЕТНОМ пути (v0.21): если вызов прошёл (ok), но JSON не
+    # распарсился (пустой result) — один batch-повтор с жёсткой инструкцией,
+    # без кэша. Раньше такой повтор был только в одиночном chat_json, и битый
+    # JSON в батче давал пустой ответ на замечание.
+    if cfg.get("ai.json_repair_retry", True):
+        bad = [i for i, res in enumerate(results)
+               if res.get("ok") and not res.get("result")]
+        if bad:
+            if progress:
+                progress(0, len(bad), f"Повтор JSON для {len(bad)} ответов…")
+            retry_jobs = []
+            for i in bad:
+                retry_jobs.append(list(jobs[i]) + [{
+                    "role": "user",
+                    "content": ("Твой предыдущий ответ не распарсился как JSON-объект. "
+                                "Верни ТОЛЬКО JSON-объект по требуемой схеме — без "
+                                "markdown, без ```-ограждений и без пояснений."),
+                }])
+            retry_res = batch_chat(cfg, retry_jobs, processor=_process,
+                                   module="module4", role="answer",
+                                   json_mode=True, use_cache=False)
+            for i, rr in zip(bad, retry_res):
+                if rr.get("ok") and rr.get("result"):
+                    results[i] = rr
+
     # 4) сборка ответов + consistency + cascade
     answers = []
     for idx, (r, (srcs, hits)) in enumerate(zip(remarks, ctx_sources)):
