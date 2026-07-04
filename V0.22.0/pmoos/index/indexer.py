@@ -440,6 +440,8 @@ def start_background(project: str, *, object_type: str | None = None) -> int:
     args = [sys.executable, "-m", "pmoos.index.indexer", "--project", project]
     if object_type:
         args += ["--object-type", object_type]
+    logf.write(f"команда: {' '.join(args)}\nрабочая папка: {APP_ROOT}\n".encode("utf-8"))
+    logf.flush()
     kwargs: dict[str, Any] = {"env": env, "cwd": str(APP_ROOT),
                               "stdout": logf, "stderr": logf}
     if os.name == "nt":
@@ -447,7 +449,20 @@ def start_background(project: str, *, object_type: str | None = None) -> int:
         kwargs["creationflags"] = 0x00000200 | 0x00000008
     else:
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen(args, **kwargs)
+    try:
+        proc = subprocess.Popen(args, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        # Запуск дочернего python не удался (антивирус/права/битый venv) — раньше
+        # это выглядело как «индексация не запускается» без причины.
+        err = f"Не удалось запустить фоновый процесс: {e}"
+        logf.write((err + "\n").encode("utf-8")); logf.close()
+        st = read_state(project)
+        st.update({"status": "error", "pid": 0,
+                   "message": err + " Частые причины: антивирус блокирует запуск "
+                              "python из этой папки, или окружение venv повреждено "
+                              "(повторите install.bat). Команда — в журнале."})
+        write_state(project, st)
+        return 0
     logf.close()  # дескриптор унаследован дочерним процессом
 
     # Дописываем pid в АКТУАЛЬНОЕ состояние, не затирая сообщений ребёнка.

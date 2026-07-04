@@ -176,6 +176,22 @@ def classify_filename(filename: str, object_type: str = "площадной", to
                 sc += 3.0
         if sc:
             scores[code] = sc
+
+    # «Раздел N[.M]» по НОМЕРУ ПП-87 (файлы часто называются «Раздел 3.1.1 …»
+    # без аббревиатур — раньше такие уходили в UNKNOWN). Точный номер ценнее;
+    # если точного нет в составе — поднимаемся к родителю (3.1.1 → 3.1 → 3).
+    m = re.search(r"(?:под)?раздел[аы]?\s*№?\s*(\d+(?:\.\d+)*)", name)
+    if m:
+        by_num = {s["num"]: s["code"] for s in required_sections(object_type)}
+        probe, bonus = m.group(1), 6.0
+        while probe:
+            code = by_num.get(probe)
+            if code:
+                scores[code] = scores.get(code, 0.0) + bonus
+                break
+            probe = probe.rsplit(".", 1)[0] if "." in probe else ""
+            bonus = 4.0
+
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:top]
     names = all_sections()
     return [{"code": c, "score": round(s, 1),
