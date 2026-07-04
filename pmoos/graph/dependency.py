@@ -116,16 +116,30 @@ def load_graph(project: str):
 
 
 def to_vis(g) -> dict[str, Any]:
-    """Узлы/рёбра для визуализации (pyvis/streamlit-agraph)."""
+    """Узлы/рёбра для визуализации (pyvis/streamlit-agraph).
+
+    Информативность (редизайн v0.22): размер узла = число связей (важность),
+    ПМООС выделен отдельным цветом (это целевой раздел), в тултипе — полное
+    название, статус в проекте и связи словами."""
     nodes = []
     for n, attrs in g.nodes(data=True):
+        deg_in, deg_out = g.in_degree(n), g.out_degree(n)
+        is_oos = (n == "OOS")
+        present = attrs.get("present", False)
+        color = ("#d84315" if is_oos else            # ПМООС — целевой раздел
+                 "#2e7d32" if present else            # есть в проекте
+                 "#9e9e9e")                           # нет данных
+        title = (f"{attrs.get('label', n)}\n"
+                 f"{'✔ есть в проекте' if present else '— файлов нет'}\n"
+                 f"даёт данные: {deg_out} разд. · использует: {deg_in} разд.")
         nodes.append({
             "id": n,
             "label": attrs.get("label", n),
             "group": attrs.get("kind", "section"),
-            "present": attrs.get("present", False),
-            "color": "#2e7d32" if attrs.get("present") else (
-                "#9e9e9e" if attrs.get("kind") == "section" else "#1565c0"),
+            "present": present,
+            "color": color,
+            "size": 14 + 3 * (deg_in + deg_out),
+            "title": title,
         })
     edges = [{"from": u, "to": v, "title": d.get("data", ""), "arrows": "to"}
              for u, v, d in g.edges(data=True)]
@@ -156,12 +170,29 @@ def write_vis_html(project: str, vis: dict | None = None) -> str:
             f"<html><meta charset='utf-8'><body><h2>Связи разделов: {project}</h2>"
             f"<ul>{rows}</ul></body></html>", encoding="utf-8")
         return str(path)
-    net = Network(height="600px", width="100%", directed=True, notebook=False)
-    net.barnes_hut()
+    net = Network(height="620px", width="100%", directed=True, notebook=False)
+    net.barnes_hut(gravity=-2500, central_gravity=0.25, spring_length=140)
     for n in vis["nodes"]:
         net.add_node(n["id"], label=n["label"], color=n["color"],
-                     title=f"{n['label']} ({'присутствует' if n['present'] else 'нет данных'})")
+                     size=n.get("size", 16),
+                     title=n.get("title") or n["label"])
     for e in vis["edges"]:
         net.add_edge(e["from"], e["to"], title=e.get("title", ""), arrows="to")
     net.write_html(str(path), notebook=False, open_browser=False)
+    # Легенда поверх графа (pyvis сам её не умеет) — вставляем в готовый HTML.
+    legend = (
+        "<div style='position:absolute;top:8px;left:8px;z-index:10;"
+        "background:rgba(255,255,255,.92);border:1px solid #ccc;border-radius:8px;"
+        "padding:8px 12px;font:13px sans-serif'>"
+        "<b>Граф связей разделов</b> · стрелка: «даёт данные →»<br>"
+        "<span style='color:#d84315'>⬤</span> ПМООС (целевой) &nbsp;"
+        "<span style='color:#2e7d32'>⬤</span> есть в проекте &nbsp;"
+        "<span style='color:#9e9e9e'>⬤</span> файлов нет<br>"
+        "размер узла = число связей · наведите курсор для деталей</div>")
+    try:
+        html = path.read_text(encoding="utf-8")
+        html = html.replace("<body>", "<body>" + legend, 1)
+        path.write_text(html, encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
     return str(path)
