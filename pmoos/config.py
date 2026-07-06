@@ -176,7 +176,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "context_neighbors": 1,    # сколько соседей с каждой стороны
         "merge_tables": True,      # склеивать подряд идущие табличные чанки в таблицу
     },
-    "chunking": {"size": 1200, "overlap": 200, "min_chunk": 80},
+    "chunking": {
+        "size": 1200, "overlap": 200, "min_chunk": 80,
+        # режим нарезки: "char" (по умолчанию, как было) | "semantic" (по пунктам
+        # НПА, ~target_tokens токенов bge-m3). Переключение требует ПЕРЕИНДЕКСАЦИИ
+        # (кнопка «Переиндексировать заново» в М2). A/B: scripts/eval_golden.py run до/после.
+        "mode": "char",
+        "target_tokens": 512,
+        "chars_per_token": 3.2,
+    },
     "qdrant": {"mode": "embedded", "url": "http://localhost:6333"},
     "memory": {
         "enabled": True,

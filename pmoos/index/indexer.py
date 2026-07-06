@@ -221,11 +221,16 @@ def _iter_source_files(upload_dir: Path) -> list[Path]:
     return files
 
 
-def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | None = None) -> dict:
+def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | None = None,
+                 reindex: bool = False) -> dict:
     """Синхронная индексация (вызывается в фоновом процессе или напрямую).
 
     Переиндексация безопасна: уже загруженные документы (по doc_sha) пропускаются,
     ID чанков детерминированы, поэтому повторная загрузка не плодит дубли.
+
+    reindex=True — переиндексация «с нуля»: коллекция Qdrant удаляется и все файлы
+    обрабатываются заново (нужно при смене режима чанкинга — иначе дедуп по
+    doc_sha пропустил бы все файлы, и новый чанкинг не применился бы).
     """
     from ..ingest.sections import classify_filename, detect_version_hint
     from ..ingest.loaders import extract_file
@@ -292,6 +297,15 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
         embedder = Embedder(cfg)
         _ = embedder.dim  # триггерим фактическую загрузку модели здесь, под try
         store = VectorStore(cfg, dim=embedder.dim)
+        if reindex:
+            dropped = store.drop_collection(project)
+            print(f"[indexer] переиндексация с нуля: коллекция "
+                  f"{'удалена' if dropped else 'отсутствовала'}", flush=True)
+            state["files"] = {}          # снять отметки «done/skipped» — обработать всё заново
+            state["done_files"] = 0
+            state["total_chunks"] = 0
+            state["done_chunks"] = 0
+            write_state(project, state)
         store.ensure_collection(project)
         known_shas = store.existing_doc_shas(project)
     except Exception as e:  # noqa: BLE001
@@ -368,6 +382,9 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                     size=cfg.get("chunking.size", 1200),
                     overlap=cfg.get("chunking.overlap", 200),
                     min_chunk=cfg.get("chunking.min_chunk", 80),
+                    mode=str(cfg.get("chunking.mode", "char")),
+                    target_tokens=int(cfg.get("chunking.target_tokens", 512)),
+                    chars_per_token=float(cfg.get("chunking.chars_per_token", 3.2)),
                 )
                 if chunks:
                     vectors = embedder.embed_documents([c["text"] for c in chunks])
@@ -400,7 +417,8 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
         return state
 
 
-def start_background(project: str, *, object_type: str | None = None) -> int:
+def start_background(project: str, *, object_type: str | None = None,
+                     reindex: bool = False) -> int:
     """Запускает индексацию отдельным detached-процессом.
 
     Процесс продолжит работу даже если вкладка Streamlit закрыта. Для
@@ -440,6 +458,8 @@ def start_background(project: str, *, object_type: str | None = None) -> int:
     args = [sys.executable, "-m", "pmoos.index.indexer", "--project", project]
     if object_type:
         args += ["--object-type", object_type]
+    if reindex:
+        args += ["--reindex"]
     logf.write(f"команда: {' '.join(args)}\nрабочая папка: {APP_ROOT}\n".encode("utf-8"))
     logf.flush()
     kwargs: dict[str, Any] = {"env": env, "cwd": str(APP_ROOT),
@@ -592,6 +612,9 @@ def _main() -> int:
     ap.add_argument("--object-type", default=None)
     ap.add_argument("--prefetch-models", action="store_true",
                     help="Скачать все локальные модели (эмбеддер + reranker) и выйти")
+    ap.add_argument("--reindex", action="store_true",
+                    help="Переиндексация с нуля: удалить коллекцию и обработать всё заново "
+                         "(нужно при смене режима чанкинга)")
     a = ap.parse_args()
     print(f"[indexer] процесс запущен, pid={os.getpid()}", flush=True)
     _start_heartbeat(a.project)  # «пульс» — сразу, ещё до тяжёлых импортов
@@ -599,7 +622,7 @@ def _main() -> int:
         if a.prefetch_models:
             prefetch_models(a.project)
         else:
-            run_indexing(a.project, object_type=a.object_type)
+            run_indexing(a.project, object_type=a.object_type, reindex=a.reindex)
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         st = read_state(a.project)
