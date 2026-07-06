@@ -321,7 +321,8 @@ def indexing_panel(project: str, object_type: str) -> None:
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        if st.button("▶ Индексировать", disabled=running, width='stretch'):
+        if st.button("▶ Индексировать", disabled=running, width='stretch',
+                     type="primary"):
             pid = start_background(project, object_type=object_type)
             if pid:
                 st.toast(f"Фоновый процесс запущен (pid {pid})")
@@ -363,9 +364,26 @@ def indexing_panel(project: str, object_type: str) -> None:
             st.success(s["message"])
         else:
             st.info(s["message"])
-    # режим чанкинга + переиндексация «с нуля» (для A/B семантического чанкинга)
+    # режим чанкинга — прямо в интерфейсе (раньше был только config.yaml — барьер
+    # для не-программиста). Смена пишется в конфиг; действует после переиндексации.
     _mode = str(_c.get("chunking.mode", "char"))
-    _mode_ru = "семантический (по пунктам НПА)" if _mode == "semantic" else "по символам (базовый)"
+    _MODES = {"char": "🔤 По символам (базовый, проверенный)",
+              "semantic": "🧠 По смыслу (по пунктам НПА, точнее — требует замера)"}
+    _mkeys = list(_MODES)
+    _sel = st.selectbox(
+        "Режим нарезки документов на фрагменты",
+        _mkeys, index=_mkeys.index(_mode) if _mode in _mkeys else 0,
+        format_func=lambda k: _MODES[k], key="idx_chunk_mode",
+        help="«По смыслу» режет по границам пунктов НПА и заголовков — обычно точнее "
+             "для экспертизы, но требует переиндексации с нуля. Сначала замерьте "
+             "качество на scripts/eval_golden.py ДО и ПОСЛЕ (A/B).")
+    if _sel != _mode:
+        _c.set("chunking.mode", _sel); _c.save()
+        st.session_state.pop("cfg", None)  # чтобы весь интерфейс подхватил новый конфиг
+        st.warning("Режим сохранён. Он вступит в силу только после «♻ Переиндексировать "
+                   "заново» (кнопка ниже) — иначе дедупликация пропустит уже загруженное.")
+        _mode = _sel
+    _mode_ru = _MODES[_mode]
     rc1, rc2 = st.columns([2, 3])
     if rc1.button("♻ Переиндексировать заново", disabled=running, width='stretch',
                   key="idx_reindex",
@@ -384,9 +402,6 @@ def indexing_panel(project: str, object_type: str) -> None:
         if nn.button("Отмена", key="idx_reindex_no", width='stretch'):
             st.session_state["idx_reindex_arm"] = False
             st.rerun()
-    st.caption(f"Режим нарезки чанков: **{_mode_ru}**. Сменить — в config.yaml "
-               "(`chunking.mode: char|semantic`), затем «Переиндексировать заново».")
-
     d1, d2 = st.columns([1, 3])
     with d1:
         if st.button("🛑 Сбросить статус", width='stretch', key="idx_reset",

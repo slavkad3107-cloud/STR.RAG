@@ -4,8 +4,8 @@
 Версия меняется при каждой значимой доработке (см. README -> История версий).
 """
 
-__version__ = "0.24.0"
-__codename__ = "Guardrails"
+__version__ = "0.25.0"
+__codename__ = "Onboarding"
 
 # Человекочитаемая версия для вывода в UI и логах
 VERSION = f"СтройПроект v{__version__} «{__codename__}»"
