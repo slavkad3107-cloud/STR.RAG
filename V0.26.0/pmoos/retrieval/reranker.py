@@ -53,7 +53,9 @@ class Reranker:
         # <данные>/models/hub — туда же качают setup_models.py и предзагрузка М2.
         base: dict[str, Any] = {
             "device": device,
-            "max_length": 512,
+            # окно кросс-энкодера из конфига (дефолт 1024): раньше 512 — реранкер
+            # молча усекал хвост чанка и не видел цифру ПДВ/ссылку во второй половине.
+            "max_length": int(self.cfg.get("reranker.max_length", 1024)),
         }
         if token:
             base["trust_remote_code"] = False
@@ -115,8 +117,30 @@ class Reranker:
         except Exception:
             return candidates[:top]
         pairs = [(query, c.get(text_key, "")) for c in candidates]
-        scores = model.predict(pairs, batch_size=int(self.cfg.get("embedding.batch_size", 16)))
+        scores = self._predict(model, pairs)
         for c, s in zip(candidates, scores):
             c["rerank_score"] = float(s)
         ranked = sorted(candidates, key=lambda x: x.get("rerank_score", 0.0), reverse=True)
         return ranked[:top]
+
+    def _predict(self, model, pairs: list[tuple]):
+        """predict с адаптивным батчем при нехватке VRAM (как у эмбеддера).
+
+        Реранк детерминирован по паре (логиты пары не зависят от соседей в батче),
+        поэтому дробление батча НЕ меняет порядок/качество — растёт только
+        стабильность на 8-ГБ GPU (единственная тяжёлая стадия М4 без OOM-защиты)."""
+        bs = int(self.cfg.get("embedding.batch_size", 16))
+        while True:
+            try:
+                return model.predict(pairs, batch_size=bs)
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() and bs > 1:
+                    bs = max(1, bs // 2)
+                    try:
+                        import torch
+                        torch.cuda.empty_cache()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    print(f"[reranker] OOM — уменьшаю батч до {bs}", flush=True)
+                    continue
+                raise

@@ -1,4 +1,4 @@
-"""СтройПроект v0.25.0 «Onboarding» — единый интерфейс (Streamlit).
+"""СтройПроект v0.26.0 «Fidelity» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются ОТДЕЛЬНО:
@@ -78,12 +78,20 @@ def _save_uploads(project: str, files) -> int:
     up = project_paths(project)["uploads"]
     up.mkdir(parents=True, exist_ok=True)
     n = 0
+    overwritten: list[str] = []
     for f in files or []:
         try:
-            (up / f.name).write_bytes(f.getbuffer())
+            dest = up / f.name
+            if dest.exists():
+                overwritten.append(f.name)
+            dest.write_bytes(f.getbuffer())
             n += 1
         except Exception as e:  # noqa: BLE001
             st.error(f"Не удалось сохранить {f.name}: {e}")
+    if overwritten:
+        st.warning("Перезаписаны одноимённые файлы: " + ", ".join(overwritten[:10])
+                   + (" …" if len(overwritten) > 10 else "")
+                   + ". Если это РАЗНЫЕ версии — переименуйте, иначе одна затрёт другую.")
     return n
 
 
@@ -688,17 +696,72 @@ def _render_answers(project: str) -> None:
                              user_answer=a.get("user_answer") or None)
         st.rerun()
     if pb2.button("✅ Принять ВСЕ", key="m4_acc_all", width='stretch'):
-        for a in answers:
-            if a.get("status") != "accepted":
-                set_decision(project, a["number"], status="accepted",
-                             user_answer=a.get("user_answer") or None)
-        st.rerun()
+        st.session_state["m4_acc_all_arm"] = True
+    if st.session_state.get("m4_acc_all_arm"):
+        _low_all = [a for a in answers if a.get("low_support") or a.get("unsupported_refs")]
+        st.warning(
+            f"Принять ВСЕ {len(answers)} ответов (в т.ч. непроверенные)?"
+            + (f" Из них **{len(_low_all)}** помечены как требующие проверки "
+               f"(без опоры на источники / спорные ссылки) — они уйдут в экспертизу "
+               f"и в память как принятые." if _low_all else ""))
+        ya, na = st.columns(2)
+        if ya.button("Да, принять все", key="m4_acc_all_yes", width='stretch'):
+            for a in answers:
+                if a.get("status") != "accepted":
+                    set_decision(project, a["number"], status="accepted",
+                                 user_answer=a.get("user_answer") or None)
+            st.session_state["m4_acc_all_arm"] = False
+            st.rerun()
+        if na.button("Отмена", key="m4_acc_all_no", width='stretch'):
+            st.session_state["m4_acc_all_arm"] = False
+            st.rerun()
     if pb3.button("↩️ Снять решения (показанные)", key="m4_clr_vis",
                   width='stretch', disabled=not view):
         for a in view:
             set_decision(project, a["number"], status="proposed",
                          user_answer=a.get("user_answer") or None)
         st.rerun()
+
+    # экспорт ответов в CSV (открывается в Excel; UTF-8 BOM для кириллицы)
+    import csv as _csv
+    import io as _io
+    _buf = _io.StringIO()
+    _w = _csv.writer(_buf, delimiter=";")
+    _w.writerow(["№", "Тип", "Том ООС", "Статус", "Замечание", "Ответ",
+                 "Правка", "Достоверность", "Источник", "Проверить"])
+    for a in answers:
+        _w.writerow([a.get("number", ""), a.get("category", ""), a.get("oos_volume", ""),
+                     a.get("status", ""), a.get("remark", ""),
+                     a.get("user_answer") or a.get("answer", ""), a.get("correction", ""),
+                     a.get("confidence", ""), (a.get("sources") or [{}])[0].get("file", ""),
+                     "да" if (a.get("low_support") or a.get("unsupported_refs")) else ""])
+    st.download_button("⬇️ Скачать ответы (CSV для Excel)", _buf.getvalue().encode("utf-8-sig"),
+                       file_name=f"ответы_{project}.csv", mime="text/csv", key="m4_csv_dl")
+
+    # провенанс генерации + журнал решений (доказуемый след для экспертизы)
+    prov = data.get("provenance")
+    dec_path = project_paths(project)["decisions"]
+    if prov or dec_path.exists():
+        with st.expander("ⓘ Как сгенерировано · журнал принятых решений"):
+            if prov:
+                st.caption(
+                    "Снимок пайплайна: версия {v}, модель поиска top_k={tk}, "
+                    "кандидатов {c}, реранк={rr} (окно {ml}), перефраз {ex}, "
+                    "чанкинг «{cm}». По нему видно, чем отличался прогон при регрессии."
+                    .format(v=prov.get("version", "—"), tk=prov.get("top_k", "—"),
+                            c=prov.get("candidates", "—"), rr=prov.get("use_rerank", "—"),
+                            ml=prov.get("reranker_max_length", "—"),
+                            ex=prov.get("expansions", "—"), cm=prov.get("chunking_mode", "—")))
+            if dec_path.exists():
+                try:
+                    _audit = dec_path.read_bytes()
+                    st.download_button("⬇️ Скачать журнал решений (decisions.jsonl)", _audit,
+                                       file_name="decisions.jsonl", mime="application/json",
+                                       key="m4_audit_dl")
+                    st.caption("Иммутабельный append-only журнал: что именно принято, "
+                               "с текстом и источниками на момент решения.")
+                except OSError:
+                    pass
 
     st.markdown("#### Работа с отдельным замечанием")
     nums = [str(a.get("number", "")) for a in (view or answers)]
@@ -728,7 +791,14 @@ def _render_answers(project: str) -> None:
                        key=f"ans_{num}", height=140)
     if a.get("correction"):
         st.caption(f"Правка в ПМООС: {a['correction']}")
+    if a.get("unsupported_refs") and not a.get("low_support"):
+        st.warning("⚠ В ответе есть нормативы/вещества/техника, которых нет в найденных "
+                   "источниках — достоверность снижена, проверьте ссылки вручную.")
     srcs = a.get("sources", [])
+    if not srcs and a.get("retrieved_sources"):
+        st.caption("ИИ не указал, какие фрагменты использовал. Ниже — что нашёл поиск "
+                   "(НЕ подтверждено как использованное):")
+        srcs = a.get("retrieved_sources", [])
     if srcs:
         st.dataframe([{"Раздел": x.get("section", ""), "Файл": x.get("file", ""),
                        "Место": x.get("loc", ""), "Релевантность": x.get("score", "")}
@@ -772,6 +842,26 @@ def tab_m5(project: str, object_type: str) -> None:
         if src_paths:
             st.caption("Используются ранее загруженные тома: " +
                        ", ".join(p.name for p in src_paths))
+
+    # Предпросмотр (dry-run) — контроль перед НЕОБРАТИМОЙ записью правок в тома.
+    if src_paths and st.button("👁 Предпросмотр правок (без записи в файлы)",
+                               key="m5_preview", width='stretch'):
+        from pmoos.output.docx_writer import preview_corrections
+        prev = preview_corrections(project, src_paths)
+        if not prev.get("accepted"):
+            st.warning("Нет принятых ответов — сначала примите их в Модуле 4.")
+        else:
+            st.caption(f"Будет внесено правок: **{prev['total']}** "
+                       f"(принятых ответов: {prev['accepted']}). Исходные тома НЕ меняются "
+                       f"до нажатия кнопки записи ниже.")
+            for v in prev["volumes"]:
+                with st.expander(f"📄 {v['volume']} — правок: {len(v['changes'])}", expanded=True):
+                    if v["changes"]:
+                        st.dataframe([{"Замеч. №": c["number"], "Куда вставится": c["placed"],
+                                       "Текст правки": (c.get("correction") or "")[:180]}
+                                      for c in v["changes"]], width='stretch', hide_index=True)
+                    else:
+                        st.caption("Для этого тома правок нет.")
 
     g1, g2 = st.columns(2)
     if g1.button("📝 Откорректированные тома (правки жёлтым)", width='stretch',

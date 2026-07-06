@@ -263,14 +263,20 @@ class HybridRetriever:
         return out
 
     @staticmethod
-    def _rrf(result_lists: list[list[dict]], *, k: int = 60) -> list[dict]:
-        """Reciprocal Rank Fusion по id чанка."""
+    def _rrf(result_lists: list[list[dict]], *, k: int = 60,
+             weights: list[float] | None = None) -> list[dict]:
+        """Reciprocal Rank Fusion по id чанка с ПОСПИСОЧНЫМИ весами.
+
+        weights (параллельно result_lists) позволяет не дать одному BM25-списку
+        утонуть среди нескольких dense-списков расширения запроса.
+        """
         agg: dict[str, dict] = {}
-        for lst in result_lists:
+        for li, lst in enumerate(result_lists):
+            w = 1.0 if weights is None else float(weights[li])
             for rank, item in enumerate(lst):
                 cid = item["id"]
                 node = agg.setdefault(cid, {"item": item, "rrf": 0.0})
-                node["rrf"] += 1.0 / (k + rank + 1)
+                node["rrf"] += w * (1.0 / (k + rank + 1))
         fused = sorted(agg.values(), key=lambda x: x["rrf"], reverse=True)
         out = []
         for n in fused:
@@ -278,6 +284,31 @@ class HybridRetriever:
             it["rrf_score"] = n["rrf"]
             out.append(it)
         return out
+
+    @staticmethod
+    def _dedup_near(pool: list[dict], *, threshold: float = 0.9) -> list[dict]:
+        """Убрать near-дубликаты в пуле (разные версии одного тома: v1/корр/финал),
+        чтобы они не вытесняли разнообразие фактов из top-k. Jaccard по шинглам."""
+        try:
+            from ..ingest.dedup import shingles
+        except Exception:  # noqa: BLE001
+            return pool
+        kept: list[dict] = []
+        sigs: list[set] = []
+        for it in pool:
+            sh = shingles(it.get("text", "") or "")
+            dup = False
+            for prev in sigs:
+                if sh and prev:
+                    inter = len(sh & prev)
+                    uni = len(sh | prev)
+                    if uni and inter / uni >= threshold:
+                        dup = True
+                        break
+            if not dup:
+                kept.append(it)
+                sigs.append(sh)
+        return kept
 
     # ---- public API ------------------------------------------------------
     def search(self, project: str, query: str, *, top: int | None = None,
@@ -302,12 +333,24 @@ class HybridRetriever:
         for q in queries:
             lists.append(self._dense(project, q, candidates=candidates,
                                      sections=sections, exclude_sections=exclude_sections))
+        # веса dense: нормируем на число dense-списков, чтобы вес семантики не рос
+        # линейно с числом перефраз и не топил единственный BM25-список.
+        n_dense = max(1, len(lists))
+        dense_w = float(self.cfg.get("retrieval.dense_weight", 1.0))
+        if self.cfg.get("retrieval.rrf_normalize_dense", True):
+            dense_w = dense_w / n_dense
+        weights: list[float] = [dense_w] * len(lists)
         # BM25 по исходному замечанию (точные термины важнее перефраза)
         if self.cfg.get("retrieval.use_bm25", True):
             lists.append(self._bm25(project, query, candidates=candidates,
                                     sections=sections, exclude_sections=exclude_sections))
+            weights.append(float(self.cfg.get("retrieval.bm25_weight", 1.0)))
 
-        fused = self._rrf(lists)
+        fused = self._rrf(lists, k=int(self.cfg.get("retrieval.rrf_k", 60)), weights=weights)
+        # опциональный near-dup фильтр (версии одного тома) — до реранка
+        if self.cfg.get("retrieval.dedup_near", False):
+            fused = self._dedup_near(
+                fused, threshold=float(self.cfg.get("retrieval.dedup_near_threshold", 0.9)))
         pool = fused[: max(candidates, top)]
 
         if self.cfg.get("retrieval.use_rerank", True) and pool:

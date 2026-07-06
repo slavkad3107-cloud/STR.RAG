@@ -193,6 +193,66 @@ def _insert_paragraph_after(par, runs):
     return np
 
 
+def _match_volume(a: dict, src: Path) -> bool:
+    """Относится ли принятый ответ к данному тому (по полю «Том ООС»)."""
+    v = (a.get("oos_volume") or "").lower().strip()
+    if not v:
+        return False
+    n, stem = src.name.lower(), src.stem.lower()
+    if v in n or n in v or stem in v:
+        return True
+    vp = Path(v)
+    # stem берём ТОЛЬКО если v — имя файла с настоящим расширением
+    # (иначе Path("том 6.1").stem == "том 6" и правка утекает в чужой том)
+    if vp.suffix.lower() in (".docx", ".doc", ".pdf"):
+        return vp.stem.lower() in n
+    return False
+
+
+def preview_corrections(project: str, sources: list) -> dict:
+    """DRY-RUN: что и куда будет вставлено в тома — БЕЗ записи файлов.
+
+    Возвращает {"volumes": [{"volume", "changes": [...]}], "total"}. Для каждой
+    правки: номер замечания, найден ли якорь (вставка рядом с местом) или уйдёт
+    «в конец», и текст правки. Даёт контроль перед НЕОБРАТИМОЙ записью в .docx."""
+    from docx import Document
+    data = _load_answers(project)
+    answers = [a for a in data.get("answers", [])
+               if a.get("status") in ("accepted", "edited")]
+    srcs = [Path(s) for s in sources if s]
+    result = {"volumes": [], "total": 0, "accepted": len(answers)}
+    if not srcs:
+        return result
+    matched_ids = {id(a) for s2 in srcs for a in answers if _match_volume(a, s2)}
+    for si, src in enumerate(srcs):
+        if len(srcs) > 1:
+            mine = [a for a in answers if _match_volume(a, src)]
+            if si == 0:
+                mine += [a for a in answers if id(a) not in matched_ids]
+        else:
+            mine = list(answers)
+        try:
+            doc = Document(str(src))
+            ptexts = [(p.text or "").lower() for p in doc.paragraphs]
+        except Exception:  # noqa: BLE001 — предпросмотр не должен падать
+            ptexts = []
+        changes = []
+        for a in mine:
+            corr = (a.get("correction") or "").strip()
+            tok = _anchor_token(corr) or _anchor_token(a.get("remark", ""))
+            found = bool(tok) and any(tok in lt for lt in ptexts)
+            changes.append({
+                "number": a.get("number", "?"),
+                "placed": (f"рядом с «{tok}»" if found
+                           else ("в конец (якорь «%s» не найден)" % tok if tok
+                                 else "в конец (нет явного места в тексте правки)")),
+                "correction": corr or (a.get("user_answer") or a.get("answer") or ""),
+            })
+        result["volumes"].append({"volume": src.name, "changes": changes})
+        result["total"] += len(changes)
+    return result
+
+
 def write_corrected_volumes(project: str, sources: list) -> list[Path]:
     """РЕАЛЬНО откорректированные тома ООС: открываем ИСХОДНЫЙ .docx, вставляем
     правки по принятым/правленым ответам с ЖЁЛТОЙ заливкой — по якорю
@@ -213,24 +273,10 @@ def write_corrected_volumes(project: str, sources: list) -> list[Path]:
     if not srcs:
         return outs
 
-    def _match(a, src: Path) -> bool:
-        v = (a.get("oos_volume") or "").lower().strip()
-        if not v:
-            return False
-        n, stem = src.name.lower(), src.stem.lower()
-        if v in n or n in v or stem in v:
-            return True
-        vp = Path(v)
-        # stem берём ТОЛЬКО если v — имя файла с настоящим расширением
-        # (иначе Path("том 6.1").stem == "том 6" и правка утекает в чужой том)
-        if vp.suffix.lower() in (".docx", ".doc", ".pdf"):
-            return vp.stem.lower() in n
-        return False
-
-    matched_ids = {id(a) for s2 in srcs for a in answers if _match(a, s2)}
+    matched_ids = {id(a) for s2 in srcs for a in answers if _match_volume(a, s2)}
     for si, src in enumerate(srcs):
         if len(srcs) > 1:
-            mine = [a for a in answers if _match(a, src)]
+            mine = [a for a in answers if _match_volume(a, src)]
             if si == 0:
                 mine += [a for a in answers if id(a) not in matched_ids]
         else:

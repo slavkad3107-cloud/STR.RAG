@@ -90,7 +90,7 @@ def _ocr_page(pix_bytes: bytes, lang: str) -> str:
 
 
 def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
-                lang: str = "rus+eng") -> list[Page]:
+                lang: str = "rus+eng", max_pages: int = 0) -> list[Page]:
     pages: list[Page] = []
     try:
         import fitz  # PyMuPDF
@@ -99,8 +99,15 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
 
     # текстовый слой
     doc = fitz.open(str(path))
+    total = doc.page_count
+    ocr_done = 0
     try:
         for i, page in enumerate(doc, start=1):
+            # защита от «зависания» на гигантских сканах: не рендерим больше лимита
+            if max_pages and i > max_pages:
+                print(f"[loaders] {path.name}: лимит {max_pages} стр. — остальные "
+                      f"{total - max_pages} стр. пропущены (ocr.max_pages)", flush=True)
+                break
             text = page.get_text("text") or ""
             if ocr and len(text.strip()) < min_text_chars:
                 try:
@@ -108,8 +115,12 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
                     ocr_text = _ocr_page(pix.tobytes("png"), lang)
                     if len(ocr_text.strip()) > len(text.strip()):
                         text = ocr_text
-                except Exception:
-                    pass
+                    ocr_done += 1
+                    # прогресс OCR в журнал — снимает ощущение «зависло» на больших PDF
+                    if ocr_done % 20 == 0:
+                        print(f"[loaders] OCR {path.name}: стр. {i}/{total}…", flush=True)
+                except Exception as e:  # noqa: BLE001 — раньше молча глоталось
+                    print(f"[loaders] OCR стр. {i} в {path.name}: {e}", flush=True)
             if text.strip():
                 pages.append({"loc": f"стр. {i}", "text": text, "is_table": False})
     finally:
@@ -193,11 +204,12 @@ def extract_xlsx(path: Path) -> list[Page]:
 
 
 def extract_file(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
-                 lang: str = "rus+eng") -> list[Page]:
+                 lang: str = "rus+eng", max_pages: int = 0) -> list[Page]:
     """Диспетчер по расширению. .doc/.xls (старые бинарные) — мягко предупреждаем."""
     ext = path.suffix.lower()
     if ext == ".pdf":
-        return extract_pdf(path, ocr=ocr, min_text_chars=min_text_chars, lang=lang)
+        return extract_pdf(path, ocr=ocr, min_text_chars=min_text_chars, lang=lang,
+                           max_pages=max_pages)
     if ext == ".docx":
         return extract_docx(path)
     if ext in (".xlsx", ".xlsm"):
