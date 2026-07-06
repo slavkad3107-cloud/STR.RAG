@@ -4,7 +4,7 @@ cd /d "%~dp0"
 REM ---- Robust against slow / unreliable internet (pythonhosted read timeouts) ----
 set PIP_DEFAULT_TIMEOUT=120
 echo ============================================================
-echo   STROYPROEKT v0.23.0 Chunking - install (Windows)
+echo   STROYPROEKT v0.24.0 Guardrails - install (Windows)
 echo ============================================================
 
 where python >nul 2>nul

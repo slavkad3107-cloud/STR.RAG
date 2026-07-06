@@ -155,7 +155,10 @@ def detect_version_hint(filename: str) -> str | None:
 def classify_filename(filename: str, object_type: str = "площадной", top: int = 3) -> list[dict]:
     """Эвристическое определение раздела по имени файла.
     Возвращает ранжированный список [{code, score, name}]."""
-    name = (filename or "").lower()
+    import unicodedata
+    # NFKC: «ё»→«е» здесь НЕ трогаем, но убираем неразрывные пробелы/лигатуры/
+    # экзотические формы, из-за которых токены не совпадали с ключевыми словами
+    name = unicodedata.normalize("NFKC", filename or "").lower()
     # нормализуем разделители
     norm = re.sub(r"[._\-]+", " ", name)
     tokens = set(re.findall(r"[а-яёa-z0-9]+", norm))
