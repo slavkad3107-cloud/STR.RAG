@@ -1,4 +1,4 @@
-"""СтройПроект v0.23.0 «Chunking» — единый интерфейс (Streamlit).
+"""СтройПроект v0.24.0 «Guardrails» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются ОТДЕЛЬНО:
@@ -564,6 +564,15 @@ def _render_answers(project: str) -> None:
         cat_counts[c] = cat_counts.get(c, 0) + 1
     st.caption("По типам: " + " · ".join(f"{c} — {n}" for c, n in cat_counts.items()))
 
+    # предупреждение о слабой опоре на источники (dex-ревью): такие ответы ИИ мог
+    # «выдумать» — их нужно проверить вручную (для экспертизы это критично)
+    _low = [str(a.get("number", "")) for a in answers if a.get("low_support")]
+    if _low:
+        st.warning(f"⚠ {len(_low)} ответ(ов) без опоры на найденные фрагменты ПД "
+                   f"(№ {', '.join(_low[:25])}) — ИИ мог ответить «от себя». Проверьте "
+                   f"вручную: возможно, нужный раздел не проиндексирован (М2) или "
+                   f"замечание сформулировано иначе, чем текст в документах.")
+
     f1, f2 = st.columns(2)
     cats = [c for c in CATEGORIES if c in cat_counts] + \
            [c for c in cat_counts if c not in CATEGORIES]
@@ -624,8 +633,14 @@ def _render_answers(project: str) -> None:
     head = f"**Замечание №{num}** · {a.get('category') or '—'}"
     if a.get("oos_volume"):
         head += f" · том ООС: {a['oos_volume']}"
+    if a.get("low_support"):
+        head += " · ⚠ без опоры на источники"
     st.markdown(head)
     st.markdown(a.get("remark", ""))
+    if a.get("low_support"):
+        st.warning("⚠ По этому замечанию в проиндексированной ПД не найдено "
+                   "релевантных фрагментов — ответ ИИ может быть неточным. "
+                   "Проверьте, проиндексирован ли нужный раздел (М2).")
     cons = a.get("consistency", {})
     if not cons.get("ok", True):
         st.warning("⚠ Возможные расхождения: " + "; ".join(cons.get("issues", [])))
@@ -703,8 +718,17 @@ def tab_m5(project: str, object_type: str) -> None:
             else:
                 st.warning("Нет принятых ответов — сначала примите их в Модуле 4 "
                            "(можно пакетно: «✅ Принять ВСЕ»).")
+        except PermissionError:
+            st.error("Файл тома открыт в Word (или защищён от записи). Закройте "
+                     "документ в Word и нажмите кнопку ещё раз.")
         except Exception as e:  # noqa: BLE001
-            st.error(f"Ошибка корректировки: {e}")
+            _msg = str(e)
+            if "Package not found" in _msg or "not a zip" in _msg.lower() or "BadZipFile" in _msg:
+                st.error(f"Не удалось открыть том как .docx (файл повреждён или это не "
+                         f"настоящий docx): {_msg}. Откройте его в Word и пересохраните "
+                         f"как .docx, затем загрузите заново.")
+            else:
+                st.error(f"Ошибка корректировки: {_msg}")
 
     if g2.button("📄 Ответы на замечания для экспертизы (.docx/.xlsx)",
                  width='stretch', key="m5_make_table"):

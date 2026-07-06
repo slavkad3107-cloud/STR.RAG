@@ -242,6 +242,11 @@ def run_block1(project: str, cfg: Config | None = None, *,
         src_text = "\n".join(h.get("text", "") for h in hits[:5])
         cons = compare(src_text, answer_text + " " + data.get("correction", ""))
 
+        # СЛАБАЯ ОПОРА НА ИСТОЧНИКИ (по итогам dex-ревью): для замечаний экспертизы
+        # ответ «от себя» недопустим. Если retrieval НИЧЕГО не нашёл в ПД — помечаем
+        # ответ, чтобы инженер проверил вручную (галлюцинация вероятна).
+        low_support = not hits
+
         # каскад: какие разделы затронет правка (по разделам источников)
         affected_codes = sorted({s["section"] for s in used_sources if s["section"]})
         cascade = downstream(project, affected_codes) if affected_codes else {"changed": [], "affected": []}
@@ -258,6 +263,7 @@ def run_block1(project: str, cfg: Config | None = None, *,
             "confidence": data.get("confidence", ""),
             "missing_data": data.get("missing_data", ""),
             "sources": used_sources,
+            "low_support": low_support,
             "consistency": cons,
             "cascade": cascade,
             "cascade_text": explain_cascade(project, affected_codes) if affected_codes else "",

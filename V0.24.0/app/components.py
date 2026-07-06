@@ -297,8 +297,15 @@ def indexing_panel(project: str, object_type: str) -> None:
     _rer = str(_c.get("reranker.model", "BAAI/bge-reranker-v2-m3"))
     _sts = [model_status(_emb), model_status(_rer)]
     _line = " · ".join(f"`{x['model']}` {'✅' if x['cached'] else '⬇️ не скачана'}" for x in _sts)
+    # устройство (GPU/CPU) — предупреждаем, что на CPU индексация в разы медленнее
+    from pmoos.core.device import resolve_device
+    _dev = resolve_device(_c.get("embedding.device", "auto"))
     mc1, mc2 = st.columns([3, 2])
-    mc1.caption(f"Локальные модели: {_line}")
+    if _dev == "cuda":
+        mc1.caption(f"Устройство: 🟢 GPU (CUDA) · Локальные модели: {_line}")
+    else:
+        mc1.caption(f"Устройство: 🟠 CPU (GPU не найден — индексация будет в разы "
+                    f"медленнее) · Локальные модели: {_line}")
     if not all(x["cached"] for x in _sts):
         if mc2.button("⬇️ Скачать все модели сейчас", key="idx_dl_models", width='stretch',
                       help="Скачивает сразу обе модели (bge-m3 ~2.3 ГБ + reranker ~1.1 ГБ) "
