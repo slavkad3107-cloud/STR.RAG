@@ -470,6 +470,51 @@ def indexing_panel(project: str, object_type: str) -> None:
                                f"status={stt.get('status')}"))
             except Exception as e:  # noqa: BLE001
                 checks.append(("Файл состояния читается", False, str(e)))
+            # GPU/VRAM — частая причина сбоев на 8-ГБ ноутбуке
+            try:
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    free_b, total_b = _torch.cuda.mem_get_info()
+                    checks.append(("Видеокарта (GPU)", True,
+                                   f"{_torch.cuda.get_device_name(0)} · свободно "
+                                   f"{free_b/2**30:.1f}/{total_b/2**30:.1f} ГБ VRAM"))
+                else:
+                    checks.append(("Видеокарта (GPU)", True,
+                                   "CUDA недоступна — работа на CPU (в разы медленнее, но рабочая)"))
+            except Exception as e:  # noqa: BLE001
+                checks.append(("Видеокарта (GPU)", True, f"не удалось определить: {e}"))
+            # локальные модели в кэше
+            try:
+                _mok = all(model_status(n).get("cached") for n in (_emb, _rer))
+                checks.append(("Модели bge (эмбеддер+реранкер)", _mok,
+                               "обе в кэше" if _mok else "не скачаны — кнопка «Скачать все модели»"))
+            except Exception as e:  # noqa: BLE001
+                checks.append(("Модели bge", False, str(e)))
+            # целостность базы Qdrant + число точек
+            try:
+                from pmoos.index.vectorstore import VectorStore as _VS
+                from pmoos.index.embeddings import Embedder as _Emb
+                _vs = _VS(_c, dim=_Emb(_c).dim)
+                _cnt = int(_vs.count(project))
+                try:
+                    _vs.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                checks.append(("База Qdrant читается", True,
+                               f"чанков в проекте: {_cnt}"
+                               + (" (пусто — запустите индексацию)" if _cnt == 0 else "")))
+            except Exception as e:  # noqa: BLE001
+                checks.append(("База Qdrant читается", False,
+                               f"{e} — возможно, повреждена; поможет «Переиндексировать заново»"))
+            # свободное место на диске данных
+            try:
+                import shutil as _sh
+                from pmoos.paths import data_root as _dr
+                _free = _sh.disk_usage(str(_dr())).free / 2**30
+                checks.append(("Свободно на диске данных", _free > 3.0,
+                               f"{_free:.1f} ГБ" + (" — маловато для моделей (~4 ГБ)" if _free <= 3.0 else "")))
+            except Exception as e:  # noqa: BLE001
+                checks.append(("Свободно на диске", True, str(e)))
             for name, ok, detail in checks:
                 st.write(("✅ " if ok else "❌ ") + f"**{name}** — {detail}")
             if all(ok for _, ok, _ in checks):

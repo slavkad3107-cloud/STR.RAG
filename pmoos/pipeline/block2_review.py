@@ -35,16 +35,32 @@ _SYS = (
 _USER = (
     "ЗАМЕЧАНИЕ №{num}:\n«{remark}»\n\n"
     "ПРЕДЛОЖЕННЫЙ ОТВЕТ/ПРАВКА:\n{answer}\n\n"
+    "ФРАГМЕНТЫ-ИСТОЧНИКИ ИЗ ПРОЕКТНОЙ ДОКУМЕНТАЦИИ (ответ должен опираться на них):\n{sources}\n\n"
     "АВТО-ПРОВЕРКА НОРМАТИВОВ (предварительно):\n{norm}\n\n"
     "Верни СТРОГО JSON:\n"
     "{{\n"
     '  "verdict": "ok|needs_work|reject",\n'
     '  "calc_check": "оценка расчётной части (что проверить/пересчитать)",\n'
     '  "norm_check": "оценка ссылок на нормативы (актуальность/корректность)",\n'
+    '  "grounding": "подтверждается ли ответ фрагментами-источниками: да/частично/нет и чем",\n'
+    '  "claims_without_source": "утверждения ответа, которых НЕТ в источниках (или пусто)",\n'
     '  "improvements": "конкретные улучшения формулировки ответа",\n'
     '  "risks": "риски для экспертизы"\n'
     "}}\nТолько JSON."
 )
+
+
+def _sources_block(a: dict) -> str:
+    """Фрагменты-источники для рецензента (grounding). Даём то, что реально нашёл
+    поиск: подтверждённые ИИ (sources) или все найденные (retrieved_sources)."""
+    srcs = a.get("sources") or a.get("retrieved_sources") or []
+    if not srcs:
+        return "(источники не найдены — ответ без опоры на ПД; проверить особо тщательно)"
+    lines = []
+    for s in srcs[:8]:
+        lines.append(f"[{s.get('n', '?')}] (раздел {s.get('section', '')}; "
+                     f"{s.get('file', '')}): {s.get('snippet', '')}")
+    return "\n".join(lines)
 
 
 def _norm_summary(check: dict) -> str:
@@ -84,6 +100,7 @@ def run_block2(project: str, cfg: Config | None = None, *, progress=None) -> dic
             {"role": "system", "content": _SYS},
             {"role": "user", "content": _USER.format(num=a["number"], remark=a["remark"],
                                                       answer=text.strip() or "(пусто)",
+                                                      sources=_sources_block(a),
                                                       norm=_norm_summary(ncheck))},
         ])
 
@@ -104,6 +121,8 @@ def run_block2(project: str, cfg: Config | None = None, *, progress=None) -> dic
             "verdict": rev.get("verdict", ""),
             "calc_check": rev.get("calc_check", ""),
             "norm_check": rev.get("norm_check", ""),
+            "grounding": rev.get("grounding", ""),
+            "claims_without_source": rev.get("claims_without_source", ""),
             "improvements": rev.get("improvements", ""),
             "risks": rev.get("risks", ""),
             "entities": extract_entities(a.get("answer", "")).to_dict(),

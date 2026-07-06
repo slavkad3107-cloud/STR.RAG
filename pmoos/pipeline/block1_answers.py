@@ -106,6 +106,64 @@ def _classify_remark(text: str) -> str:
     return "Правка по источникам"
 
 
+_CONF_VALUES = {"high", "medium", "low"}
+_CONF_MAP = {"высокая": "high", "средняя": "medium", "низкая": "low",
+             "high": "high", "medium": "medium", "med": "medium", "low": "low"}
+
+
+def _normalize_answer(data: dict) -> dict:
+    """Валидация/нормализация схемы ответа ИИ (устойчивость к вольностям модели):
+    непустые строковые поля, confidence из фиксированного набора, used_sources → int."""
+    if not isinstance(data, dict):
+        return {"answer": "", "correction": "", "missing_data": "",
+                "confidence": "low", "used_sources": []}
+    out = dict(data)
+    for key in ("answer", "correction", "missing_data"):
+        v = out.get(key)
+        out[key] = v.strip() if isinstance(v, str) else ("" if v is None else str(v))
+    c = str(out.get("confidence", "") or "").strip().lower()
+    c = _CONF_MAP.get(c, c)
+    out["confidence"] = c if c in _CONF_VALUES else ("low" if not out.get("answer") else "medium")
+    us = out.get("used_sources")
+    norm_us: list[int] = []
+    if isinstance(us, list):
+        for x in us:
+            try:
+                norm_us.append(int(x))
+            except (TypeError, ValueError):
+                try:
+                    norm_us.append(int(str(x).strip("[] .")))
+                except ValueError:
+                    pass
+    out["used_sources"] = norm_us
+    return out
+
+
+def _provenance(cfg: Config, object_type: str) -> dict:
+    """Снимок конфигурации пайплайна — чтобы при регрессии было видно, ЧЕМ
+    отличался прогон (модель/чанкинг/top_k/rerank/expansion/версия)."""
+    from .. import __version__
+    prov = {
+        "version": __version__,
+        "object_type": object_type,
+        "chunking_mode": str(cfg.get("chunking.mode", "char")),
+        "top_k": int(cfg.get("retrieval.top_k", 8)),
+        "candidates": int(cfg.get("retrieval.candidates", 60)),
+        "use_rerank": bool(cfg.get("retrieval.use_rerank", True)),
+        "reranker_max_length": int(cfg.get("reranker.max_length", 1024)),
+        "expansions": (int(cfg.get("retrieval.expansions", 3))
+                       if cfg.get("retrieval.use_query_expansion", True) else 0),
+        "bm25_weight": float(cfg.get("retrieval.bm25_weight", 1.0)),
+        "dense_weight": float(cfg.get("retrieval.dense_weight", 1.0)),
+    }
+    try:  # провайдер/модель — намерение (фактического из-за fallback-цепочки может отличаться)
+        prov["answer_provider"] = str(cfg.get("ai.modules.module4.provider",
+                                              cfg.get("ai.default_provider", "")) or "")
+    except Exception:  # noqa: BLE001
+        prov["answer_provider"] = ""
+    return prov
+
+
 def run_block1(project: str, cfg: Config | None = None, *,
                remarks_path: str | Path | None = None,
                object_type: str | None = None,
@@ -233,9 +291,14 @@ def run_block1(project: str, cfg: Config | None = None, *,
     for idx, (r, (srcs, hits)) in enumerate(zip(remarks, ctx_sources)):
         res = results[idx]
         data = res.get("result") if res.get("ok") else {}
-        data = data or {}
+        data = _normalize_answer(data or {})
         used = data.get("used_sources") or []
-        used_sources = [s for s in srcs if s["n"] in set(used)] or srcs[:3]
+        matched = [s for s in srcs if s["n"] in set(used)]
+        # НЕ подменяем провенанс: если ИИ не указал использованные фрагменты —
+        # оставляем список пустым и помечаем флагом (раньше молча клеили srcs[:3]
+        # как «источники» — ложная атрибуция, недопустимая для экспертизы).
+        used_sources = matched
+        sources_unverified = not matched
 
         answer_text = data.get("answer", "").strip()
         # источник для consistency = объединённый текст использованных фрагментов
@@ -246,9 +309,16 @@ def run_block1(project: str, cfg: Config | None = None, *,
         # ответ «от себя» недопустим. Если retrieval НИЧЕГО не нашёл в ПД — помечаем
         # ответ, чтобы инженер проверил вручную (галлюцинация вероятна).
         low_support = not hits
+        # ГЕЙТ ДОСТОВЕРНОСТИ: выдуманные нормативы/ЗВ/техника (consistency.issues)
+        # или отсутствие опоры → принудительно снижаем confidence и помечаем.
+        unsupported_refs = bool(cons.get("issues"))
+        confidence = data.get("confidence", "")
+        if unsupported_refs or low_support:
+            confidence = "low"
 
-        # каскад: какие разделы затронет правка (по разделам источников)
-        affected_codes = sorted({s["section"] for s in used_sources if s["section"]})
+        # каскад: какие разделы затронет правка (по разделам источников; если ИИ не
+        # атрибутировал — по найденным поиском, каскад носит справочный характер)
+        affected_codes = sorted({s["section"] for s in (used_sources or srcs) if s.get("section")})
         cascade = downstream(project, affected_codes) if affected_codes else {"changed": [], "affected": []}
 
         answers.append({
@@ -260,9 +330,12 @@ def run_block1(project: str, cfg: Config | None = None, *,
             "category": (getattr(r, "category", "") or _classify_remark(r.text)),
             "answer": answer_text,
             "correction": data.get("correction", ""),
-            "confidence": data.get("confidence", ""),
+            "confidence": confidence,
             "missing_data": data.get("missing_data", ""),
             "sources": used_sources,
+            "retrieved_sources": srcs,          # что реально нашёл поиск (прозрачность)
+            "sources_unverified": sources_unverified,
+            "unsupported_refs": unsupported_refs,
             "low_support": low_support,
             "consistency": cons,
             "cascade": cascade,
@@ -278,6 +351,7 @@ def run_block1(project: str, cfg: Config | None = None, *,
         "project": project, "object_type": object_type,
         "block": 1, "count": len(answers),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "provenance": _provenance(cfg, object_type),   # снимок пайплайна (атрибуция регрессий)
         "answers": answers,
     }
     _save(project, out)
@@ -319,12 +393,29 @@ def set_decision(project: str, number: str, *, status: str,
                 a["user_answer"] = user_answer
             break
     _save(project, data)
-    # лог решений (для будущего обучения)
+    # ИММУТАБЕЛЬНЫЙ АУДИТ решений (append-only): для госэкспертизы важен доказуемый
+    # след — ЧТО именно принято, с каким текстом и источниками (снимок на момент
+    # решения, не ссылка на изменяемый answers.json).
+    ans_obj = next((a for a in data.get("answers", [])
+                    if str(a["number"]) == str(number)), None)
+    entry = {"ts": datetime.now().isoformat(), "number": number,
+             "status": status, "user_answer": user_answer}
+    if ans_obj is not None:
+        from .. import __version__
+        entry["snapshot"] = {
+            "remark": ans_obj.get("remark", ""),
+            "final": (ans_obj.get("user_answer") or ans_obj.get("answer") or "").strip(),
+            "correction": ans_obj.get("correction", ""),
+            "sources": ans_obj.get("sources", []),
+            "confidence": ans_obj.get("confidence", ""),
+            "low_support": bool(ans_obj.get("low_support")),
+            "unsupported_refs": bool(ans_obj.get("unsupported_refs")),
+            "generated_at": data.get("generated_at", ""),
+            "version": __version__,
+        }
     dec = project_paths(project)["decisions"]
     with dec.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"ts": datetime.now().isoformat(), "number": number,
-                            "status": status, "user_answer": user_answer},
-                           ensure_ascii=False) + "\n")
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     # пополняем память экспертизы принятыми/правлеными ответами (обучение на проектах)
     if status in ("accepted", "edited"):
         try:

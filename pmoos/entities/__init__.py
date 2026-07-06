@@ -81,12 +81,26 @@ def pollutant_code(name: str) -> tuple[str, str]:
 
 
 def find_pollutants(text: str) -> list[dict]:
-    """Найти ЗВ в тексте → список {code, name} (уникальные)."""
+    """Найти ЗВ в тексте → список {code, name} (уникальные).
+
+    _pollutant_index отсортирован по длине алиаса УБЫВАЮЩЕ. Отслеживаем занятые
+    длинными совпадениями участки текста и пропускаем более короткие алиасы,
+    целиком вложенные в уже принятый участок («углеводороды» внутри «углеводороды
+    предельные»), — чтобы короткий алиас не добавлял неверный код поверх точного.
+    """
     low = (text or "")
     seen: set[str] = set()
+    covered: list[tuple[int, int]] = []
     out: list[dict] = []
     for pat, code, canon in _pollutant_index():
-        if pat.search(low):
+        accepted_here = False
+        for m in pat.finditer(low):
+            s, e = m.span()
+            if any(s >= cs and e <= ce for cs, ce in covered):
+                continue  # совпадение целиком внутри более длинного — пропускаем
+            covered.append((s, e))
+            accepted_here = True
+        if accepted_here:
             key = code or canon
             if key not in seen:
                 seen.add(key)

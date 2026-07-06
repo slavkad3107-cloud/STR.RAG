@@ -133,6 +133,15 @@ def stop_indexing(project: str) -> bool:
                 killed = True
         except Exception:  # noqa: BLE001
             pass
+    # файл, обрабатывавшийся в момент жёсткого стопа, мог остаться с частично
+    # записанными чанками → помечаем ошибкой, чтобы при возобновлении его чанки
+    # подчистились (delete_by_file) и он переиндексировался целиком.
+    cur = st.get("current_file") or ""
+    if cur:
+        st.setdefault("files", {})[cur] = {
+            "status": "error", "chunks": 0,
+            "error": "прервано кнопкой «Стоп» — будет переиндексирован при возобновлении",
+        }
     st["status"] = "paused"
     st["pause_requested"] = True
     st["pid"] = 0
@@ -351,6 +360,13 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
             write_state(project, state)
 
             try:
+                # файл ранее падал (ошибка/жёсткий «Стоп») → могли остаться
+                # полузаписанные чанки под тем же файлом: подчищаем перед повтором.
+                if finfo.get("status") == "error":
+                    try:
+                        store.delete_by_file(project, rel)
+                    except Exception:  # noqa: BLE001
+                        pass
                 cls = classify_filename(fpath.name, object_type, top=1)
                 section = cls[0]["code"] if cls else "UNKNOWN"
                 ver = detect_version_hint(fpath.name) or ""
@@ -358,7 +374,8 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                     fpath,
                     ocr=cfg.get("ocr.enabled", True),
                     min_text_chars=cfg.get("ocr.min_text_chars", 200),
-                    ocr_lang=cfg.get("ocr.lang", "rus+eng"),
+                    lang=cfg.get("ocr.lang", "rus+eng"),
+                    max_pages=int(cfg.get("ocr.max_pages", 0)),
                 )
                 sha = doc_fingerprint(pages)
                 # подпись содержимого для контентного сравнения версий (пункт 4)
@@ -388,7 +405,16 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                 )
                 if chunks:
                     vectors = embedder.embed_documents([c["text"] for c in chunks])
-                    store.upsert_chunks(project, chunks, vectors)
+                    try:
+                        store.upsert_chunks(project, chunks, vectors)
+                    except Exception:
+                        # откат частичной записи (OOM/сбой между пачками): иначе
+                        # раздел останется недоиндексированным без предупреждения.
+                        try:
+                            store.delete_by_file(project, rel)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        raise
                     known_shas.add(sha)
 
                 state["files"][rel] = {"status": "done", "chunks": len(chunks),
@@ -425,6 +451,10 @@ def start_background(project: str, *, object_type: str | None = None,
     возобновления после паузы/перезапуска просто вызвать ещё раз — уже
     готовые файлы пропускаются.
     """
+    # Защита от гонки: если процесс уже жив, второй запуск затёр бы pid и оставил
+    # процесс-сироту (двойная запись в один embedded-Qdrant). Не стартуем второй.
+    if not reindex and is_running(project):
+        return int(read_state(project).get("pid") or 0)
     clear_pause(project)
     # Пред-скан файлов, чтобы число сразу было видно в интерфейсе (не «0/0»).
     paths = project_paths(project)
