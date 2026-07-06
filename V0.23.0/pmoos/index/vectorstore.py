@@ -92,6 +92,20 @@ class VectorStore:
             pass
         self._client = None
 
+    def drop_collection(self, project: str) -> bool:
+        """Полностью удалить коллекцию проекта (для переиндексации «с нуля» —
+        напр. при смене режима чанкинга). Возвращает True, если была удалена."""
+        c = self.client()
+        name = collection_name(project)
+        existing = {col.name for col in c.get_collections().collections}
+        if name not in existing:
+            return False
+        try:
+            c.delete_collection(collection_name=name)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
     def ensure_collection(self, project: str) -> None:
         from qdrant_client.http import models as qm
         c = self.client()

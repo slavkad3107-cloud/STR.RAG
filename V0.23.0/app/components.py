@@ -356,6 +356,30 @@ def indexing_panel(project: str, object_type: str) -> None:
             st.success(s["message"])
         else:
             st.info(s["message"])
+    # режим чанкинга + переиндексация «с нуля» (для A/B семантического чанкинга)
+    _mode = str(_c.get("chunking.mode", "char"))
+    _mode_ru = "семантический (по пунктам НПА)" if _mode == "semantic" else "по символам (базовый)"
+    rc1, rc2 = st.columns([2, 3])
+    if rc1.button("♻ Переиндексировать заново", disabled=running, width='stretch',
+                  key="idx_reindex",
+                  help="Удаляет базу проекта и индексирует ВСЁ заново. Нужно после смены "
+                       "режима чанкинга (иначе дедупликация пропустит уже загруженные файлы). "
+                       "Для A/B: замерьте scripts/eval_golden.py run ДО и ПОСЛЕ."):
+        st.session_state["idx_reindex_arm"] = True
+    if st.session_state.get("idx_reindex_arm"):
+        rc2.warning(f"Стереть базу проекта и переиндексировать заново? Режим чанкинга: **{_mode_ru}**.")
+        yy, nn = rc2.columns(2)
+        if yy.button("Да, с нуля", key="idx_reindex_yes", width='stretch'):
+            start_background(project, object_type=object_type, reindex=True)
+            st.session_state["idx_reindex_arm"] = False
+            st.toast("Переиндексация с нуля запущена")
+            st.rerun()
+        if nn.button("Отмена", key="idx_reindex_no", width='stretch'):
+            st.session_state["idx_reindex_arm"] = False
+            st.rerun()
+    st.caption(f"Режим нарезки чанков: **{_mode_ru}**. Сменить — в config.yaml "
+               "(`chunking.mode: char|semantic`), затем «Переиндексировать заново».")
+
     d1, d2 = st.columns([1, 3])
     with d1:
         if st.button("🛑 Сбросить статус", width='stretch', key="idx_reset",
