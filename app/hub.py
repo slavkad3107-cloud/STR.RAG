@@ -1,4 +1,4 @@
-"""СтройПроект v0.24.0 «Guardrails» — единый интерфейс (Streamlit).
+"""СтройПроект v0.25.0 «Onboarding» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются ОТДЕЛЬНО:
@@ -85,6 +85,70 @@ def _save_uploads(project: str, files) -> int:
         except Exception as e:  # noqa: BLE001
             st.error(f"Не удалось сохранить {f.name}: {e}")
     return n
+
+
+def _workflow_state(project: str) -> dict:
+    """Лёгкая сводка готовности ключевых модулей (М1/М2/М4).
+
+    Только чтение JSON проекта — без импорта моделей и без сети, поэтому
+    вызывается на каждый рендер дёшево. Даёт «где я / что делать дальше»,
+    чтобы пользователь не терялся между шестью вкладками.
+    """
+    import json
+    pp = project_paths(project)
+    ws = {"m1": "○", "m2": "○", "m4": "○",
+          "m1_txt": "", "m2_txt": "", "m4_txt": "", "next": ""}
+
+    def _load(key):
+        try:
+            p = pp[key]
+            return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    # М1 — систематизация: есть карта разделов?
+    inv = _load("inventory")
+    files = (inv or {}).get("files", []) if isinstance(inv, dict) else []
+    if files:
+        unknown = sum(1 for it in files if it.get("section") in ("", "UNKNOWN"))
+        recognized = len(files) - unknown
+        ws["m1"] = "✅" if unknown == 0 else "◑"
+        ws["m1_txt"] = (f"файлов {len(files)}, распознано {recognized}"
+                        + (f", НЕ распознано {unknown}" if unknown else ""))
+
+    # М2 — индексация: статус фоновой сборки RAG-базы
+    stt = _load("index_state")
+    if isinstance(stt, dict):
+        s = stt.get("status", "idle")
+        done, total = stt.get("done_files", 0), stt.get("total_files", 0)
+        ws["m2"] = {"done": "✅", "running": "⏳", "paused": "⏸",
+                    "error": "⚠", "idle": "○"}.get(s, "○")
+        ws["m2_txt"] = {"done": f"проиндексировано {done} файл(ов)",
+                        "running": f"идёт: {done}/{total}",
+                        "paused": f"пауза: {done}/{total}",
+                        "error": "прервалась — см. журнал"}.get(s, "")
+
+    # М4 — ответы на замечания
+    ans = _load("answers")
+    lst = ans.get("answers", []) if isinstance(ans, dict) else []
+    if lst:
+        ws["m4"] = "✅"
+        ws["m4_txt"] = f"ответов {len(lst)}"
+
+    # Подсказка «следующий шаг» по фактическому состоянию
+    if ws["m1"] == "○":
+        ws["next"] = "▶ Начните с **М1**: загрузите файлы проектной документации."
+    elif ws["m2"] == "⏳":
+        ws["next"] = "⏳ Идёт индексация в **М2** — можно дождаться и перейти к М4."
+    elif ws["m2"] == "⚠":
+        ws["next"] = "⚠ Индексация в **М2** прервалась — откройте «🩺 Диагностику запуска»."
+    elif ws["m2"] != "✅":
+        ws["next"] = "▶ Дальше — **М2**: постройте RAG-базу (кнопка «Запустить индексацию»)."
+    elif ws["m4"] == "○":
+        ws["next"] = "▶ Дальше — **М4**: загрузите замечания и сформируйте ответы."
+    else:
+        ws["next"] = "✅ Основной путь пройден. **М5** — корректировка томов, **М6** — выгрузка для УПРЗА."
+    return ws
 
 
 # ─────────────────────────────── сайдбар ───────────────────────────────
@@ -241,10 +305,18 @@ def tab_m1(project: str, object_type: str) -> None:
     # ИИ-доуточнение нераспознанных файлов (по выбранному провайдеру модуля 1)
     _inv1 = _li(project)
     _unk = [f for f in (_inv1 or {}).get("files", []) if f.get("section") == "UNKNOWN"]
+    if _unk:
+        st.warning(
+            f"⚠ Не определён раздел у **{len(_unk)}** файл(ов) — при ответах (М4) поиск их "
+            f"не увидит. Что делать (любой способ): переименуйте по образцу «Раздел N. …», "
+            f"задайте раздел вручную ниже в блоке «✏️», либо нажмите «🤖 Распознать разделы "
+            f"с ИИ». Причина — базовое распознавание идёт по ИМЕНИ файла, а оно нетиповое."
+        )
     u1, u2 = st.columns([2, 3])
     with u1:
         if st.button(f"🤖 Распознать разделы с ИИ (нераспознанных: {len(_unk)})",
                      disabled=not _unk, width='stretch', key="m1_ai_classify",
+                     type="primary" if _unk else "secondary",
                      help="Отправляет ИМЕНА нераспознанных файлов выбранному провайдеру "
                           "(включая локальную Ollama) и проставляет коды разделов."):
             _m1_ai_classify(project, object_type, _unk)
@@ -256,7 +328,9 @@ def tab_m1(project: str, object_type: str) -> None:
     st.subheader("Карта разделов проектной документации")
     C.section_map(project, object_type)
 
-    with st.expander("✏️ Подтвердить / исправить раздел и версию файла (догадку не навязываем)"):
+    _exp_title = ("✏️ Подтвердить / исправить раздел и версию файла"
+                  + (f" · без раздела: {len(_unk)}" if _unk else " (догадку не навязываем)"))
+    with st.expander(_exp_title, expanded=bool(_unk)):
         from pmoos.ingest.inventory import load_inventory, set_file_section, set_file_version
         from pmoos.ingest.sections import required_sections, SURVEYS, section_name
         inv = load_inventory(project)
@@ -295,6 +369,9 @@ def tab_m1(project: str, object_type: str) -> None:
 
 def tab_m2(project: str, object_type: str) -> None:
     st.header("МОДУЛЬ 2 · RAG-база (индексация)")
+    st.caption("Простыми словами: программа читает загруженные документы и строит по ним "
+               "«поисковую память», по которой ИИ находит нужные места для ответов на "
+               "замечания. Это разовая подготовка — делается один раз на проект.")
     st.caption("База Qdrant хранится отдельно от приложения — повторный запуск не "
                "переиндексирует уже загруженное (дедупликация по содержимому, "
                "стабильные ID чанков). Оптимизировано под GPU (RTX 3070 Ti).")
@@ -809,9 +886,19 @@ def main() -> None:
         return
 
     st.title(f"Проект: {project}")
+
+    # Индикатор прохождения workflow: ✅ готово · ◑ частично · ⏳ идёт ·
+    # ⚠ ошибка · ○ не начато. Виден прямо на вкладках + подсказка «что дальше».
+    ws = _workflow_state(project)
+    detail = " · ".join(
+        f"{m}: {ws[k]}" for m, k in (("М1", "m1_txt"), ("М2", "m2_txt"), ("М4", "m4_txt")) if ws[k]
+    )
+    st.caption(ws["next"] + (f"    ·    {detail}" if detail else ""))
+
     tabs = st.tabs([
-        "М1 · Систематизация", "М2 · Индексация", "М3 · Граф связей",
-        "М4 · Ответы", "М5 · Корректировка", "М6 · УПРЗА",
+        f"{ws['m1']} М1 · Систематизация", f"{ws['m2']} М2 · Индексация",
+        "М3 · Граф связей", f"{ws['m4']} М4 · Ответы",
+        "М5 · Корректировка", "М6 · УПРЗА",
     ])
     with tabs[0]:
         tab_m1(project, object_type)
