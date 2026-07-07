@@ -288,7 +288,9 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
         print(f"[indexer] скачиваю модель: {_m}", flush=True)
         try:
             from huggingface_hub import snapshot_download
-            snapshot_download(_m)
+            # без ONNX/OpenVINO (не используем; экономит ~2.3 ГБ на bge-m3)
+            snapshot_download(_m, ignore_patterns=["*.onnx", "*.onnx_data", "onnx/*",
+                                                   "openvino/*", "*.gguf", "*.tflite"])
             print(f"[indexer] модель {_m}: скачана ✅", flush=True)
         except Exception as e:  # noqa: BLE001
             print(f"[indexer] не удалось скачать {_m}: {e}", flush=True)
@@ -548,7 +550,9 @@ def prefetch_models(project: str, models: list[str] | None = None) -> dict:
             continue
         try:
             from huggingface_hub import snapshot_download
-            snapshot_download(m)
+            # без ONNX/OpenVINO (не используем; экономит ~2.3 ГБ на bge-m3)
+            snapshot_download(m, ignore_patterns=["*.onnx", "*.onnx_data", "onnx/*",
+                                                  "openvino/*", "*.gguf", "*.tflite"])
             results[m] = "downloaded"
             print(f"[prefetch] {m}: скачана ✅", flush=True)
         except Exception as e:  # noqa: BLE001
