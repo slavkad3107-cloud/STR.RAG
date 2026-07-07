@@ -34,12 +34,18 @@ def _models_from_config() -> list[str]:
         return list(DEFAULT_MODELS)
 
 
+# Форматы весов, которые приложение НЕ использует (грузим через sentence-transformers
+# = PyTorch/safetensors). Пропускаем их при скачивании: у bge-m3 это экономит ~2.3 ГБ
+# (model.onnx_data) — заметно на медленном интернете.
+SKIP_WEIGHT_PATTERNS = ["*.onnx", "*.onnx_data", "onnx/*", "openvino/*", "*.gguf", "*.tflite"]
+
+
 def download_all(models: list[str]) -> None:
     """Скачивает все модели в кэш HF (повторный запуск докачивает недостающее)."""
     from huggingface_hub import snapshot_download
     for i, m in enumerate(models, 1):
-        print(f"[models] ({i}/{len(models)}) скачивание {m} ...", flush=True)
-        snapshot_download(m)
+        print(f"[models] ({i}/{len(models)}) скачивание {m} (без ONNX/OpenVINO) ...", flush=True)
+        snapshot_download(m, ignore_patterns=SKIP_WEIGHT_PATTERNS)
         print(f"[models] ({i}/{len(models)}) {m}: готово", flush=True)
 
 
