@@ -121,8 +121,8 @@ DEFAULT_AI: dict[str, Any] = {
         },
         "ollama": {
             "base_url": "http://localhost:11434",
-            # под 8 ГБ VRAM (RTX 3070 Ti) — 7–8B модели; список реальных
-            # моделей подтягивается из `ollama list` (см. core/ollama_utils.py)
+            # по умолчанию компактные 7–8B модели (идут и на CPU/скромной GPU);
+            # список реальных моделей подтягивается из `ollama list` (core/ollama_utils.py)
             "answer": "qwen2.5:7b-instruct",
             "review": "qwen2.5:7b-instruct",
             "extract": "qwen2.5:7b-instruct",

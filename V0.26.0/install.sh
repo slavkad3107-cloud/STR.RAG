@@ -15,9 +15,8 @@ if [ ! -f "$VENV/bin/activate" ]; then python3 -m venv "$VENV"; fi
 source "$VENV/bin/activate"
 python -m pip install --upgrade pip --timeout 120 --retries 10
 
-echo "[torch] CUDA 12.4 (для CPU/Mac будет обычная сборка)..."
-pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124 --timeout 180 --retries 10 \
-  || pip install torch==2.6.0 --timeout 180 --retries 10
+echo "[torch] CPU-сборка (универсально, работает на любом компьютере; GPU — см. README)..."
+pip install torch==2.6.0 --timeout 180 --retries 10
 
 echo "[deps] попытка 1: индекс по умолчанию (fail-fast)..."
 if ! pip install --prefer-binary --timeout 60 --retries 2 -r requirements.txt; then

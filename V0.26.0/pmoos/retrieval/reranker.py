@@ -5,7 +5,7 @@
 качество ответов — главный приоритет пользователя.
 
 CVE-2025-32434: грузим только safetensors (model_kwargs use_safetensors=True),
-device берём из конфигурации (auto -> cuda на 3070ti).
+device берём из конфигурации (auto -> cuda при наличии GPU, иначе cpu).
 """
 from __future__ import annotations
 
