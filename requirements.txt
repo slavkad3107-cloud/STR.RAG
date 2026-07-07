@@ -3,10 +3,11 @@
 # requirements.txt with the cp1251 locale codec, and non-ASCII (Cyrillic)
 # comments make pip crash with UnicodeDecodeError before any download.
 #
-# IMPORTANT: PyTorch is installed SEPARATELY and FIRST (see install.bat) from
-# the CUDA index:
-#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-# torch is NOT listed here on purpose, so pip does not pull a CPU-only build.
+# IMPORTANT: PyTorch is installed SEPARATELY and FIRST (see install.bat).
+# Default is the CPU build (works on any computer, small download):
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+# NVIDIA-GPU users who want acceleration may instead use the CUDA index
+# (.../whl/cu124) - see README, section GPU. torch is NOT listed here on purpose.
 # torch>=2.6 is required (fixes CVE-2025-32434, safetensors weight loading).
 
 # --- UI / launch ---

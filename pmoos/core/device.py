@@ -1,6 +1,6 @@
 """Лёгкий помощник выбора устройства (cuda/cpu) без тяжёлых импортов.
 
-auto -> cuda при наличии CUDA (RTX 3070 Ti), иначе cpu.
+auto -> cuda при наличии видеокарты NVIDIA, иначе cpu (по умолчанию).
 """
 from __future__ import annotations
 
