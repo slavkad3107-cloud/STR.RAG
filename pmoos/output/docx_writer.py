@@ -177,6 +177,20 @@ def _anchor_token(text: str) -> str | None:
     return m.group(1).rstrip(".") if m else None
 
 
+def _iter_all_paragraphs(container):
+    """Все абзацы документа: тело + ячейки таблиц (рекурсивно, включая вложенные).
+
+    python-docx `document.paragraphs` НЕ включает абзацы внутри таблиц. В реальных
+    томах ООС нумерованные таблицы/пункты («табл. 4.1», «п. 5.2») почти всегда
+    лежат в таблицах — без этого обхода якорь не находится и правки уходят «в конец»."""
+    for p in container.paragraphs:
+        yield p
+    for tbl in getattr(container, "tables", []):
+        for row in tbl.rows:
+            for cell in row.cells:
+                yield from _iter_all_paragraphs(cell)
+
+
 def _insert_paragraph_after(par, runs):
     """Вставляет новый абзац СРАЗУ ПОСЛЕ par. runs = [(text, bold, yellow)]."""
     from docx.text.paragraph import Paragraph
@@ -233,7 +247,7 @@ def preview_corrections(project: str, sources: list) -> dict:
             mine = list(answers)
         try:
             doc = Document(str(src))
-            ptexts = [(p.text or "").lower() for p in doc.paragraphs]
+            ptexts = [(p.text or "").lower() for p in _iter_all_paragraphs(doc)]
         except Exception:  # noqa: BLE001 — предпросмотр не должен падать
             ptexts = []
         changes = []
@@ -282,7 +296,8 @@ def write_corrected_volumes(project: str, sources: list) -> list[Path]:
         else:
             mine = list(answers)
         doc = Document(str(src))
-        ptexts = [(p, (p.text or "").lower()) for p in doc.paragraphs]
+        # ищем якорь и в абзацах тела, и внутри таблиц (частый случай в томах ООС)
+        ptexts = [(p, (p.text or "").lower()) for p in _iter_all_paragraphs(doc)]
         tail = []
         for a in mine:
             num = a.get("number", "?")

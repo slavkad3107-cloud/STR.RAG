@@ -84,6 +84,20 @@ def test_anchor_token():
     assert _anchor_token("общая формулировка без места") is None
 
 
+def test_iter_all_paragraphs_includes_table_cells():
+    # М5: якорь правки часто лежит В ТАБЛИЦЕ; обход должен видеть абзацы ячеек,
+    # иначе правки уходят «в конец» вместо места (жалоба пользователя).
+    import docx
+    from pmoos.output.docx_writer import _iter_all_paragraphs
+    d = docx.Document()
+    d.add_paragraph("обычный абзац тела")
+    t = d.add_table(rows=1, cols=1)
+    t.rows[0].cells[0].text = "Табл. 4.1 параметры источников"
+    texts = [p.text for p in _iter_all_paragraphs(d)]
+    assert any("обычный абзац" in x for x in texts)
+    assert any("4.1" in x for x in texts)  # абзац из ячейки таблицы найден
+
+
 def test_match_volume():
     from pathlib import Path
     from pmoos.output.docx_writer import _match_volume
