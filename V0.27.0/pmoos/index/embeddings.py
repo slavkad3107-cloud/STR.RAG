@@ -52,8 +52,9 @@ class _EmbCache:
     чтобы кэш не рос бесконечно.
     """
 
-    def __init__(self, dim: int):
-        self.dim = dim
+    def __init__(self):
+        # dim здесь НЕ нужен (векторы читаются frombuffer как есть) — и его
+        # отсутствие позволяет НЕ грузить модель ~2.3 ГБ при 100% попадании в кэш.
         self.con = sqlite3.connect(str(emb_cache_path()), check_same_thread=False)
         try:
             self.con.execute("PRAGMA journal_mode=WAL")
@@ -79,11 +80,16 @@ class _EmbCache:
         out: dict[str, np.ndarray] = {}
         if not keys:
             return out
+        rows: list = []
         with _LOCK:
-            qmarks = ",".join("?" * len(keys))
-            rows = self.con.execute(
-                f"SELECT k, v FROM emb WHERE k IN ({qmarks})", keys
-            ).fetchall()
+            # батчами по 900: у SQLite лимит переменных (999 в старых сборках) —
+            # иначе на больших проектах (тысячи чанков за раз) запрос молча падал бы
+            for i in range(0, len(keys), 900):
+                part = keys[i:i + 900]
+                qmarks = ",".join("?" * len(part))
+                rows.extend(self.con.execute(
+                    f"SELECT k, v FROM emb WHERE k IN ({qmarks})", part
+                ).fetchall())
             if rows:
                 import time as _t
                 now = _t.time()
@@ -226,7 +232,7 @@ class Embedder:
 
     def _cache_obj(self) -> _EmbCache:
         if self._cache is None:
-            self._cache = _EmbCache(self.dim)
+            self._cache = _EmbCache()  # без self.dim: не триггерим загрузку модели
         return self._cache
 
     def _cache_model_id(self) -> str:
@@ -248,7 +254,11 @@ class Embedder:
                 )
                 return vecs.astype(np.float32)
             except RuntimeError as e:
-                if "out of memory" in str(e).lower() and bs > 1:
+                # CUDA: «out of memory»; CPU (DefaultCPUAllocator): «not enough memory»
+                _msg = str(e).lower()
+                _oom = any(t in _msg for t in ("out of memory", "not enough memory",
+                                               "can't allocate memory"))
+                if _oom and bs > 1:
                     bs = max(1, bs // 2)
                     try:
                         import torch
@@ -269,10 +279,15 @@ class Embedder:
         mid = self._cache_model_id()
         keys = [cache.key(mid, t) for t in texts]
         have = cache.get_many(list(dict.fromkeys(keys)))
-        miss_idx = [i for i, k in enumerate(keys) if k not in have]
-        if miss_idx:
-            new_vecs = self._encode([texts[i] for i in miss_idx])
-            new_items = {keys[i]: new_vecs[j] for j, i in enumerate(miss_idx)}
+        # кодируем только УНИКАЛЬНЫЕ промахи: одинаковые тексты в одном вызове
+        # (шаблонные строки/повторяющиеся чанки) не гоняются через модель дважды
+        miss: dict[str, str] = {}
+        for i, k in enumerate(keys):
+            if k not in have and k not in miss:
+                miss[k] = texts[i]
+        if miss:
+            new_vecs = self._encode(list(miss.values()))
+            new_items = {k: new_vecs[j] for j, k in enumerate(miss)}
             cache.put_many(new_items)
             have.update(new_items)
         return np.vstack([have[k] for k in keys]).astype(np.float32)

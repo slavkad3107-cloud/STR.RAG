@@ -133,11 +133,16 @@ def stop_indexing(project: str) -> bool:
                 killed = True
         except Exception:  # noqa: BLE001
             pass
+    # ПЕРЕЧИТЫВАЕМ состояние ПОСЛЕ kill: между первым чтением и убийством процесс
+    # мог дописать прогресс (файлы стали done) — иначе записали бы устаревшую копию.
+    st = read_state(project)
     # файл, обрабатывавшийся в момент жёсткого стопа, мог остаться с частично
     # записанными чанками → помечаем ошибкой, чтобы при возобновлении его чанки
     # подчистились (delete_by_file) и он переиндексировался целиком.
+    # НО: если файл уже done/skipped (current_file мог указывать на завершённый) —
+    # НЕ трогаем, иначе при возобновлении зря удалили бы его готовые чанки.
     cur = st.get("current_file") or ""
-    if cur:
+    if cur and st.get("files", {}).get(cur, {}).get("status") not in ("done", "skipped"):
         st.setdefault("files", {})[cur] = {
             "status": "error", "chunks": 0,
             "error": "прервано кнопкой «Стоп» — будет переиндексирован при возобновлении",
@@ -188,7 +193,16 @@ def is_running(project: str) -> bool:
         return False
     pid = st.get("pid")
     if not pid:
-        return False
+        # Окно старта: родитель уже записал status=running/pid=0, но дочерний
+        # процесс ещё не проставил свой pid. Считаем «живым», если запись свежая
+        # (<30 с) — иначе двойной клик «Индексировать» породил бы второй процесс.
+        # Устаревшее starting-состояние от упавшего родителя истекает само.
+        try:
+            ts = st.get("heartbeat") or st.get("updated_at") or ""
+            age = (datetime.now() - datetime.fromisoformat(ts)).total_seconds()
+            return 0 <= age < 30
+        except Exception:  # noqa: BLE001
+            return False
     return _pid_alive(int(pid))
 
 
@@ -310,6 +324,10 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
         store = VectorStore(cfg, dim=embedder.dim)
         if reindex:
             dropped = store.drop_collection(project)
+            try:  # BM25-кэш от старой коллекции больше не валиден
+                (paths["root"] / "bm25_corpus.pkl").unlink(missing_ok=True)
+            except OSError:
+                pass
             print(f"[indexer] переиндексация с нуля: коллекция "
                   f"{'удалена' if dropped else 'отсутствовала'}", flush=True)
             state["files"] = {}          # снять отметки «done/skipped» — обработать всё заново
@@ -341,17 +359,42 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
     state["message"] = "Модель загружена. Индексация…"
     write_state(project, state)
 
+    index_changed = False  # были ли записи/удаления чанков (для инвалидации BM25-кэша)
+
+    def _mark_changed() -> None:
+        # BM25-кэш валидируется только по числу точек — правка файла с тем же
+        # итоговым числом чанков оставила бы поиску устаревший корпус. Удаляем pkl
+        # СРАЗУ при первом изменении (а не в конце): так покрыты и критический
+        # сбой, и жёсткое убийство процесса.
+        nonlocal index_changed
+        if not index_changed:
+            index_changed = True
+            try:
+                (paths["root"] / "bm25_corpus.pkl").unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    _last_skip_write = 0.0
     try:
         for fpath in files:
             rel = str(fpath.relative_to(upload_dir))
             finfo = state["files"].get(rel, {})
             if finfo.get("status") in ("done", "skipped"):
                 state["done_files"] += 1
-                write_state(project, state)
+                # троттлинг: при возобновлении с сотнями готовых файлов полная
+                # перезапись state на КАЖДЫЙ давала O(n²) I/O; пишем раз в секунду
+                if time.monotonic() - _last_skip_write >= 1.0:
+                    _last_skip_write = time.monotonic()
+                    write_state(project, state)
                 continue
 
-            # Проверка паузы перед каждым файлом.
-            if read_state(project).get("pause_requested"):
+            # Проверка паузы перед каждым файлом. ВАЖНО: синхронизируем флаг в
+            # памяти со свежим значением с диска — иначе следующий write_state
+            # затёр бы pause_requested=True, выставленный кнопкой «Стоп» родителем
+            # (если сам kill не удался), и остановка терялась бы.
+            _fresh_pause = bool(read_state(project).get("pause_requested"))
+            state["pause_requested"] = _fresh_pause
+            if _fresh_pause:
                 state["status"] = "paused"
                 state["message"] = "Пауза (возобновляемо)"
                 write_state(project, state)
@@ -362,13 +405,7 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
             write_state(project, state)
 
             try:
-                # файл ранее падал (ошибка/жёсткий «Стоп») → могли остаться
-                # полузаписанные чанки под тем же файлом: подчищаем перед повтором.
-                if finfo.get("status") == "error":
-                    try:
-                        store.delete_by_file(project, rel)
-                    except Exception:  # noqa: BLE001
-                        pass
+                was_error = finfo.get("status") == "error"
                 cls = classify_filename(fpath.name, object_type, top=1)
                 section = cls[0]["code"] if cls else "UNKNOWN"
                 ver = detect_version_hint(fpath.name) or ""
@@ -387,6 +424,17 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                     save_content_sig(project, fpath.name, content_signature(pages))
                 except Exception:  # noqa: BLE001
                     pass
+                # Файл ранее падал (ошибка/жёсткий «Стоп»): подчищаем возможные
+                # полузаписанные чанки и УБИРАЕМ его sha из дедуп-набора — иначе
+                # known_shas (снятый ДО удаления) пометил бы файл «дубликатом», и
+                # документ ТИХО выпал бы из индекса (чанки удалены, повтора нет).
+                if was_error:
+                    try:
+                        store.delete_by_file(project, rel)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    known_shas.discard(sha)
+                    _mark_changed()
                 if sha in known_shas:
                     state["files"][rel] = {"status": "skipped", "chunks": 0,
                                            "section": section, "version": ver,
@@ -418,12 +466,17 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                             pass
                         raise
                     known_shas.add(sha)
+                    _mark_changed()
 
                 state["files"][rel] = {"status": "done", "chunks": len(chunks),
                                        "section": section, "version": ver}
                 state["done_chunks"] = state.get("done_chunks", 0) + len(chunks)
                 state["total_chunks"] = state.get("total_chunks", 0) + len(chunks)
                 state["done_files"] += 1
+                # сброс current_file СРАЗУ после успеха: иначе «⏹ Стоп», нажатый
+                # во время прохода по уже-готовым файлам, пометил бы error файл,
+                # который на деле завершён (а при возобновлении его чанки удалились бы).
+                state["current_file"] = ""
                 write_state(project, state)
             except Exception as e:  # noqa: BLE001
                 state["files"][rel] = {"status": "error", "chunks": 0, "error": str(e)}
@@ -454,8 +507,10 @@ def start_background(project: str, *, object_type: str | None = None,
     готовые файлы пропускаются.
     """
     # Защита от гонки: если процесс уже жив, второй запуск затёр бы pid и оставил
-    # процесс-сироту (двойная запись в один embedded-Qdrant). Не стартуем второй.
-    if not reindex and is_running(project):
+    # процесс-сироту (двойная запись в один embedded-Qdrant). Это касается и
+    # reindex — параллельный drop_collection при живой индексации опаснее всего:
+    # сначала «⏹ Стоп», затем переиндексация.
+    if is_running(project):
         return int(read_state(project).get("pid") or 0)
     clear_pause(project)
     # Пред-скан файлов, чтобы число сразу было видно в интерфейсе (не «0/0»).

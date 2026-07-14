@@ -159,13 +159,15 @@ class VectorStore:
         from qdrant_client.http import models as qm
         c = self.client()
         name = collection_name(project)
-        points = [
-            qm.PointStruct(id=ch["id"], vector=vectors[i].tolist(),
-                           payload={**ch["payload"], "text": ch["text"]})
-            for i, ch in enumerate(chunks)
-        ]
-        for i in range(0, len(points), 128):
-            c.upsert(collection_name=name, points=points[i : i + 128])
+        # точки строим ЛЕНИВО по батчам: материализация всего файла разом давала
+        # сотни МБ пикового RAM на больших томах (тысячи чанков × вектор 1024)
+        for i in range(0, len(chunks), 128):
+            batch = [
+                qm.PointStruct(id=ch["id"], vector=vectors[j].tolist(),
+                               payload={**ch["payload"], "text": ch["text"]})
+                for j, ch in enumerate(chunks[i:i + 128], start=i)
+            ]
+            c.upsert(collection_name=name, points=batch)
 
     def delete_by_file(self, project: str, file_rel: str) -> None:
         from qdrant_client.http import models as qm

@@ -114,7 +114,14 @@ class Reranker:
             return candidates[:top]
         try:
             model = self._load()
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            # НЕ молчим: без реранка качество заметно ниже, причина должна быть видна
+            # (частый случай — офлайн-ПК без модели в кэше). Логируем один раз.
+            if not getattr(self, "_load_failed", False):
+                self._load_failed = True
+                print(f"[reranker] НЕ ЗАГРУЗИЛСЯ ({e}) — работаю без реранка, "
+                      f"качество ранжирования снижено. Скачайте модели в Модуле 2.",
+                      flush=True)
             return candidates[:top]
         pairs = [(query, c.get(text_key, "")) for c in candidates]
         scores = self._predict(model, pairs)
@@ -134,7 +141,12 @@ class Reranker:
             try:
                 return model.predict(pairs, batch_size=bs)
             except RuntimeError as e:
-                if "out of memory" in str(e).lower() and bs > 1:
+                # CUDA: «out of memory»; CPU (DefaultCPUAllocator): «not enough
+                # memory» / «can't allocate memory» — ловим все формулировки.
+                _msg = str(e).lower()
+                _oom = any(t in _msg for t in ("out of memory", "not enough memory",
+                                               "can't allocate memory"))
+                if _oom and bs > 1:
                     bs = max(1, bs // 2)
                     try:
                         import torch

@@ -126,11 +126,14 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
     finally:
         doc.close()
 
-    # таблицы — открываем pdfplumber ОДИН раз
+    # таблицы — открываем pdfplumber ОДИН раз (лимит страниц тот же, что и у OCR:
+    # иначе защита от гигантских PDF была бы неполной — extract_tables прошёл бы всё)
     try:
         import pdfplumber
         with pdfplumber.open(str(path)) as pdf:
             for i, page in enumerate(pdf.pages, start=1):
+                if max_pages and i > max_pages:
+                    break
                 try:
                     for tbl in (page.extract_tables() or []):
                         rows = [" | ".join((c or "").strip() for c in row) for row in tbl]

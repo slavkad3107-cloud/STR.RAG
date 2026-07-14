@@ -58,12 +58,16 @@ def pollutants() -> list[dict]:
 @lru_cache(maxsize=1)
 def _pollutant_index() -> list[tuple["re.Pattern[str]", str, str]]:
     """(compiled_pattern, code, canonical). Якоря не-словных границ, чтобы
-    короткие формулы (no, co, no2) не ловились как подстроки в других словах."""
-    idx: list[tuple[str, str, str]] = []
+    короткие формулы (no, co, no2) не ловились как подстроки в других словах.
+
+    Дубликаты алиасов схлопываются с приоритетом ПОСЛЕДНЕГО (пользовательский
+    YAML идёт после пакетного) — пользователь реально «перекрывает» встроенное."""
+    by_alias: dict[str, tuple[str, str]] = {}
     for p in pollutants():
         for a in p.get("aliases", []):
-            idx.append((a.lower(), p.get("code", ""), p.get("name", a)))
-    idx.sort(key=lambda t: len(t[0]), reverse=True)
+            by_alias[a.lower()] = (p.get("code", ""), p.get("name", a))
+    idx = sorted(((a, c, n) for a, (c, n) in by_alias.items()),
+                 key=lambda t: len(t[0]), reverse=True)
     out = []
     for alias, code, canon in idx:
         pat = re.compile(r"(?<![\w])" + re.escape(alias) + r"(?![\w])", re.IGNORECASE)
@@ -123,11 +127,13 @@ def equipment() -> list[dict]:
 
 @lru_cache(maxsize=1)
 def _equipment_index() -> list[tuple["re.Pattern[str]", str, str]]:
-    idx: list[tuple[str, str, str]] = []
+    # дубли алиасов — приоритет последнего (пользовательский YAML перекрывает пакетный)
+    by_alias: dict[str, tuple[str, str]] = {}
     for e in equipment():
         for a in e.get("aliases", []):
-            idx.append((a.lower(), e.get("name", a), e.get("type", "")))
-    idx.sort(key=lambda t: len(t[0]), reverse=True)
+            by_alias[a.lower()] = (e.get("name", a), e.get("type", ""))
+    idx = sorted(((a, n, t) for a, (n, t) in by_alias.items()),
+                 key=lambda t: len(t[0]), reverse=True)
     out = []
     for alias, canon, etype in idx:
         pat = re.compile(r"(?<![\w])" + re.escape(alias) + r"(?![\w])", re.IGNORECASE)

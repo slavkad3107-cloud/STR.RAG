@@ -133,6 +133,41 @@ def test_version_rank_orders():
     assert r_v3 > r0
 
 
+# ─────────────────────── стоп индексации (потеря данных) ───────────────────────
+def test_stop_indexing_does_not_error_completed_file(tmp_path, monkeypatch):
+    # Регрессия v0.26: «⏹ Стоп» помечал error файл, который уже done (current_file
+    # не сброшен) → при возобновлении его чанки удалялись и НЕ восстанавливались
+    # (sha в устаревшем known_shas → «дубликат») — тихая потеря документа.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import importlib
+    import pmoos.paths, pmoos.projects
+    importlib.reload(pmoos.paths)
+    from pmoos.projects import register_project
+    from pmoos.index import indexer as I
+    register_project("STOP_T")
+    st = I.read_state("STOP_T")
+    st.update({"status": "running", "pid": 0, "current_file": "готовый.pdf",
+               "files": {"готовый.pdf": {"status": "done", "chunks": 5}}})
+    I.write_state("STOP_T", st)
+    I.stop_indexing("STOP_T")
+    assert I.read_state("STOP_T")["files"]["готовый.pdf"]["status"] == "done"
+
+
+def test_stop_indexing_marks_inflight_file_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import importlib
+    import pmoos.paths
+    importlib.reload(pmoos.paths)
+    from pmoos.projects import register_project
+    from pmoos.index import indexer as I
+    register_project("STOP_T2")
+    st = I.read_state("STOP_T2")
+    st.update({"status": "running", "pid": 0, "current_file": "вработе.pdf", "files": {}})
+    I.write_state("STOP_T2", st)
+    I.stop_indexing("STOP_T2")
+    assert I.read_state("STOP_T2")["files"]["вработе.pdf"]["status"] == "error"
+
+
 # ─────────────────────── config merge / get-set ───────────────────────
 def test_config_deep_merge_and_get():
     from pmoos.config import Config, _deep_merge
@@ -143,6 +178,21 @@ def test_config_deep_merge_and_get():
     c.set("retrieval.top_k", 12)
     assert c.get("retrieval.top_k") == 12
     assert c.get("nope.missing", "def") == "def"
+
+
+def test_example_config_not_stale():
+    # config.example.yaml через deep-merge МОЛЧА перекрывает дефолты — если он
+    # отстанет от DEFAULT_CONFIG, пользователь, скопировавший пример, откатит
+    # улучшения качества (так уже было: candidates 40 vs 60).
+    from pathlib import Path
+    import yaml
+    from pmoos.config import DEFAULT_CONFIG
+    p = Path(__file__).resolve().parent.parent / "config.example.yaml"
+    ex = yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert ex["retrieval"]["candidates"] == DEFAULT_CONFIG["retrieval"]["candidates"]
+    assert ex["reranker"]["max_length"] == DEFAULT_CONFIG["reranker"]["max_length"]
+    assert ex["chunking"]["mode"] == DEFAULT_CONFIG["chunking"]["mode"]
+    assert ex["retrieval"]["rrf_normalize_dense"] == DEFAULT_CONFIG["retrieval"]["rrf_normalize_dense"]
 
 
 def test_config_new_keys_present():

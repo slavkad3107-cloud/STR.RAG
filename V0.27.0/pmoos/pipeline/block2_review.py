@@ -74,6 +74,8 @@ def _norm_summary(check: dict) -> str:
 
 
 def _accepted(data: dict) -> list[dict]:
+    """Ответы для рецензии: все НЕотклонённые (accepted/edited/proposed) —
+    непринятые тоже проверяются, чтобы рецензия помогала решить, принимать ли."""
     out = []
     for a in data.get("answers", []):
         if a.get("status") in ("accepted", "edited", "proposed"):
@@ -88,12 +90,15 @@ def run_block2(project: str, cfg: Config | None = None, *, progress=None) -> dic
         raise FileNotFoundError("Нет результатов Блока 1. Сначала выполните поиск ответов.")
     items = _accepted(data)
     if not items:
-        raise ValueError("Нет принятых ответов для проверки (примите ответы в Блоке 1).")
+        raise ValueError("Нет ответов для проверки: все отклонены или ответы ещё "
+                         "не сформированы (Блок 1).")
 
     # авто-проверка нормативов до запросов к ИИ
     jobs, prechecks = [], []
     for a in items:
-        text = (a.get("user_answer") or a.get("answer", "")) + "\n" + a.get("correction", "")
+        # (a.get(...) or "") — в старых answers.json (до v0.26) поля могли быть null
+        text = ((a.get("user_answer") or a.get("answer") or "")
+                + "\n" + (a.get("correction") or ""))
         ncheck = check_text(text)
         prechecks.append(ncheck)
         jobs.append([

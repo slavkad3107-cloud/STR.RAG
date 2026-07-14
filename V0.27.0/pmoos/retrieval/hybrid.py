@@ -245,11 +245,16 @@ class HybridRetriever:
         if not corp.bm25:
             return []
         scores = corp.bm25.get_scores(_tok(query))
-        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+        # argsort C-уровня вместо Python-сортировки всего корпуса на каждый запрос;
+        # kind="stable" + минус сохраняет прежний порядок при равных баллах.
+        import numpy as _np
+        order = _np.argsort(-_np.asarray(scores), kind="stable")
         out: list[dict] = []
         sset = set(sections) if sections else None
         xset = set(exclude_sections) if exclude_sections else None
         for i in order:
+            if float(scores[i]) <= 0.0:
+                break  # порядок убывающий: дальше только нерелевантные (нулевые)
             pl = corp.payloads[i]
             sec = pl.get("section")
             if sset and sec not in sset:
@@ -264,19 +269,36 @@ class HybridRetriever:
 
     @staticmethod
     def _rrf(result_lists: list[list[dict]], *, k: int = 60,
-             weights: list[float] | None = None) -> list[dict]:
+             weights: list[float] | None = None,
+             groups: list[str] | None = None) -> list[dict]:
         """Reciprocal Rank Fusion по id чанка с ПОСПИСОЧНЫМИ весами.
 
         weights (параллельно result_lists) позволяет не дать одному BM25-списку
         утонуть среди нескольких dense-списков расширения запроса.
+
+        groups (опционально, параллельно result_lists): списки с меткой "dense"
+        нормируются ПОДОКУМЕНТНО — вклад документа делится на число dense-списков,
+        где он встретился (средний reciprocal-rank), а не на общее число списков.
+        Иначе (деление веса на N списков) одиночная чисто-семантическая находка
+        получала бы 1/N веса и тонула ниже ХУДШЕГО элемента полного BM25-списка.
         """
         agg: dict[str, dict] = {}
         for li, lst in enumerate(result_lists):
             w = 1.0 if weights is None else float(weights[li])
+            grp = groups[li] if groups else None
             for rank, item in enumerate(lst):
                 cid = item["id"]
-                node = agg.setdefault(cid, {"item": item, "rrf": 0.0})
-                node["rrf"] += w * (1.0 / (k + rank + 1))
+                node = agg.setdefault(cid, {"item": item, "rrf": 0.0,
+                                            "d_sum": 0.0, "d_cnt": 0})
+                rr = w * (1.0 / (k + rank + 1))
+                if grp == "dense":
+                    node["d_sum"] += rr
+                    node["d_cnt"] += 1
+                else:
+                    node["rrf"] += rr
+        for node in agg.values():
+            if node["d_cnt"]:
+                node["rrf"] += node["d_sum"] / node["d_cnt"]  # средний RR по dense
         fused = sorted(agg.values(), key=lambda x: x["rrf"], reverse=True)
         out = []
         for n in fused:
@@ -317,7 +339,7 @@ class HybridRetriever:
                use_expansion: bool | None = None,
                expansions: list[str] | None = None) -> list[dict]:
         top = top or int(self.cfg.get("retrieval.top_k", 8))
-        candidates = candidates or int(self.cfg.get("retrieval.candidates", 40))
+        candidates = candidates or int(self.cfg.get("retrieval.candidates", 60))
         use_expansion = self.cfg.get("retrieval.use_query_expansion", True) if use_expansion is None else use_expansion
 
         # expansions можно передать готовыми (батчевый путь из batch_search —
@@ -329,24 +351,34 @@ class HybridRetriever:
         else:
             queries = [query]
 
+        # прогрев кэша эмбеддингов одним батчем (иначе каждая перефраза — свой
+        # отдельный прогон энкодера; batch_search это уже делает, тут — одиночный путь)
+        if len(queries) > 1:
+            try:
+                self.embedder.embed_queries(queries)
+            except Exception:  # noqa: BLE001
+                pass
         lists: list[list[dict]] = []
         for q in queries:
             lists.append(self._dense(project, q, candidates=candidates,
                                      sections=sections, exclude_sections=exclude_sections))
-        # веса dense: нормируем на число dense-списков, чтобы вес семантики не рос
-        # линейно с числом перефраз и не топил единственный BM25-список.
-        n_dense = max(1, len(lists))
+        # Нормировка dense — ПОДОКУМЕНТНАЯ (средний reciprocal-rank по dense-спискам,
+        # где документ встретился): семантика не топит единственный BM25-список,
+        # но и одиночная чисто-семантическая находка не теряет вес (раньше деление
+        # веса на N списков опускало её ниже худшего элемента BM25).
         dense_w = float(self.cfg.get("retrieval.dense_weight", 1.0))
-        if self.cfg.get("retrieval.rrf_normalize_dense", True):
-            dense_w = dense_w / n_dense
+        normalize = bool(self.cfg.get("retrieval.rrf_normalize_dense", True))
         weights: list[float] = [dense_w] * len(lists)
+        groups: list[str] = ["dense" if normalize else "flat"] * len(lists)
         # BM25 по исходному замечанию (точные термины важнее перефраза)
         if self.cfg.get("retrieval.use_bm25", True):
             lists.append(self._bm25(project, query, candidates=candidates,
                                     sections=sections, exclude_sections=exclude_sections))
             weights.append(float(self.cfg.get("retrieval.bm25_weight", 1.0)))
+            groups.append("bm25")
 
-        fused = self._rrf(lists, k=int(self.cfg.get("retrieval.rrf_k", 60)), weights=weights)
+        fused = self._rrf(lists, k=int(self.cfg.get("retrieval.rrf_k", 60)),
+                          weights=weights, groups=groups)
         # опциональный near-dup фильтр (версии одного тома) — до реранка
         if self.cfg.get("retrieval.dedup_near", False):
             fused = self._dedup_near(

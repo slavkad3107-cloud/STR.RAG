@@ -170,25 +170,57 @@ def _load_answers(project: str) -> dict[str, Any]:
 # ───────────── №10-11..14: правки ПРЯМО в исходных томах (жёлтым) ─────────────
 
 def _anchor_token(text: str) -> str | None:
-    """Маркер места из текста правки: «табл. 4.1», «т. 8.3», «раздел 5», «п. 2.3»."""
+    """Маркер места из текста правки: «табл. 4.1», «т. 8.3», «раздел 5», «п. 2.3».
+
+    Падежи учтены («в разделУ/пунктЕ/таблицАХ…») — иначе правка молча уходила
+    «в конец» при обычной канцелярской формулировке замечания."""
     import re as _re
-    m = _re.search(r"(?:табл(?:ица|ице|ицу|\.)?|т\.|разд(?:ел|еле|\.)?|п(?:ункт|\.)\.?)"
+    m = _re.search(r"(?:табл(?:иц[аыеуах]{1,2}|\.)?|т\.|разд(?:ел[аеуы]?|\.)?|"
+                   r"п(?:ункт[аеуы]?|\.)\.?)"
                    r"\s*№?\s*([\d][\d.]*)", (text or "").lower())
     return m.group(1).rstrip(".") if m else None
 
 
-def _iter_all_paragraphs(container):
+def _anchor_re(tok: str):
+    """Регэксп поиска якоря с границами по цифрам: «4.1» НЕ должен находиться
+    внутри «14.1», «4.12» или даты «04.11.2025» (иначе правка вставала не туда)."""
+    import re as _re
+    return _re.compile(r"(?<![\d.])" + _re.escape(tok) + r"(?![\d])")
+
+
+def _find_anchor_paragraph(ptexts, tok: str | None):
+    """Первый абзац, содержащий якорный номер (общая логика preview и записи).
+
+    ptexts: список (paragraph|None, lower_text). Возвращает paragraph или None."""
+    if not tok:
+        return None
+    rx = _anchor_re(tok)
+    for p, lt in ptexts:
+        if rx.search(lt):
+            return p
+    return None
+
+
+def _iter_all_paragraphs(container, _seen=None):
     """Все абзацы документа: тело + ячейки таблиц (рекурсивно, включая вложенные).
 
     python-docx `document.paragraphs` НЕ включает абзацы внутри таблиц. В реальных
     томах ООС нумерованные таблицы/пункты («табл. 4.1», «п. 5.2») почти всегда
-    лежат в таблицах — без этого обхода якорь не находится и правки уходят «в конец»."""
+    лежат в таблицах — без этого обхода якорь не находится и правки уходят «в конец».
+    Объединённые (merged) ячейки дедуплицируются по XML-элементу — иначе один и
+    тот же абзац отдавался несколько раз."""
+    if _seen is None:
+        _seen = set()
     for p in container.paragraphs:
         yield p
     for tbl in getattr(container, "tables", []):
         for row in tbl.rows:
             for cell in row.cells:
-                yield from _iter_all_paragraphs(cell)
+                tc_id = id(cell._tc)
+                if tc_id in _seen:
+                    continue
+                _seen.add(tc_id)
+                yield from _iter_all_paragraphs(cell, _seen)
 
 
 def _insert_paragraph_after(par, runs):
@@ -245,16 +277,18 @@ def preview_corrections(project: str, sources: list) -> dict:
                 mine += [a for a in answers if id(a) not in matched_ids]
         else:
             mine = list(answers)
+        vol_error = ""
         try:
             doc = Document(str(src))
-            ptexts = [(p.text or "").lower() for p in _iter_all_paragraphs(doc)]
-        except Exception:  # noqa: BLE001 — предпросмотр не должен падать
-            ptexts = []
+            ptexts = [(None, (p.text or "").lower()) for p in _iter_all_paragraphs(doc)]
+        except Exception as e:  # noqa: BLE001 — предпросмотр не должен падать,
+            ptexts = []         # но и МОЛЧАТЬ нельзя: запись на этом томе упадёт
+            vol_error = f"том не читается ({e}) — запись правок для него не выполнится"
         changes = []
         for a in mine:
             corr = (a.get("correction") or "").strip()
             tok = _anchor_token(corr) or _anchor_token(a.get("remark", ""))
-            found = bool(tok) and any(tok in lt for lt in ptexts)
+            found = bool(tok) and any(_anchor_re(tok).search(lt) for _p, lt in ptexts)
             changes.append({
                 "number": a.get("number", "?"),
                 "placed": (f"рядом с «{tok}»" if found
@@ -262,7 +296,10 @@ def preview_corrections(project: str, sources: list) -> dict:
                                  else "в конец (нет явного места в тексте правки)")),
                 "correction": corr or (a.get("user_answer") or a.get("answer") or ""),
             })
-        result["volumes"].append({"volume": src.name, "changes": changes})
+        vol = {"volume": src.name, "changes": changes}
+        if vol_error:
+            vol["error"] = vol_error
+        result["volumes"].append(vol)
         result["total"] += len(changes)
     return result
 
@@ -288,6 +325,7 @@ def write_corrected_volumes(project: str, sources: list) -> list[Path]:
         return outs
 
     matched_ids = {id(a) for s2 in srcs for a in answers if _match_volume(a, s2)}
+    failed: list[str] = []
     for si, src in enumerate(srcs):
         if len(srcs) > 1:
             mine = [a for a in answers if _match_volume(a, src)]
@@ -295,10 +333,18 @@ def write_corrected_volumes(project: str, sources: list) -> list[Path]:
                 mine += [a for a in answers if id(a) not in matched_ids]
         else:
             mine = list(answers)
-        doc = Document(str(src))
+        try:
+            doc = Document(str(src))
+        except PermissionError:
+            raise  # хаб показывает понятное «том открыт в Word» — не глотаем
+        except Exception as e:  # noqa: BLE001 — битый том не должен ронять остальные
+            failed.append(f"{src.name}: {e}")
+            print(f"[m5] ПРОПУЩЕН {src.name}: {e}", flush=True)
+            continue
         # ищем якорь и в абзацах тела, и внутри таблиц (частый случай в томах ООС)
         ptexts = [(p, (p.text or "").lower()) for p in _iter_all_paragraphs(doc)]
         tail = []
+        anchor_last: dict[int, object] = {}  # якорь → последний вставленный абзац
         for a in mine:
             num = a.get("number", "?")
             ans = (a.get("user_answer") or a.get("answer") or "").strip()
@@ -309,14 +355,13 @@ def write_corrected_volumes(project: str, sources: list) -> list[Path]:
             if corr:
                 runs.append((f"ВНОСИМАЯ ПРАВКА: {corr}", False, True))
             tok = _anchor_token(corr) or _anchor_token(a.get("remark", ""))
-            target = None
-            if tok:
-                for p, lt in ptexts:
-                    if tok in lt:
-                        target = p
-                        break
+            target = _find_anchor_paragraph(ptexts, tok)
             if target is not None:
-                _insert_paragraph_after(target, runs)
+                # несколько правок к одному якорю — вставляем ПОСЛЕ предыдущей
+                # (иначе addnext давал обратный порядок, LIFO)
+                key = id(target._p)
+                after = anchor_last.get(key, target)
+                anchor_last[key] = _insert_paragraph_after(after, runs)
             else:
                 tail.append(runs)
         if tail:
@@ -334,4 +379,7 @@ def write_corrected_volumes(project: str, sources: list) -> list[Path]:
         doc.save(str(out))
         outs.append(out)
         print(f"[m5] {src.name}: правок {len(mine)} → {out.name}", flush=True)
+    if failed and not outs:
+        raise RuntimeError("Ни один том не удалось открыть: " + "; ".join(failed)
+                           + ". Откройте файлы в Word и пересохраните как .docx.")
     return outs
