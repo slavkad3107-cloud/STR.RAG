@@ -32,6 +32,7 @@ _LOCK = threading.Lock()
 # процесс, поэтому модульный кэш переживает ререндеры.
 _MODEL_LOCK = threading.Lock()
 _MODELS: dict[tuple, object] = {}
+_EMB_CACHE_SINGLETON = None  # общее sqlite-подключение дискового кэша (на процесс)
 
 
 def pick_device(requested: str = "auto") -> str:
@@ -76,6 +77,8 @@ class _EmbCache:
     def key(model: str, text: str) -> str:
         return hashlib.sha256(f"{model}\u0000{text}".encode("utf-8")).hexdigest()
 
+    _last_touch = 0.0  # последний UPDATE last_used (класс-уровень: раз на процесс)
+
     def get_many(self, keys: list[str]) -> dict[str, np.ndarray]:
         out: dict[str, np.ndarray] = {}
         if not keys:
@@ -93,9 +96,14 @@ class _EmbCache:
             if rows:
                 import time as _t
                 now = _t.time()
-                self.con.executemany("UPDATE emb SET last_used=? WHERE k=?",
-                                     [(now, k) for k, _ in rows])
-                self.con.commit()
+                # ТРОТТЛИНГ записи на пути чтения: last_used нужен только для
+                # FIFO-очистки кэша, точность не важна — не коммитим синхронную
+                # запись на каждый hit (батч из 100 замечаний давал 100+ UPDATE)
+                if now - _EmbCache._last_touch >= 60.0:
+                    _EmbCache._last_touch = now
+                    self.con.executemany("UPDATE emb SET last_used=? WHERE k=?",
+                                         [(now, k) for k, _ in rows])
+                    self.con.commit()
         for k, v in rows:
             out[k] = np.frombuffer(v, dtype=np.float32)
         return out
@@ -231,8 +239,15 @@ class Embedder:
         return self._dim
 
     def _cache_obj(self) -> _EmbCache:
+        # Синглтон НА ПРОЦЕСС: каждый новый Embedder (память few-shot создаёт его
+        # на каждое замечание) иначе открывал бы своё sqlite-подключение с PRAGMA/
+        # CREATE TABLE. Кэш потокобезопасен (check_same_thread=False + _LOCK).
+        global _EMB_CACHE_SINGLETON
         if self._cache is None:
-            self._cache = _EmbCache()  # без self.dim: не триггерим загрузку модели
+            with _LOCK:
+                if _EMB_CACHE_SINGLETON is None:
+                    _EMB_CACHE_SINGLETON = _EmbCache()  # без dim: модель не грузится
+            self._cache = _EMB_CACHE_SINGLETON
         return self._cache
 
     def _cache_model_id(self) -> str:

@@ -71,15 +71,18 @@ def _pollutant_index() -> list[tuple["re.Pattern[str]", str, str]]:
     out = []
     for alias, code, canon in idx:
         pat = re.compile(r"(?<![\w])" + re.escape(alias) + r"(?![\w])", re.IGNORECASE)
-        out.append((pat, code, canon))
+        # alias хранится рядом с паттерном для дешёвого префильтра подстрокой:
+        # regex НЕ может совпасть без вхождения алиаса как подстроки (escape +
+        # только граничные lookaround), поэтому `alias in text.lower()` — точный гейт
+        out.append((pat, alias, code, canon))
     return out
 
 
 def pollutant_code(name: str) -> tuple[str, str]:
     """Имя/фрагмент → (код ЗВ, каноническое имя). ('', name) если не найдено."""
-    low = (name or "")
-    for pat, code, canon in _pollutant_index():
-        if pat.search(low):
+    low = (name or "").lower()
+    for pat, alias, code, canon in _pollutant_index():
+        if alias in low and pat.search(low):
             return code, canon
     return "", name
 
@@ -92,11 +95,13 @@ def find_pollutants(text: str) -> list[dict]:
     целиком вложенные в уже принятый участок («углеводороды» внутри «углеводороды
     предельные»), — чтобы короткий алиас не добавлял неверный код поверх точного.
     """
-    low = (text or "")
+    low = (text or "").lower()
     seen: set[str] = set()
     covered: list[tuple[int, int]] = []
     out: list[dict] = []
-    for pat, code, canon in _pollutant_index():
+    for pat, alias, code, canon in _pollutant_index():
+        if alias not in low:  # дешёвый префильтр: без подстроки regex не совпадёт
+            continue
         accepted_here = False
         for m in pat.finditer(low):
             s, e = m.span()
@@ -137,26 +142,26 @@ def _equipment_index() -> list[tuple["re.Pattern[str]", str, str]]:
     out = []
     for alias, canon, etype in idx:
         pat = re.compile(r"(?<![\w])" + re.escape(alias) + r"(?![\w])", re.IGNORECASE)
-        out.append((pat, canon, etype))
+        out.append((pat, alias, canon, etype))
     return out
 
 
 def normalize_equipment(mention: str) -> str:
     """«КАМАЗ-65115» / «самосвал КАМАЗ» → «Автосамосвал». Иначе — исходное."""
-    low = (mention or "")
-    for pat, canon, _type in _equipment_index():
-        if pat.search(low):
+    low = (mention or "").lower()
+    for pat, alias, canon, _type in _equipment_index():
+        if alias in low and pat.search(low):
             return canon
     return mention
 
 
 def find_equipment(text: str) -> list[str]:
     """Найти технику в тексте → список канонических наименований (уникальные)."""
-    low = (text or "")
+    low = (text or "").lower()
     seen: set[str] = set()
     out: list[str] = []
-    for pat, canon, _type in _equipment_index():
-        if pat.search(low) and canon not in seen:
+    for pat, alias, canon, _type in _equipment_index():
+        if alias in low and canon not in seen and pat.search(low):
             seen.add(canon)
             out.append(canon)
     return out

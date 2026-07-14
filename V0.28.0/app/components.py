@@ -263,8 +263,26 @@ def section_map(project: str, object_type: str) -> None:
 
 def version_map(project: str, object_type: str) -> None:
     from pmoos.versioning.versions import analyze_versions, set_current_version
+    from pmoos.paths import project_paths as _pp
 
-    vers = analyze_versions(project, object_type=object_type)
+    # analyze_versions = regex-классификация всех файлов + ЗАПИСЬ versions.json —
+    # а st.tabs рендерит вкладку на каждый клик. Кэш по сигнатуре входов
+    # (inventory) и выхода (versions: set_current_version меняет его → пересчёт).
+    def _mt(p):
+        try:
+            return p.stat().st_mtime_ns
+        except OSError:
+            return 0
+    _paths = _pp(project)
+    _sig = (project, object_type, _mt(_paths["inventory"]), _mt(_paths["versions"]))
+    if st.session_state.get("_vers_sig") == _sig and "_vers_data" in st.session_state:
+        vers = st.session_state["_vers_data"]
+    else:
+        vers = analyze_versions(project, object_type=object_type)
+        # сигнатуру снимаем ПОСЛЕ вызова: analyze сам пишет versions.json
+        st.session_state["_vers_sig"] = (project, object_type,
+                                         _mt(_paths["inventory"]), _mt(_paths["versions"]))
+        st.session_state["_vers_data"] = vers
     groups = vers.get("groups", {})
     multi = {k: g for k, g in groups.items() if len(g.get("versions", [])) > 1}
     if not multi:
@@ -302,8 +320,8 @@ def indexing_panel(project: str, object_type: str) -> None:
     _sts = [model_status(_emb), model_status(_rer)]
     _line = " · ".join(f"`{x['model']}` {'✅' if x['cached'] else '⬇️ не скачана'}" for x in _sts)
     # устройство (GPU/CPU) — предупреждаем, что на CPU индексация в разы медленнее
-    from pmoos.core.device import resolve_device
-    _dev = resolve_device(_c.get("embedding.device", "auto"))
+    from pmoos.core.device import probe_device_ui
+    _dev = probe_device_ui(_c.get("embedding.device", "auto"))  # без импорта torch
     mc1, mc2 = st.columns([3, 2])
     if _dev == "cuda":
         mc1.caption(f"Устройство: 🟢 GPU (CUDA) · Локальные модели: {_line}")

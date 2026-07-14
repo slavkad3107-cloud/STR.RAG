@@ -78,12 +78,21 @@ def log_path(project: str) -> Path:
 
 
 def log_tail(project: str, n: int = 40) -> str:
-    """Последние строки журнала фоновой индексации (stdout/stderr процесса)."""
+    """Последние строки журнала фоновой индексации (stdout/stderr процесса).
+
+    Читаем только ХВОСТ файла (64 КБ >> 60 строк): журнал большого прогона —
+    мегабайты, а вызов идёт на каждый рендер вкладки М2."""
     p = log_path(project)
     if not p.exists():
         return ""
     try:
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        with p.open("rb") as f:
+            size = p.stat().st_size
+            f.seek(max(0, size - 65536))
+            data = f.read()
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        if size > 65536 and lines:
+            lines = lines[1:]  # первая строка могла быть срезана посередине
         return "\n".join(lines[-n:])
     except Exception:  # noqa: BLE001
         return ""
@@ -233,6 +242,27 @@ def _pid_alive(pid: int) -> bool:
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def _file_sha256(path: Path) -> str:
+    """sha256 сырых байтов файла (потоково) — для быстрого дедупа до парсинга."""
+    import hashlib
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _raw_sha_owner(state: dict, raw_sha: str) -> str:
+    """rel-путь уже обработанного (done/skipped) файла с тем же raw_sha, если есть."""
+    for rel, fi in (state.get("files") or {}).items():
+        if fi.get("raw_sha") == raw_sha and fi.get("status") in ("done", "skipped"):
+            return rel
+    return ""
 
 
 def _iter_source_files(upload_dir: Path) -> list[Path]:
@@ -409,6 +439,22 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                 cls = classify_filename(fpath.name, object_type, top=1)
                 section = cls[0]["code"] if cls else "UNKNOWN"
                 ver = detect_version_hint(fpath.name) or ""
+                # БЫСТРЫЙ ПУТЬ для побайтовых дубликатов (один том в разных папках,
+                # повторная загрузка): sha256 сырых байтов считается за мс, а полный
+                # парсинг+OCR дубля стоил от секунд до десятков минут (скан) — и лишь
+                # затем дедуп по doc_sha его отбрасывал. Побайтно идентичный файл даёт
+                # идентичное извлечение → тот же doc_sha → итог тот же «skipped».
+                raw_sha = _file_sha256(fpath)
+                if not was_error and raw_sha:
+                    _owner = _raw_sha_owner(state, raw_sha)
+                    if _owner and _owner != rel:
+                        state["files"][rel] = {"status": "skipped", "chunks": 0,
+                                               "section": section, "version": ver,
+                                               "raw_sha": raw_sha,
+                                               "reason": f"дубликат файла ({_owner})"}
+                        state["done_files"] += 1
+                        write_state(project, state)
+                        continue
                 pages = extract_file(
                     fpath,
                     ocr=cfg.get("ocr.enabled", True),
@@ -438,6 +484,7 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                 if sha in known_shas:
                     state["files"][rel] = {"status": "skipped", "chunks": 0,
                                            "section": section, "version": ver,
+                                           "raw_sha": raw_sha,
                                            "reason": "дубликат (sha256)"}
                     state["done_files"] += 1
                     write_state(project, state)
@@ -469,7 +516,8 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                     _mark_changed()
 
                 state["files"][rel] = {"status": "done", "chunks": len(chunks),
-                                       "section": section, "version": ver}
+                                       "section": section, "version": ver,
+                                       "raw_sha": raw_sha}
                 state["done_chunks"] = state.get("done_chunks", 0) + len(chunks)
                 state["total_chunks"] = state.get("total_chunks", 0) + len(chunks)
                 state["done_files"] += 1
@@ -667,18 +715,21 @@ def progress_summary(project: str) -> dict:
             return 1e9
 
     hb_age = _age_sec(st.get("heartbeat") or st.get("updated_at") or "")
-    tail = log_tail(project, 12)
 
+    # хвост журнала нужен только в аварийных ветках — не читаем файл на каждый
+    # рендер вкладки (вызов идёт при каждом rerun приложения)
     # 1) Статус «running», но процесс МЁРТВ → упал (если бы он завершился сам,
     #    он бы выставил done/error перед выходом). Показываем конец журнала.
     if status == "running" and not running:
         status = "error"
+        tail = log_tail(project, 12)
         message = ("Фоновый процесс индексации завершился аварийно. Частые причины: "
                    "не доустановлены зависимости (повторите install.bat) или прервалась "
                    "загрузка модели bge-m3. Конец журнала:\n\n" + (tail or "(журнал пуст)"))
     # 2) Процесс числится живым, но «пульс» не обновлялся > 2 минут → завис.
     elif status == "running" and running and hb_age > 120:
         status = "error"
+        tail = log_tail(project, 12)
         message = (f"Процесс индексации не подаёт признаков жизни {int(hb_age)} с "
                    f"(пульс обновляется каждые 5 с). Нажмите «Сбросить статус» и "
                    f"запустите заново. Конец журнала:\n\n" + (tail or "(журнал пуст)"))

@@ -1,4 +1,4 @@
-"""СтройПроект v0.27.0 «Verified» — единый интерфейс (Streamlit).
+"""СтройПроект v0.28.0 «Swift» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются ОТДЕЛЬНО:
@@ -262,13 +262,20 @@ def tab_m1(project: str, object_type: str) -> None:
     # отсутствует/устарела — строим её автоматически, без нажатия кнопок.
     from pmoos.ingest.inventory import load_inventory as _li, build_inventory as _bi
     from pmoos.ingest.loaders import SUPPORTED_EXT as _SUP
+    import time as _time
     _up = project_paths(project)["uploads"]
     # фильтруем ТЕМИ ЖЕ расширениями, что и build_inventory: посторонний файл
     # (например .tmp/.log) иначе давал вечное «карта устарела» → пересборка на
-    # каждый rerun всего приложения
-    _disk = (sorted(str(q.relative_to(_up)) for q in _up.rglob("*")
-                    if q.is_file() and q.suffix.lower() in _SUP)
-             if _up.exists() else [])
+    # каждый rerun всего приложения. Скан троттлится (2 с): полный rglob со stat
+    # каждого файла на каждый клик излишен; кнопки пересобирают карту сами.
+    _scan = st.session_state.get("_m1_scan")
+    if _scan and _scan[0] == project and _time.monotonic() - _scan[1] < 2.0:
+        _disk = _scan[2]
+    else:
+        _disk = (sorted(str(q.relative_to(_up)) for q in _up.rglob("*")
+                        if q.is_file() and q.suffix.lower() in _SUP)
+                 if _up.exists() else [])
+        st.session_state["_m1_scan"] = (project, _time.monotonic(), _disk)
     _inv0 = _li(project)
     _invf = sorted(f.get("rel", "") for f in (_inv0 or {}).get("files", []))
     if _disk and _disk != _invf:
@@ -413,7 +420,17 @@ def tab_m3(project: str, object_type: str) -> None:
     st.caption("Модуль отвечает на вопрос: «если изменить раздел X — что ещё придётся "
                "пересчитать или поправить?». Связи построены по матрице ПП-87 и "
                "фактическому составу разделов этого проекта.")
-    g = build_and_save(project)
+    # граф пересобирается ТОЛЬКО при изменении инвентаря: st.tabs рендерит все
+    # вкладки на каждый rerun, и build_and_save иначе писал graph.json на диск
+    # при каждом клике в ЛЮБОЙ вкладке (в OneDrive — ещё и лишняя синхронизация)
+    _inv_p = project_paths(project)["inventory"]
+    _sig = (project, _inv_p.stat().st_mtime if _inv_p.exists() else 0.0)
+    if st.session_state.get("_m3_graph_sig") == _sig and "_m3_graph" in st.session_state:
+        g = st.session_state["_m3_graph"]
+    else:
+        g = build_and_save(project)
+        st.session_state["_m3_graph_sig"] = _sig
+        st.session_state["_m3_graph"] = g
     vis = to_vis(g)
     _lbl = {n["id"]: n.get("label", n["id"]) for n in vis["nodes"]}
     mm1, mm2 = st.columns(2)
@@ -541,8 +558,8 @@ def tab_m4(project: str, object_type: str) -> None:
     # честное ожидание: реранжирование на CPU ощутимо дольше, чем на GPU —
     # предупреждаем ДО запуска (тот же индикатор, что в М2)
     try:
-        from pmoos.core.device import resolve_device
-        if resolve_device(cfg.get("embedding.device", "auto")) != "cuda":
+        from pmoos.core.device import probe_device_ui
+        if probe_device_ui(cfg.get("embedding.device", "auto")) != "cuda":
             st.caption("Устройство: 🟠 CPU — поиск и реранжирование источников идут "
                        "медленнее, чем на видеокарте NVIDIA (на ~75 замечаний — до "
                        "десятков минут). Это нормально, ход виден по прогрессу.")
@@ -567,13 +584,13 @@ def tab_m4(project: str, object_type: str) -> None:
         rdir = project_paths(project)["remarks_dir"]
         rdir.mkdir(parents=True, exist_ok=True)
         remarks_path = rdir / rfile.name
-        _data = bytes(rfile.getbuffer())
+        _mv = rfile.getbuffer()  # memoryview: без полной копии файла в память
         # пишем только если файл изменился: пока он лежит в uploader'e, каждый
         # rerun приложения иначе перезаписывал бы его на диск заново
-        if not (remarks_path.exists() and remarks_path.stat().st_size == len(_data)):
-            remarks_path.write_bytes(_data)
+        if not (remarks_path.exists() and remarks_path.stat().st_size == _mv.nbytes):
+            remarks_path.write_bytes(_mv)
         try:
-            _ok = remarks_path.stat().st_size == len(_data)
+            _ok = remarks_path.stat().st_size == _mv.nbytes
         except OSError:
             _ok = False
         if not _ok:

@@ -40,10 +40,21 @@ def collection_name(project: str) -> str:
 
 
 class VectorStore:
-    def __init__(self, cfg: Config, dim: int):
+    def __init__(self, cfg: Config, dim):
+        """dim: int ЛИБО callable() -> int (ленивое разрешение).
+
+        dim нужен только ensure_collection (создание коллекции). Callable
+        позволяет HybridRetriever НЕ грузить эмбеддер ~2.3 ГБ при создании —
+        в поисковом пути коллекция уже существует и dim не запрашивается."""
         self.cfg = cfg
-        self.dim = dim
+        self._dim = dim
         self._client = None
+
+    @property
+    def dim(self) -> int:
+        if callable(self._dim):
+            self._dim = int(self._dim())
+        return self._dim
 
     def client(self):
         if self._client is not None:

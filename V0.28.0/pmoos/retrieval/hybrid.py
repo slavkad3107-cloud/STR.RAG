@@ -44,7 +44,12 @@ def _tok(text: str) -> list[str]:
     реестр-регэксп, что и движок нормативов) — так BM25 ловит точные короды.
     """
     text = text or ""
-    toks = [t.lower() for t in _WORD.findall(text)]
+    # sys.intern: одинаковые словоформы («выбросы» в тысячах чанков) делят ОДИН
+    # str-объект — на 20-50k чанков это сотни МБ RAM (t.lower() иначе создаёт
+    # новый объект на каждое вхождение). Значения строк не меняются → BM25
+    # бит-в-бит идентичен.
+    import sys as _sys
+    toks = [_sys.intern(t.lower()) for t in _WORD.findall(text)]
     # find_references — чистый regex; цифр нет → нормативного кода точно нет,
     # пропускаем дорогой проход (заметно дешевле на сборке BM25-корпуса).
     if any(c.isdigit() for c in text):
@@ -52,7 +57,7 @@ def _tok(text: str) -> list[str]:
             for ref in find_references(text):
                 code = _norm_code(ref)
                 if code:
-                    toks.append(code)
+                    toks.append(_sys.intern(code))
         except Exception:  # noqa: BLE001
             pass
     return toks
@@ -124,7 +129,10 @@ class HybridRetriever:
                  store: VectorStore | None = None, reranker: Reranker | None = None):
         self.cfg = cfg
         self.embedder = embedder or Embedder(cfg)
-        self.store = store or VectorStore(cfg, dim=self.embedder.dim)
+        # dim — ЛЕНИВО (callable): self.embedder.dim грузит модель ~2.3 ГБ, а в
+        # поисковом пути dim не нужен (коллекция уже существует). Модель загрузится
+        # при первом реальном embed, а не при создании ретривера.
+        self.store = store or VectorStore(cfg, dim=lambda: self.embedder.dim)
         self.reranker = reranker or Reranker(cfg)
         self._corpus_cache: dict[str, _Corpus] = {}
 
@@ -152,8 +160,15 @@ class HybridRetriever:
                     collection_name=name, with_payload=True, with_vectors=False,
                     limit=512, offset=offset,
                 )
+                import sys as _sys
                 for p in points:
                     pl = p.payload or {}
+                    # intern повторяющихся значений: 'file'/'section' одинаковы у
+                    # всех чанков одного файла, но scroll даёт отдельные str-копии
+                    for _k in ("file", "section"):
+                        _v = pl.get(_k)
+                        if isinstance(_v, str):
+                            pl[_k] = _sys.intern(_v)
                     corp.ids.append(str(p.id))
                     corp.texts.append(pl.get("text", ""))
                     corp.payloads.append(pl)
@@ -204,11 +219,18 @@ class HybridRetriever:
         if count > 0 and fp.exists():
             try:
                 import pickle
-                data = pickle.loads(fp.read_bytes())
+                import sys as _sys
+                # потоковый pickle.load: read_bytes() держал бы весь блоб
+                # (~60-180 МБ на 40-50k чанков) поверх построенных объектов
+                with fp.open("rb") as f:
+                    data = pickle.load(f)
                 if (data.get("count") == count and isinstance(data.get("ids"), list)
                         and len(data["ids"]) == count):
+                    toks = data.get("tokens")
+                    if toks:  # ре-интернируем токены из старого pkl (см. _tok)
+                        toks = [[_sys.intern(t) for t in row] for row in toks]
                     corp = _Corpus(ids=data["ids"], texts=data["texts"],
-                                   payloads=data["payloads"], tokens=data.get("tokens"))
+                                   payloads=data["payloads"], tokens=toks)
             except Exception:  # noqa: BLE001
                 corp = None
 
@@ -219,16 +241,21 @@ class HybridRetriever:
                     import pickle
                     fp.parent.mkdir(parents=True, exist_ok=True)
                     tmp = fp.with_suffix(".pkl.tmp")
-                    tmp.write_bytes(pickle.dumps({
-                        "count": len(corp.ids), "ids": corp.ids, "texts": corp.texts,
-                        "payloads": corp.payloads, "tokens": corp.tokens,
-                    }))
+                    with tmp.open("wb") as f:  # потоково, без промежуточного блоба
+                        pickle.dump({
+                            "count": len(corp.ids), "ids": corp.ids,
+                            "texts": corp.texts, "payloads": corp.payloads,
+                            "tokens": corp.tokens,
+                        }, f)
                     tmp.replace(fp)
                 except Exception:  # noqa: BLE001
                     pass
 
         self._build_by_index(corp)
         self._build_bm25(corp)
+        # токены после сборки BM25 больше нигде не нужны (запрос токенизируется
+        # заново) — освобождаем десятки-сотни МБ на большой базе. pkl уже записан.
+        corp.tokens = None
         self._corpus_cache[project] = corp
         return corp
 
