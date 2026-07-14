@@ -1,4 +1,4 @@
-"""СтройПроект v0.26.0 «Fidelity» — единый интерфейс (Streamlit).
+"""СтройПроект v0.27.0 «Verified» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются ОТДЕЛЬНО:
@@ -128,6 +128,17 @@ def _workflow_state(project: str) -> dict:
     stt = _load("index_state")
     if isinstance(stt, dict):
         s = stt.get("status", "idle")
+        # «running» при мёртвом процессе (жёсткое убийство/выключение) иначе висел
+        # бы вечным ⏳: проверяем возраст «пульса» (пишется каждые ~5 с) — чистое
+        # чтение того же JSON, без импорта индексатора.
+        if s == "running":
+            try:
+                from datetime import datetime as _dt
+                _ts = stt.get("heartbeat") or stt.get("updated_at") or ""
+                if (_dt.now() - _dt.fromisoformat(_ts)).total_seconds() > 120:
+                    s = "error"
+            except Exception:  # noqa: BLE001
+                pass
         done, total = stt.get("done_files", 0), stt.get("total_files", 0)
         ws["m2"] = {"done": "✅", "running": "⏳", "paused": "⏸",
                     "error": "⚠", "idle": "○"}.get(s, "○")
@@ -250,8 +261,14 @@ def tab_m1(project: str, object_type: str) -> None:
     # лежат в папке проекта (загружены ранее или добавлены вручную), а карта разделов
     # отсутствует/устарела — строим её автоматически, без нажатия кнопок.
     from pmoos.ingest.inventory import load_inventory as _li, build_inventory as _bi
+    from pmoos.ingest.loaders import SUPPORTED_EXT as _SUP
     _up = project_paths(project)["uploads"]
-    _disk = sorted(str(q.relative_to(_up)) for q in _up.rglob("*") if q.is_file()) if _up.exists() else []
+    # фильтруем ТЕМИ ЖЕ расширениями, что и build_inventory: посторонний файл
+    # (например .tmp/.log) иначе давал вечное «карта устарела» → пересборка на
+    # каждый rerun всего приложения
+    _disk = (sorted(str(q.relative_to(_up)) for q in _up.rglob("*")
+                    if q.is_file() and q.suffix.lower() in _SUP)
+             if _up.exists() else [])
     _inv0 = _li(project)
     _invf = sorted(f.get("rel", "") for f in (_inv0 or {}).get("files", []))
     if _disk and _disk != _invf:
@@ -370,9 +387,9 @@ def tab_m1(project: str, object_type: str) -> None:
 
     st.subheader("Версии разделов")
     C.version_map(project, object_type)
-
-    st.subheader("Контакты проектировщиков и экспертов")
-    C.contacts_panel(project)
+    # блок C.contacts_panel УДАЛЁН: он писал в contacts.json СВОЮ схему
+    # (designers/experts) поверх схемы экспандера «📇 Контакты…» (люди/организации) —
+    # сохранение одного блока стирало данные другого. Контакты — в экспандере выше.
 
 
 def tab_m2(project: str, object_type: str) -> None:
@@ -521,6 +538,17 @@ def tab_m4(project: str, object_type: str) -> None:
     cfg = _cfg()
     C.module_ai_selector(cfg, "module4")
 
+    # честное ожидание: реранжирование на CPU ощутимо дольше, чем на GPU —
+    # предупреждаем ДО запуска (тот же индикатор, что в М2)
+    try:
+        from pmoos.core.device import resolve_device
+        if resolve_device(cfg.get("embedding.device", "auto")) != "cuda":
+            st.caption("Устройство: 🟠 CPU — поиск и реранжирование источников идут "
+                       "медленнее, чем на видеокарте NVIDIA (на ~75 замечаний — до "
+                       "десятков минут). Это нормально, ход виден по прогрессу.")
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         from pmoos.memory import kb_size
         n_kb = kb_size()
@@ -540,7 +568,10 @@ def tab_m4(project: str, object_type: str) -> None:
         rdir.mkdir(parents=True, exist_ok=True)
         remarks_path = rdir / rfile.name
         _data = bytes(rfile.getbuffer())
-        remarks_path.write_bytes(_data)
+        # пишем только если файл изменился: пока он лежит в uploader'e, каждый
+        # rerun приложения иначе перезаписывал бы его на диск заново
+        if not (remarks_path.exists() and remarks_path.stat().st_size == len(_data)):
+            remarks_path.write_bytes(_data)
         try:
             _ok = remarks_path.stat().st_size == len(_data)
         except OSError:
@@ -627,7 +658,8 @@ def tab_m4(project: str, object_type: str) -> None:
 
 
 def _render_answers(project: str) -> None:
-    from pmoos.pipeline.block1_answers import load_answers, set_decision, CATEGORIES
+    from pmoos.pipeline.block1_answers import (load_answers, set_decision,
+                                               set_decisions, CATEGORIES)
     data = load_answers(project)
     answers = data.get("answers", [])
     if not answers:
@@ -691,10 +723,9 @@ def _render_answers(project: str) -> None:
     pb1, pb2, pb3 = st.columns(3)
     if pb1.button(f"✅ Принять показанные ({len(view)})", key="m4_acc_vis",
                   width='stretch', disabled=not view):
-        for a in view:
-            if a.get("status") != "accepted":
-                set_decision(project, a["number"], status="accepted",
-                             user_answer=a.get("user_answer") or None)
+        set_decisions(project, [{"number": a["number"], "status": "accepted",
+                                 "user_answer": a.get("user_answer") or None}
+                                for a in view if a.get("status") != "accepted"])
         st.rerun()
     if pb2.button("✅ Принять ВСЕ", key="m4_acc_all", width='stretch'):
         st.session_state["m4_acc_all_arm"] = True
@@ -707,10 +738,9 @@ def _render_answers(project: str) -> None:
                f"и в память как принятые." if _low_all else ""))
         ya, na = st.columns(2)
         if ya.button("Да, принять все", key="m4_acc_all_yes", width='stretch'):
-            for a in answers:
-                if a.get("status") != "accepted":
-                    set_decision(project, a["number"], status="accepted",
-                                 user_answer=a.get("user_answer") or None)
+            set_decisions(project, [{"number": a["number"], "status": "accepted",
+                                     "user_answer": a.get("user_answer") or None}
+                                    for a in answers if a.get("status") != "accepted"])
             st.session_state["m4_acc_all_arm"] = False
             st.rerun()
         if na.button("Отмена", key="m4_acc_all_no", width='stretch'):
@@ -718,9 +748,9 @@ def _render_answers(project: str) -> None:
             st.rerun()
     if pb3.button("↩️ Снять решения (показанные)", key="m4_clr_vis",
                   width='stretch', disabled=not view):
-        for a in view:
-            set_decision(project, a["number"], status="proposed",
-                         user_answer=a.get("user_answer") or None)
+        set_decisions(project, [{"number": a["number"], "status": "proposed",
+                                 "user_answer": a.get("user_answer") or None}
+                                for a in view])
         st.rerun()
 
     # экспорт ответов в CSV (открывается в Excel; UTF-8 BOM для кириллицы)
@@ -833,7 +863,10 @@ def tab_m5(project: str, object_type: str) -> None:
         vols_dir.mkdir(parents=True, exist_ok=True)
         for up in ups:
             p = vols_dir / up.name
-            p.write_bytes(up.getbuffer())
+            _buf = up.getbuffer()
+            # не перезаписываем неизменённый том на каждый rerun приложения
+            if not (p.exists() and p.stat().st_size == len(_buf)):
+                p.write_bytes(_buf)
             src_paths.append(p)
         st.caption("Сохранено томов: " + ", ".join(p.name for p in src_paths))
     elif vols_dir.exists():
@@ -848,7 +881,18 @@ def tab_m5(project: str, object_type: str) -> None:
     if src_paths and st.button("👁 Предпросмотр правок (без записи в файлы)",
                                key="m5_preview", width='stretch'):
         from pmoos.output.docx_writer import preview_corrections
-        prev = preview_corrections(project, src_paths)
+        from pmoos.ingest.remarks import _convert_doc_with_word, _is_ole
+        # та же подготовка, что при записи (.doc → .converted.docx): иначе
+        # предпросмотр показывал бы ложное «в конец» для старых .doc-томов
+        _prev_paths = []
+        for p in src_paths:
+            try:
+                if p.suffix.lower() == ".doc" or _is_ole(p):
+                    p = _convert_doc_with_word(p)
+            except Exception:  # noqa: BLE001 — покажется как ошибка тома ниже
+                pass
+            _prev_paths.append(p)
+        prev = preview_corrections(project, _prev_paths)
         if not prev.get("accepted"):
             st.warning("Нет принятых ответов — сначала примите их в Модуле 4.")
         else:
@@ -857,6 +901,8 @@ def tab_m5(project: str, object_type: str) -> None:
                        f"до нажатия кнопки записи ниже.")
             for v in prev["volumes"]:
                 with st.expander(f"📄 {v['volume']} — правок: {len(v['changes'])}", expanded=True):
+                    if v.get("error"):
+                        st.error(f"⚠ {v['error']}")
                     if v["changes"]:
                         st.dataframe([{"Замеч. №": c["number"], "Куда вставится": c["placed"],
                                        "Текст правки": (c.get("correction") or "")[:180]}
@@ -975,6 +1021,14 @@ def main() -> None:
     if not project:
         st.info("Создайте или выберите проект слева, чтобы начать.")
         return
+
+    # смена проекта: сбросить «взведённые» подтверждения опасных действий и
+    # скачанный файл замечаний — иначе подтверждение/путь «переезжали» на другой
+    # проект (риск сброса ответов или переиндексации не того проекта)
+    if st.session_state.get("_last_project") != project:
+        for _k in ("m4_reset_arm", "m4_acc_all_arm", "idx_reindex_arm", "m4_url_path"):
+            st.session_state.pop(_k, None)
+        st.session_state["_last_project"] = project
 
     st.title(f"Проект: {project}")
 

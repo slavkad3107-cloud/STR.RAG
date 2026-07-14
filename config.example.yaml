@@ -67,21 +67,41 @@ embedding:
 reranker:
   enabled: true
   model: BAAI/bge-reranker-v2-m3
+  fp16: true            # half-точность на GPU (на CPU игнорируется)
+  max_length: 1024      # окно кросс-энкодера в токенах (v0.26)
 retrieval:
   top_k: 8
-  candidates: 40
+  candidates: 60        # глубина пула перед реранком (v0.19: 40 -> 60, лучше recall)
   use_bm25: true
   use_rerank: true
   use_query_expansion: true
   expansions: 3
+  expand_context: true      # соседние чанки + склейка таблиц в контекст
+  context_neighbors: 1
+  merge_tables: true
+  rrf_k: 60                 # параметр Reciprocal Rank Fusion
+  bm25_weight: 1.0          # вес лексического канала (точные коды ГОСТ/СП)
+  dense_weight: 1.0
+  rrf_normalize_dense: true # подокументная нормировка dense (v0.26)
+  dedup_near: false         # near-dup фильтр версий одного тома (opt-in)
+  dedup_near_threshold: 0.9
 chunking:
   size: 1200
   overlap: 200
   min_chunk: 80
+  mode: char            # char (базовый) | semantic (по пунктам НПА; нужен reindex)
+  target_tokens: 512
+  chars_per_token: 3.2
 qdrant:
   mode: embedded
   url: http://localhost:6333
+memory:
+  enabled: true
+  k: 2
+  semantic: true        # few-shot похожих замечаний через bge-m3
+  min_sim: 0.45
 ocr:
   enabled: true
   min_text_chars: 200
   lang: rus+eng
+  max_pages: 0          # предел страниц OCR на один PDF (0 = без лимита)

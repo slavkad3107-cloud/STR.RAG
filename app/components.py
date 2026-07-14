@@ -148,6 +148,7 @@ def module_ai_selector(cfg, module: str, *, title: str | None = None) -> None:
                                     value="", type="password", key=f"mkey_{module}")
                 if val:
                     _envp = write_env_key(provider, val)
+                    st.session_state.pop(f"mkey_{module}", None)  # анти-зацикливание rerun
                     st.success(f"Ключ сохранён: {_envp}"); st.rerun()
 
 
@@ -223,6 +224,9 @@ def ai_settings_panel(cfg) -> None:
             )
             if val:
                 _envp = write_env_key(prov, val)
+                # очистить keyed-состояние ПЕРЕД rerun: иначе val остаётся непустым
+                # на следующем прогоне и сохранение+rerun зацикливаются
+                st.session_state.pop(f"key_{prov}", None)
                 st.success(f"Ключ {PROVIDER_LABEL[prov]} сохранён: {_envp}")
                 st.rerun()
 
@@ -392,7 +396,25 @@ def indexing_panel(project: str, object_type: str) -> None:
                        "Для A/B: замерьте scripts/eval_golden.py run ДО и ПОСЛЕ."):
         st.session_state["idx_reindex_arm"] = True
     if st.session_state.get("idx_reindex_arm"):
-        rc2.warning(f"Стереть базу проекта и переиндексировать заново? Режим чанкинга: **{_mode_ru}**.")
+        # ЗАЩИТА ДАННЫХ: файлы ПД хранятся ВРЕМЕННО (их можно было очистить после
+        # индексации) — если на диске файлов меньше, чем документов в базе,
+        # переиндексация БЕЗВОЗВРАТНО потеряет отсутствующие документы.
+        _loss_note = ""
+        try:
+            from pmoos.index.indexer import _iter_source_files as _isf
+            from pmoos.index.vectorstore import VectorStore as _VS2
+            from pmoos.paths import project_paths as _pp2
+            _n_disk = len(_isf(_pp2(project)["uploads"]))
+            _n_db = len(_VS2(_c, dim=1024).existing_doc_shas(project))
+            if _n_db > _n_disk:
+                _loss_note = (f"\n\n🛑 **ВНИМАНИЕ: в базе {_n_db} докум., а файлов на "
+                              f"диске только {_n_disk}.** Отсутствующие на диске документы "
+                              f"будут БЕЗВОЗВРАТНО удалены из базы (файлы ПД могли быть "
+                              f"очищены после индексации). Сначала верните файлы в Модуль 1.")
+        except Exception:  # noqa: BLE001
+            pass
+        rc2.warning(f"Стереть базу проекта и переиндексировать заново? "
+                    f"Режим чанкинга: **{_mode_ru}**.{_loss_note}")
         yy, nn = rc2.columns(2)
         if yy.button("Да, с нуля", key="idx_reindex_yes", width='stretch'):
             start_background(project, object_type=object_type, reindex=True)
@@ -493,8 +515,10 @@ def indexing_panel(project: str, object_type: str) -> None:
             # целостность базы Qdrant + число точек
             try:
                 from pmoos.index.vectorstore import VectorStore as _VS
-                from pmoos.index.embeddings import Embedder as _Emb
-                _vs = _VS(_c, dim=_Emb(_c).dim)
+                # ВАЖНО: count() коллекции не зависит от dim и НЕ создаёт коллекцию,
+                # поэтому НЕ грузим эмбеддер (иначе кнопка «Проверить окружение»
+                # синхронно тянула бы модель ~2.3 ГБ). bge-m3 = 1024.
+                _vs = _VS(_c, dim=1024)
                 _cnt = int(_vs.count(project))
                 try:
                     _vs.close()

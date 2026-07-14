@@ -141,21 +141,27 @@ def _normalize_answer(data: dict) -> dict:
 
 def _provenance(cfg: Config, object_type: str) -> dict:
     """Снимок конфигурации пайплайна — чтобы при регрессии было видно, ЧЕМ
-    отличался прогон (модель/чанкинг/top_k/rerank/expansion/версия)."""
+    отличался прогон (модель/чанкинг/top_k/rerank/expansion/версия).
+
+    Информационный снимок НЕ должен ронять run_block1 (он собирается в самом
+    конце, после всех затрат на LLM) — любые касты под защитой."""
     from .. import __version__
-    prov = {
-        "version": __version__,
-        "object_type": object_type,
-        "chunking_mode": str(cfg.get("chunking.mode", "char")),
-        "top_k": int(cfg.get("retrieval.top_k", 8)),
-        "candidates": int(cfg.get("retrieval.candidates", 60)),
-        "use_rerank": bool(cfg.get("retrieval.use_rerank", True)),
-        "reranker_max_length": int(cfg.get("reranker.max_length", 1024)),
-        "expansions": (int(cfg.get("retrieval.expansions", 3))
-                       if cfg.get("retrieval.use_query_expansion", True) else 0),
-        "bm25_weight": float(cfg.get("retrieval.bm25_weight", 1.0)),
-        "dense_weight": float(cfg.get("retrieval.dense_weight", 1.0)),
-    }
+    prov: dict = {"version": __version__, "object_type": object_type}
+    try:
+        prov.update({
+            "chunking_mode": str(cfg.get("chunking.mode", "char")),
+            "top_k": int(cfg.get("retrieval.top_k", 8)),
+            # дефолт = фактическому дефолту поиска (hybrid.py), чтобы снимок не врал
+            "candidates": int(cfg.get("retrieval.candidates", 60)),
+            "use_rerank": bool(cfg.get("retrieval.use_rerank", True)),
+            "reranker_max_length": int(cfg.get("reranker.max_length", 1024)),
+            "expansions": (int(cfg.get("retrieval.expansions", 3))
+                           if cfg.get("retrieval.use_query_expansion", True) else 0),
+            "bm25_weight": float(cfg.get("retrieval.bm25_weight", 1.0)),
+            "dense_weight": float(cfg.get("retrieval.dense_weight", 1.0)),
+        })
+    except Exception:  # noqa: BLE001 — мусор в конфиге не должен убить результат
+        prov["config_error"] = "часть значений конфига не удалось прочитать"
     try:  # провайдер/модель — намерение (фактического из-за fallback-цепочки может отличаться)
         prov["answer_provider"] = str(cfg.get("ai.modules.module4.provider",
                                               cfg.get("ai.default_provider", "")) or "")
@@ -301,9 +307,14 @@ def run_block1(project: str, cfg: Config | None = None, *,
         sources_unverified = not matched
 
         answer_text = data.get("answer", "").strip()
-        # источник для consistency = объединённый текст использованных фрагментов
-        src_text = "\n".join(h.get("text", "") for h in hits[:5])
-        cons = compare(src_text, answer_text + " " + data.get("correction", ""))
+        # источник для consistency = ТЕ ЖЕ фрагменты, что ушли модели в контекст
+        # (раньше hits[:5] при контексте top_k=8 — сущности из фрагментов 6-8 давали
+        # ложные «unsupported_refs»). Плюс текст самого замечания: норматив,
+        # процитированный экспертом, — легитимная ссылка, а не «выдумка» ответа.
+        _ctx_limit = int(cfg.get("retrieval.top_k", 8))
+        src_text = "\n".join((h.get("text") or "") for h in hits[:_ctx_limit])
+        cons = compare(src_text + "\n" + (r.text or ""),
+                       answer_text + " " + data.get("correction", ""))
 
         # СЛАБАЯ ОПОРА НА ИСТОЧНИКИ (по итогам dex-ревью): для замечаний экспертизы
         # ответ «от себя» недопустим. Если retrieval НИЧЕГО не нашёл в ПД — помечаем
@@ -382,20 +393,9 @@ def load_answers(project: str) -> dict[str, Any]:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def set_decision(project: str, number: str, *, status: str,
-                 user_answer: str | None = None) -> dict:
-    """Пользователь принимает/правит/отклоняет конкретное предложение."""
-    data = load_answers(project)
-    for a in data.get("answers", []):
-        if str(a["number"]) == str(number):
-            a["status"] = status
-            if user_answer is not None:
-                a["user_answer"] = user_answer
-            break
-    _save(project, data)
-    # ИММУТАБЕЛЬНЫЙ АУДИТ решений (append-only): для госэкспертизы важен доказуемый
-    # след — ЧТО именно принято, с каким текстом и источниками (снимок на момент
-    # решения, не ссылка на изменяемый answers.json).
+def _audit_entry(data: dict, number: str, status: str,
+                 user_answer: str | None) -> dict:
+    """Строка append-only аудита decisions.jsonl со снимком принятого ответа."""
     ans_obj = next((a for a in data.get("answers", [])
                     if str(a["number"]) == str(number)), None)
     entry = {"ts": datetime.now().isoformat(), "number": number,
@@ -413,20 +413,63 @@ def set_decision(project: str, number: str, *, status: str,
             "generated_at": data.get("generated_at", ""),
             "version": __version__,
         }
+    return entry
+
+
+def _memorize(project: str, data: dict, number: str) -> None:
+    """Пополнить память экспертизы принятым/правленым ответом (best-effort)."""
+    try:
+        from ..memory import record_one
+        ans_obj = next((a for a in data.get("answers", [])
+                        if str(a["number"]) == str(number)), None)
+        if ans_obj:
+            final = (ans_obj.get("user_answer") or ans_obj.get("answer") or "").strip()
+            # sources может быть пуст (v0.26: ложный srcs[:3] убран) — раздел
+            # берём из найденного поиском, иначе память few-shot потеряет секцию
+            sec = ((ans_obj.get("sources") or ans_obj.get("retrieved_sources")
+                    or [{}])[0]).get("section", "")
+            record_one(remark=ans_obj.get("remark", ""), answer=final,
+                       correction=ans_obj.get("correction", ""), section=sec,
+                       project=project, number=number)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def set_decisions(project: str, decisions: list[dict]) -> dict:
+    """ПАКЕТНОЕ принятие решений: [{number, status, user_answer?}, ...].
+
+    Один load + один save + один append аудита вместо N полных перезаписей
+    answers.json («Принять ВСЕ» на 75 замечаний — раньше 75 циклов чтения-записи)."""
+    data = load_answers(project)
+    by_num = {str(a.get("number")): a for a in data.get("answers", [])}
+    applied: list[tuple[str, str, str | None]] = []
+    for d in decisions:
+        number = str(d.get("number"))
+        status = d.get("status", "proposed")
+        user_answer = d.get("user_answer")
+        a = by_num.get(number)
+        if a is None:
+            continue
+        a["status"] = status
+        if user_answer is not None:
+            a["user_answer"] = user_answer
+        applied.append((number, status, user_answer))
+    _save(project, data)
+    # ИММУТАБЕЛЬНЫЙ АУДИТ (append-only): доказуемый след — что именно принято,
+    # с каким текстом и источниками (снимок на момент решения).
     dec = project_paths(project)["decisions"]
     with dec.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    # пополняем память экспертизы принятыми/правлеными ответами (обучение на проектах)
-    if status in ("accepted", "edited"):
-        try:
-            from ..memory import record_one
-            ans_obj = next((a for a in data.get("answers", []) if str(a["number"]) == str(number)), None)
-            if ans_obj:
-                final = (ans_obj.get("user_answer") or ans_obj.get("answer") or "").strip()
-                sec = (ans_obj.get("sources") or [{}])[0].get("section", "")
-                record_one(remark=ans_obj.get("remark", ""), answer=final,
-                           correction=ans_obj.get("correction", ""), section=sec,
-                           project=project, number=number)
-        except Exception:  # noqa: BLE001
-            pass
+        for number, status, user_answer in applied:
+            f.write(json.dumps(_audit_entry(data, number, status, user_answer),
+                               ensure_ascii=False) + "\n")
+    for number, status, _ua in applied:
+        if status in ("accepted", "edited"):
+            _memorize(project, data, number)
     return data
+
+
+def set_decision(project: str, number: str, *, status: str,
+                 user_answer: str | None = None) -> dict:
+    """Пользователь принимает/правит/отклоняет конкретное предложение."""
+    return set_decisions(project, [{"number": number, "status": status,
+                                    "user_answer": user_answer}])

@@ -112,7 +112,7 @@ def _invalidate_cache() -> None:
 _VEC_CACHE: dict[str, Any] = {"sig": object(), "vecs": None}
 
 
-def _kb_vectors(records: list[dict]):
+def _kb_vectors(records: list[dict], cfg=None):
     """Эмбеддинги замечаний базы; пересчёт только при изменении базы."""
     from ..config import load_config
     from ..index.embeddings import Embedder
@@ -120,7 +120,7 @@ def _kb_vectors(records: list[dict]):
         sig = _RECORDS_CACHE["sig"]
         if _VEC_CACHE["sig"] == sig and _VEC_CACHE["vecs"] is not None:
             return _VEC_CACHE["vecs"]
-    emb = Embedder(load_config())
+    emb = Embedder(cfg or load_config())
     vecs = emb.embed([r.get("remark", "") for r in records])  # нормированные
     with _RECORDS_LOCK:
         _VEC_CACHE.update(sig=sig, vecs=vecs)
@@ -128,17 +128,18 @@ def _kb_vectors(records: list[dict]):
 
 
 def _semantic_similar(remark_text: str, *, k: int, exclude_project: str | None,
-                      min_sim: float) -> list[dict] | None:
+                      min_sim: float, cfg=None) -> list[dict] | None:
     """Топ-k по косинусной близости bge-m3. None → семантика выключена."""
-    from ..config import load_config
-    cfg = load_config()
+    if cfg is None:  # cfg передаётся сверху (similar_past) — без повторного чтения YAML
+        from ..config import load_config
+        cfg = load_config()
     if not cfg.get("memory.semantic", True):
         return None
     records, _ = _load_cached()
     if not records:
         return []
     from ..index.embeddings import Embedder
-    vecs = _kb_vectors(records)
+    vecs = _kb_vectors(records, cfg)
     qv = Embedder(cfg).embed([remark_text])[0]
     sims = vecs @ qv  # векторы нормированы → dot = cosine
     rt_low = (remark_text or "").strip().lower()
@@ -244,9 +245,10 @@ def similar_past(remark_text: str, *, k: int = 2, exclude_project: str | None = 
     лексический Jaccard (работает без GPU/моделей)."""
     try:
         from ..config import load_config
-        min_sim = float(load_config().get("memory.min_sim", 0.45))
+        cfg = load_config()  # один раз на вызов; ниже передаём внутрь
+        min_sim = float(cfg.get("memory.min_sim", 0.45))
         sem = _semantic_similar(remark_text, k=k, exclude_project=exclude_project,
-                                min_sim=min_sim)
+                                min_sim=min_sim, cfg=cfg)
         if sem is not None:
             return sem
     except Exception:  # noqa: BLE001
