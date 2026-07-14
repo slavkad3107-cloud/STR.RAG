@@ -30,16 +30,34 @@ def _kg_path() -> Path:
     return d / "knowledge.json"
 
 
+# кэш на процесс по сигнатуре файла: граф накопительный по ВСЕМ проектам и растёт,
+# а stats()/поиск в UI дергали полный json.loads + сборку DiGraph на каждый rerun
+_KG_CACHE: dict[str, Any] = {"sig": None, "g": None}
+
+
+def _kg_sig(p: Path):
+    try:
+        stt = p.stat()
+        return (stt.st_mtime_ns, stt.st_size)
+    except OSError:
+        return None
+
+
 def load_knowledge():
     import networkx as nx
     p = _kg_path()
     if not p.exists():
         return nx.DiGraph()
+    sig = _kg_sig(p)
+    if sig is not None and _KG_CACHE["sig"] == sig and _KG_CACHE["g"] is not None:
+        return _KG_CACHE["g"]
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        return nx.node_link_graph(data, directed=True, edges="links")
+        g = nx.node_link_graph(data, directed=True, edges="links")
     except Exception:  # noqa: BLE001
         return nx.DiGraph()
+    _KG_CACHE.update(sig=sig, g=g)
+    return g
 
 
 def save_knowledge(g) -> Path:
@@ -47,6 +65,7 @@ def save_knowledge(g) -> Path:
     p = _kg_path()
     data = nx.node_link_data(g, edges="links")
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _KG_CACHE.update(sig=_kg_sig(p), g=g)  # кэш когерентен записи
     return p
 
 

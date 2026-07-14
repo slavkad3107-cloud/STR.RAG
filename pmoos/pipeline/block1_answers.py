@@ -225,10 +225,13 @@ def run_block1(project: str, cfg: Config | None = None, *,
                                      top=int(cfg.get("retrieval.top_k", 8)))
         # №10-5: к какому ТОМУ ООС относится замечание — лёгкий поиск top-1
         # только по разделу OOS (томов может быть несколько). Расширение запроса
-        # здесь не нужно (ищем сам том, top-1) — экономим вызовы LLM.
+        # не нужно; пул реранка сжат 60→16: этот пасс выбирает ЛИШЬ файл-том
+        # (payload.file) для top-1, полный пул тратил ~половину rerank-бюджета
+        # всего прогона на второстепенное поле.
         try:
-            oos_per = retr.batch_search(project, queries, sections=["OOS"], top=1,
-                                        use_expansion=False)
+            oos_per = retr.batch_search(
+                project, queries, sections=["OOS"], top=1, use_expansion=False,
+                candidates=int(cfg.get("retrieval.oos_candidates", 16)))
         except Exception:  # noqa: BLE001
             oos_per = []
     finally:
@@ -252,7 +255,7 @@ def run_block1(project: str, cfg: Config | None = None, *,
         if use_mem:
             try:
                 from ..memory import fewshot_block
-                fs = fewshot_block(r.text, k=mem_k, exclude_project=project)
+                fs = fewshot_block(r.text, k=mem_k, exclude_project=project, cfg=cfg)
             except Exception:  # noqa: BLE001
                 fs = ""
             if fs:
@@ -350,7 +353,8 @@ def run_block1(project: str, cfg: Config | None = None, *,
             "low_support": low_support,
             "consistency": cons,
             "cascade": cascade,
-            "cascade_text": explain_cascade(project, affected_codes) if affected_codes else "",
+            "cascade_text": (explain_cascade(project, affected_codes, res=cascade)
+                             if affected_codes else ""),
             "status": "proposed",          # proposed|accepted|rejected|edited
             "user_answer": None,
             "error": res.get("error"),

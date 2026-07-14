@@ -13,6 +13,24 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
+
+# TTL-кэш проб (15 с): Streamlit ререндерит ВСЕ вкладки на каждый клик, и при
+# провайдере ollama выходило до 4× живых HTTP-проб (timeout 6-8 с) на клик —
+# многосекундный фриз интерфейса. Свежесть `ollama pull` с задержкой ≤15 с
+# некритична; генерация ответов идёт напрямую, мимо этих проб.
+_PROBE_TTL = 15.0
+_PROBE_CACHE: dict[tuple, tuple[float, object]] = {}
+
+
+def _cached(key: tuple, compute):
+    now = time.monotonic()
+    hit = _PROBE_CACHE.get(key)
+    if hit and now - hit[0] < _PROBE_TTL:
+        return hit[1]
+    val = compute()
+    _PROBE_CACHE[key] = (now, val)
+    return val
 
 
 def _candidate_urls(base_url: str | None = None) -> list[str]:
@@ -45,6 +63,10 @@ def ollama_base_url(base_url: str | None = None) -> str:
 
 
 def ollama_available(base_url: str | None = None) -> bool:
+    return _cached(("avail", base_url), lambda: _ollama_available_raw(base_url))
+
+
+def _ollama_available_raw(base_url: str | None = None) -> bool:
     import requests
     for u in _candidate_urls(base_url):
         for ep in ("/api/tags", "/api/version"):
@@ -59,8 +81,11 @@ def ollama_available(base_url: str | None = None) -> bool:
 
 
 def list_installed_models(base_url: str | None = None) -> list[str]:
-    """Список установленных моделей. Сначала через HTTP API (по всем адресам),
-    затем через CLI `ollama list`."""
+    """Список установленных моделей (TTL-кэш 15 с). Сначала HTTP API, затем CLI."""
+    return _cached(("models", base_url), lambda: _list_installed_models_raw(base_url))
+
+
+def _list_installed_models_raw(base_url: str | None = None) -> list[str]:
     import requests
     for u in _candidate_urls(base_url):
         try:

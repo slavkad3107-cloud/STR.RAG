@@ -88,9 +88,14 @@ def downstream(project: str, changed_codes: list[str], *, max_depth: int = 5) ->
     }
 
 
-def explain_cascade(project: str, changed_codes: list[str]) -> str:
-    """Текстовое резюме каскада для показа пользователю/добавления в ответ."""
-    res = downstream(project, changed_codes)
+def explain_cascade(project: str, changed_codes: list[str],
+                    res: dict | None = None) -> str:
+    """Текстовое резюме каскада для показа пользователю/добавления в ответ.
+
+    res — уже посчитанный downstream() (block1 считает его строкой выше;
+    без параметра обход графа выполнялся дважды на каждое замечание)."""
+    if res is None:
+        res = downstream(project, changed_codes)
     if not res["changed"]:
         return "Изменяемые разделы не найдены в графе зависимостей."
     lines = [f"Изменение в: {', '.join(res['changed'])}"]

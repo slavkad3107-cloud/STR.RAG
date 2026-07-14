@@ -210,23 +210,58 @@ def record_one(*, remark: str, answer: str, correction: str = "", section: str =
     return True
 
 
+def record_many(project: str, items: list[dict]) -> int:
+    """ПАКЕТНОЕ пополнение базы: один проход чтения + одна запись + одна
+    инвалидация кэша (record_one в цикле давал O(M×N): каждый вызов
+    инвалидировал кэш, и следующий перечитывал всю базу с диска)."""
+    now = datetime.now().isoformat(timespec="seconds")
+    prepared = []
+    for it in items:
+        remark = (it.get("remark") or "").strip()
+        answer = (it.get("answer") or "").strip()
+        if remark and answer:
+            prepared.append({"remark": remark, "answer": answer,
+                             "correction": it.get("correction", ""),
+                             "section": it.get("section", ""),
+                             "project": project, "number": str(it.get("number", "")),
+                             "ts": now})
+    if not prepared:
+        return 0
+    records = _read_raw()
+    by_key = {f"{r.get('project')}|{r.get('number')}": r for r in records}
+    appended = []
+    for rec in prepared:
+        key = f"{rec['project']}|{rec['number']}"
+        old = by_key.get(key)
+        if old is not None:
+            old.update(answer=rec["answer"], correction=rec["correction"],
+                       section=rec["section"], ts=rec["ts"])
+        else:
+            appended.append(rec)
+            by_key[key] = rec
+    with _store_path().open("w", encoding="utf-8") as f:
+        for r in records + appended:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    _invalidate_cache()
+    return len(prepared)
+
+
 def record_accepted(project: str) -> int:
     """Собрать в базу все принятые/правленые ответы проекта. Возвращает число
     добавленных/обновлённых записей."""
     from ..pipeline.block1_answers import load_answers
     data = load_answers(project)
-    n = 0
+    items = []
     for a in data.get("answers", []):
         if a.get("status") in ("accepted", "edited"):
-            ans = (a.get("user_answer") or a.get("answer") or "").strip()
-            sec = ""
-            srcs = a.get("sources") or []
-            if srcs:
-                sec = srcs[0].get("section", "")
-            if record_one(remark=a.get("remark", ""), answer=ans,
-                          correction=a.get("correction", ""), section=sec,
-                          project=project, number=a.get("number", "")):
-                n += 1
+            # sources может быть пуст (честный провенанс v0.26) — раздел из поиска
+            srcs = a.get("sources") or a.get("retrieved_sources") or []
+            items.append({"remark": a.get("remark", ""),
+                          "answer": (a.get("user_answer") or a.get("answer") or "").strip(),
+                          "correction": a.get("correction", ""),
+                          "section": (srcs[0].get("section", "") if srcs else ""),
+                          "number": a.get("number", "")})
+    n = record_many(project, items)
     # параллельно обновляем накопительный граф знаний по проектам (пункт 1B)
     try:
         from ..graph.knowledge import update_from_project
@@ -237,15 +272,16 @@ def record_accepted(project: str) -> int:
 
 
 def similar_past(remark_text: str, *, k: int = 2, exclude_project: str | None = None,
-                 min_score: float = 0.12) -> list[dict]:
+                 min_score: float = 0.12, cfg=None) -> list[dict]:
     """Топ-k похожих принятых замечаний из прошлых проектов.
 
     Сначала семантический поиск (bge-m3, конфиг memory.semantic, порог
     memory.min_sim); при выключенной семантике или любой ошибке — прежний
     лексический Jaccard (работает без GPU/моделей)."""
     try:
-        from ..config import load_config
-        cfg = load_config()  # один раз на вызов; ниже передаём внутрь
+        if cfg is None:  # cfg передаётся сверху (block1 в цикле по 75 замечаниям)
+            from ..config import load_config
+            cfg = load_config()
         min_sim = float(cfg.get("memory.min_sim", 0.45))
         sem = _semantic_similar(remark_text, k=k, exclude_project=exclude_project,
                                 min_sim=min_sim, cfg=cfg)
@@ -282,9 +318,9 @@ def similar_past(remark_text: str, *, k: int = 2, exclude_project: str | None = 
 
 
 def fewshot_block(remark_text: str, *, k: int = 2, exclude_project: str | None = None,
-                  max_answer_chars: int = 500) -> str:
+                  max_answer_chars: int = 500, cfg=None) -> str:
     """Сформировать текст few-shot примеров для промпта. Пусто, если нет похожих."""
-    ex = similar_past(remark_text, k=k, exclude_project=exclude_project)
+    ex = similar_past(remark_text, k=k, exclude_project=exclude_project, cfg=cfg)
     if not ex:
         return ""
     lines = ["ПРИМЕРЫ ПРИНЯТЫХ ОТВЕТОВ ПО ПОХОЖИМ ЗАМЕЧАНИЯМ (из прошлых проектов, "

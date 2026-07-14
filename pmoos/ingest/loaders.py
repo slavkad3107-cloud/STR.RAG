@@ -55,18 +55,25 @@ def _ocr_cache_get(key: str) -> str | None:
         return None
 
 
+_OCR_PUTS = 0  # счётчик вставок: FIFO-проверку размера делаем раз в 200 put'ов
+
+
 def _ocr_cache_put(key: str, val: str) -> None:
+    global _OCR_PUTS
     try:
         with _OCR_LOCK:
             con = _ocr_db()
             con.execute("INSERT OR REPLACE INTO ocr (k, v) VALUES (?, ?)", (key, val))
-            # FIFO-ограничение размера: кэш не растёт бесконечно (OCR-записи редки)
-            (n,) = con.execute("SELECT COUNT(*) FROM ocr").fetchone()
-            if n > _OCR_MAX_ROWS:
-                con.execute(
-                    "DELETE FROM ocr WHERE rowid IN "
-                    "(SELECT rowid FROM ocr ORDER BY rowid LIMIT ?)",
-                    (n - _OCR_MAX_ROWS,))
+            # FIFO-ограничение размера: COUNT(*) на КАЖДЫЙ put дорог на большом
+            # кэше — проверяем периодически (переполнение между проверками ≤200 строк)
+            _OCR_PUTS += 1
+            if _OCR_PUTS % 200 == 0:
+                (n,) = con.execute("SELECT COUNT(*) FROM ocr").fetchone()
+                if n > _OCR_MAX_ROWS:
+                    con.execute(
+                        "DELETE FROM ocr WHERE rowid IN "
+                        "(SELECT rowid FROM ocr ORDER BY rowid LIMIT ?)",
+                        (n - _OCR_MAX_ROWS,))
             con.commit()
     except Exception:  # noqa: BLE001
         pass
@@ -97,10 +104,17 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
     except Exception as e:  # pragma: no cover
         raise RuntimeError("Не установлен PyMuPDF (pip install pymupdf)") from e
 
-    # текстовый слой
+    # ДВУХФАЗНАЯ обработка: фаза 1 — последовательный проход fitz (рендер pixmap
+    # только здесь: PyMuPDF НЕ потокобезопасен), собираем текст и PNG страниц,
+    # которым нужен OCR; фаза 2 — OCR ПАРАЛЛЕЛЬНО (tesseract — внешний процесс,
+    # GIL не мешает; последовательный OCR простаивал 60-70% ядер: 300-страничный
+    # скан занимал 12-27 минут). Результаты детерминированы (те же PNG-байты →
+    # тот же вывод), порядок страниц сохраняется, OCR-кэш потокобезопасен (_OCR_LOCK).
     doc = fitz.open(str(path))
     total = doc.page_count
-    ocr_done = 0
+    page_text: dict[int, str] = {}
+    ocr_jobs: list[tuple[int, bytes]] = []
+    empty_text_pages: set[int] = set()  # чистые сканы (нет текстового слоя вовсе)
     try:
         for i, page in enumerate(doc, start=1):
             # защита от «зависания» на гигантских сканах: не рендерим больше лимита
@@ -109,31 +123,59 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
                       f"{total - max_pages} стр. пропущены (ocr.max_pages)", flush=True)
                 break
             text = page.get_text("text") or ""
+            if not text.strip():
+                empty_text_pages.add(i)
+            page_text[i] = text
             if ocr and len(text.strip()) < min_text_chars:
                 try:
                     pix = page.get_pixmap(dpi=200)
-                    ocr_text = _ocr_page(pix.tobytes("png"), lang)
-                    if len(ocr_text.strip()) > len(text.strip()):
-                        text = ocr_text
-                    ocr_done += 1
-                    # прогресс OCR в журнал — снимает ощущение «зависло» на больших PDF
-                    if ocr_done % 20 == 0:
-                        print(f"[loaders] OCR {path.name}: стр. {i}/{total}…", flush=True)
+                    ocr_jobs.append((i, pix.tobytes("png")))
                 except Exception as e:  # noqa: BLE001 — раньше молча глоталось
-                    print(f"[loaders] OCR стр. {i} в {path.name}: {e}", flush=True)
-            if text.strip():
-                pages.append({"loc": f"стр. {i}", "text": text, "is_table": False})
+                    print(f"[loaders] рендер стр. {i} в {path.name}: {e}", flush=True)
     finally:
         doc.close()
 
+    if ocr_jobs:
+        import os as _os
+        from concurrent.futures import ThreadPoolExecutor
+        workers = min(4, max(1, (_os.cpu_count() or 2) - 1), len(ocr_jobs))
+        print(f"[loaders] OCR {path.name}: {len(ocr_jobs)} стр., "
+              f"потоков {workers}…", flush=True)
+        done = 0
+
+        def _job(item):
+            i, png = item
+            try:
+                return i, _ocr_page(png, lang)
+            except Exception as e:  # noqa: BLE001
+                print(f"[loaders] OCR стр. {i} в {path.name}: {e}", flush=True)
+                return i, ""
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for i, ocr_text in ex.map(_job, ocr_jobs):
+                if len(ocr_text.strip()) > len(page_text.get(i, "").strip()):
+                    page_text[i] = ocr_text
+                done += 1
+                if done % 20 == 0:
+                    print(f"[loaders] OCR {path.name}: {done}/{len(ocr_jobs)}…", flush=True)
+
+    for i in sorted(page_text):
+        if page_text[i].strip():
+            pages.append({"loc": f"стр. {i}", "text": page_text[i], "is_table": False})
+
     # таблицы — открываем pdfplumber ОДИН раз (лимит страниц тот же, что и у OCR:
-    # иначе защита от гигантских PDF была бы неполной — extract_tables прошёл бы всё)
+    # иначе защита от гигантских PDF была бы неполной — extract_tables прошёл бы всё).
+    # Страницы БЕЗ текстового слоя (чистые сканы) пропускаем: extract_tables берёт
+    # текст ячеек из chars — на скане они дали бы только пустые ячейки, а парсинг
+    # каждой такой страницы стоит 0.5-3 с.
     try:
         import pdfplumber
         with pdfplumber.open(str(path)) as pdf:
             for i, page in enumerate(pdf.pages, start=1):
                 if max_pages and i > max_pages:
                     break
+                if i in empty_text_pages:
+                    continue
                 try:
                     for tbl in (page.extract_tables() or []):
                         rows = [" | ".join((c or "").strip() for c in row) for row in tbl]
@@ -143,6 +185,11 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
                                           "text": ttext, "is_table": True})
                 except Exception:
                     continue
+                finally:
+                    try:  # освободить page-кэш pdfplumber (рост RAM на больших PDF)
+                        page.flush_cache()
+                    except Exception:  # noqa: BLE001
+                        pass
     except Exception:
         pass
     return pages
