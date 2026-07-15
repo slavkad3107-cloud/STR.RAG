@@ -337,26 +337,48 @@ class HybridRetriever:
     @staticmethod
     def _dedup_near(pool: list[dict], *, threshold: float = 0.9) -> list[dict]:
         """Убрать near-дубликаты в пуле (разные версии одного тома: v1/корр/финал),
-        чтобы они не вытесняли разнообразие фактов из top-k. Jaccard по шинглам."""
+        чтобы они не вытесняли разнообразие фактов из top-k. Jaccard по шинглам.
+
+        Из группы дублей выживает АКТУАЛЬНАЯ редакция (по маркерам версии в имени
+        файла: корр/изм/v3 > исходная), а не просто первая по RRF — иначе в ответ
+        могла попасть устаревшая формулировка."""
         try:
             from ..ingest.dedup import shingles
+            from ..versioning.versions import _version_rank
         except Exception:  # noqa: BLE001
             return pool
+
+        _rank_cache: dict[str, int] = {}
+
+        def _rank(it: dict) -> int:
+            f = ((it.get("payload") or {}).get("file") or "")
+            if f not in _rank_cache:
+                try:
+                    _rank_cache[f] = int(_version_rank(f)[0])
+                except Exception:  # noqa: BLE001
+                    _rank_cache[f] = 0
+            return _rank_cache[f]
+
         kept: list[dict] = []
         sigs: list[set] = []
         for it in pool:
             sh = shingles(it.get("text", "") or "")
-            dup = False
-            for prev in sigs:
+            dup_at = -1
+            for j, prev in enumerate(sigs):
                 if sh and prev:
                     inter = len(sh & prev)
                     uni = len(sh | prev)
                     if uni and inter / uni >= threshold:
-                        dup = True
+                        dup_at = j
                         break
-            if not dup:
+            if dup_at < 0:
                 kept.append(it)
                 sigs.append(sh)
+            elif _rank(it) > _rank(kept[dup_at]):
+                # новее по версии — заменяем выжившего НА ТОЙ ЖЕ позиции пула
+                # (позиция = сила RRF-сигнала группы; реранкер дальше рескорит)
+                kept[dup_at] = it
+                sigs[dup_at] = sh
         return kept
 
     # ---- public API ------------------------------------------------------

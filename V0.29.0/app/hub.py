@@ -1,4 +1,4 @@
-"""СтройПроект v0.28.0 «Swift» — единый интерфейс (Streamlit).
+"""СтройПроект v0.29.0 «Complete» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются ОТДЕЛЬНО:
@@ -501,53 +501,10 @@ def tab_m3(project: str, object_type: str) -> None:
         st.write("Найдено в проектах: " + (", ".join(projs) if projs else "—"))
 
 
-def _gdrive_direct(url: str):
-    """Преобразует ссылку Google Drive (file/d/…, open?id=, uc?id=) в прямую."""
-    m = re.search(r"drive\.google\.com/(?:file/d/([-\w]{10,})|open\?id=([-\w]{10,})"
-                  r"|uc\?[^\s]*?id=([-\w]{10,}))", url)
-    if m:
-        fid = next(g for g in m.groups() if g)
-        return f"https://drive.google.com/uc?export=download&id={fid}", fid
-    return url, None
-
-
-def _download_remarks_url(project: str, url: str) -> Path:
-    """Скачивает файл замечаний по ссылке (https, в т.ч. Google Drive «по ссылке»)
-    в постоянную папку remarks/ проекта."""
-    import requests
-    from urllib.parse import urlparse, unquote
-    direct, fid = _gdrive_direct(url.strip())
-    r = requests.get(direct, timeout=90, allow_redirects=True)
-    if fid and "text/html" in (r.headers.get("Content-Type") or ""):
-        m = re.search(r"confirm=([0-9A-Za-z_\-]+)", r.text)
-        if m:  # большие файлы Drive требуют подтверждения
-            r = requests.get(f"{direct}&confirm={m.group(1)}", timeout=180, allow_redirects=True)
-    r.raise_for_status()
-    ctype = (r.headers.get("Content-Type") or "").lower()
-    if "text/html" in ctype:
-        raise RuntimeError("по ссылке вернулась HTML-страница, а не файл. Для Google Drive "
-                           "включите доступ «Все, у кого есть ссылка» и давайте ссылку на "
-                           "ФАЙЛ (не на папку).")
-    name = None
-    cd = r.headers.get("Content-Disposition") or ""
-    m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", cd)
-    if m:
-        name = unquote(m.group(1)).strip()
-    if not name:
-        name = Path(urlparse(direct).path).name or "замечания_по_ссылке"
-        if "." not in Path(name).name:
-            name += (".pdf" if "pdf" in ctype else
-                     ".docx" if "wordprocessingml" in ctype else
-                     ".doc" if "msword" in ctype else
-                     ".xlsx" if "spreadsheetml" in ctype else ".bin")
-    rdir = project_paths(project)["remarks_dir"]
-    rdir.mkdir(parents=True, exist_ok=True)
-    out = rdir / name
-    out.write_bytes(r.content)
-    if out.stat().st_size < 64:
-        raise RuntimeError(f"скачан подозрительно маленький файл ({out.stat().st_size} байт) — "
-                           f"проверьте доступ по ссылке.")
-    return out
+# сетевые функции вынесены в pmoos/ingest/remarks_fetch.py (UI — тонкая обёртка);
+# алиасы сохранены для обратной совместимости импортов из modules_ui
+from pmoos.ingest.remarks_fetch import (gdrive_direct as _gdrive_direct,          # noqa: E402,F401
+                                        download_remarks_url as _download_remarks_url)
 
 
 def tab_m4(project: str, object_type: str) -> None:
@@ -1002,6 +959,81 @@ def tab_m6(project: str, object_type: str) -> None:
     _list_outputs(project)
 
 
+def tab_m7(project: str, object_type: str) -> None:
+    st.header("МОДУЛЬ 7 · Качество (замер и регрессии)")
+    st.caption("Простыми словами: «эталон» — это ваши УЖЕ ПРИНЯТЫЕ ответы. По ним "
+               "можно замерить, находит ли поиск те же документы-источники, и сравнить "
+               "качество ДО/ПОСЛЕ изменения настроек (например, режима нарезки в М2).")
+
+    from pmoos.pipeline.block1_answers import load_answers
+    import json as _json
+    _golden = project_paths(project)["root"] / "golden.jsonl"
+
+    # ① сбор эталона — дёшево и безопасно (только чтение answers.json)
+    _acc = [a for a in (load_answers(project).get("answers") or [])
+            if a.get("status") in ("accepted", "edited")]
+    c1, c2 = st.columns([1, 2])
+    if c1.button(f"① Собрать эталон ({len(_acc)} принятых)", width='stretch',
+                 disabled=not _acc, key="m7_build"):
+        items = []
+        for a in _acc:
+            final = (a.get("user_answer") or a.get("answer") or "").strip()
+            if not a.get("remark") or not final:
+                continue
+            items.append({
+                "number": str(a.get("number", "")),
+                "remark": a.get("remark", ""),
+                "expected_files": sorted({s.get("file", "") for s in
+                                          (a.get("sources") or []) if s.get("file")}),
+                "accepted_answer": final,
+                "category": a.get("category", ""),
+            })
+        with _golden.open("w", encoding="utf-8") as f:
+            for it in items:
+                f.write(_json.dumps(it, ensure_ascii=False) + "\n")
+        st.success(f"Эталон собран: {len(items)} записей → golden.jsonl")
+    with c2:
+        if _golden.exists():
+            _n = sum(1 for _ in _golden.open(encoding="utf-8"))
+            st.caption(f"Текущий эталон: **{_n}** записей · {_golden}")
+        else:
+            st.caption("Эталона ещё нет — примите ответы в М4 и нажмите «① Собрать».")
+
+    # ② замер — тяжёлый (модели/LLM), поэтому из терминала, НЕ из интерфейса
+    st.markdown("**② Замер поиска (recall@k, MRR)** — выполняется из терминала "
+                "(грузит модели; в окне приложения это подвесило бы интерфейс):")
+    st.code(f'python scripts/eval_golden.py run --project "{project}" '
+            f'--golden "{_golden}"', language="text")
+    st.markdown("**③ ИИ-судья ответов** (обращается к провайдеру — платно):")
+    st.code(f'python scripts/eval_golden.py judge --project "{project}" '
+            f'--golden "{_golden}"', language="text")
+
+    # история замеров — тренд качества между версиями/настройками
+    from pmoos.paths import data_root
+    _hist = data_root() / "eval_history.jsonl"
+    st.subheader("История замеров")
+    if _hist.exists():
+        rows = []
+        try:
+            for line in _hist.read_text(encoding="utf-8").splitlines()[-30:]:
+                r = _json.loads(line)
+                rows.append({"Когда": r.get("ts", ""), "Тип": r.get("kind", ""),
+                             "Проект": r.get("project", ""), "Версия": r.get("version", ""),
+                             **{k: v for k, v in r.items()
+                                if k in ("recall_at_k", "mrr", "avg_score", "n")}})
+        except Exception:  # noqa: BLE001
+            rows = []
+        if rows:
+            st.dataframe(rows, width='stretch', hide_index=True)
+            st.caption("Сравнивайте строки ДО и ПОСЛЕ изменения (версия/режим нарезки): "
+                       "качество должно расти или не падать.")
+        else:
+            st.caption("Файл истории есть, но записей не разобрано.")
+    else:
+        st.info("Замеров ещё не было. Соберите эталон (①) и выполните команду ② на "
+                "этом компьютере — результат появится здесь.")
+
+
 # ─────────────────────────────── утилиты вывода ───────────────────────────────
 def _uid() -> int:
     """Монотонный счётчик за один рендер — гарантирует уникальные ключи виджетов."""
@@ -1060,7 +1092,7 @@ def main() -> None:
     tabs = st.tabs([
         f"{ws['m1']} М1 · Систематизация", f"{ws['m2']} М2 · Индексация",
         "М3 · Граф связей", f"{ws['m4']} М4 · Ответы",
-        "М5 · Корректировка", "М6 · УПРЗА",
+        "М5 · Корректировка", "М6 · УПРЗА", "М7 · Качество",
     ])
     with tabs[0]:
         tab_m1(project, object_type)
@@ -1074,6 +1106,8 @@ def main() -> None:
         tab_m5(project, object_type)
     with tabs[5]:
         tab_m6(project, object_type)
+    with tabs[6]:
+        tab_m7(project, object_type)
 
 
 if __name__ == "__main__":

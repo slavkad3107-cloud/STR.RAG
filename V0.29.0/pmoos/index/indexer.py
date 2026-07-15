@@ -463,11 +463,17 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                     max_pages=int(cfg.get("ocr.max_pages", 0)),
                 )
                 sha = doc_fingerprint(pages)
-                # подпись содержимого для контентного сравнения версий (пункт 4)
+                # подпись содержимого для контентного сравнения версий (пункт 4).
+                # Кэш по doc_sha: simhash+minhash — ~1 c чистого Python на файл,
+                # при reindex неизменённого контента переиспользуем готовую подпись.
                 try:
                     from ..ingest.dedup import content_signature
-                    from ..versioning.versions import save_content_sig
-                    save_content_sig(project, fpath.name, content_signature(pages))
+                    from ..versioning.versions import save_content_sig, load_content_sigs
+                    _prev_sig = load_content_sigs(project).get(fpath.name) or {}
+                    if _prev_sig.get("doc_sha") != sha:
+                        _sig = content_signature(pages)
+                        _sig["doc_sha"] = sha
+                        save_content_sig(project, fpath.name, _sig)
                 except Exception:  # noqa: BLE001
                     pass
                 # Файл ранее падал (ошибка/жёсткий «Стоп»): подчищаем возможные
