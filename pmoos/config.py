@@ -200,6 +200,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "mode": "char",
         "target_tokens": 512,
         "chars_per_token": 3.2,
+        # contextual retrieval (opt-in): префикс «[раздел · файл]» участвует в
+        # эмбеддинге и BM25 (показ-текст чистый). Требует ПЕРЕИНДЕКСАЦИИ;
+        # включать после A/B на golden-set (вкладка М7).
+        "contextual": False,
     },
     "qdrant": {"mode": "embedded", "url": "http://localhost:6333"},
     "memory": {

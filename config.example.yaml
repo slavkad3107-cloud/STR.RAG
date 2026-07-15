@@ -92,6 +92,7 @@ chunking:
   mode: char            # char (базовый) | semantic (по пунктам НПА; нужен reindex)
   target_tokens: 512
   chars_per_token: 3.2
+  contextual: false     # префикс раздела в эмбеддинг/BM25 (нужен reindex + A/B в М7)
 qdrant:
   mode: embedded
   url: http://localhost:6333
