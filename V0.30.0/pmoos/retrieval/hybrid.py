@@ -176,7 +176,13 @@ class HybridRetriever:
                     break
         except Exception:  # noqa: BLE001
             pass
-        corp.tokens = [_tok(t) for t in corp.texts]
+        # contextual retrieval: если чанк несёт префикс раздела (payload.ctx),
+        # BM25 токенизирует его вместе с текстом — «немой» обрывок таблицы
+        # становится находимым по словам раздела/файла
+        corp.tokens = [
+            _tok((pl.get("ctx") + " " + t) if pl.get("ctx") else t)
+            for t, pl in zip(corp.texts, corp.payloads)
+        ]
         return corp
 
     @staticmethod
@@ -191,7 +197,10 @@ class HybridRetriever:
 
     def _build_bm25(self, corp: _Corpus) -> None:
         if corp.tokens is None:
-            corp.tokens = [_tok(t) for t in corp.texts]
+            corp.tokens = [
+                _tok((pl.get("ctx") + " " + t) if pl.get("ctx") else t)
+                for t, pl in zip(corp.texts, corp.payloads)
+            ]
         if corp.texts and self.cfg.get("retrieval.use_bm25", True):
             try:
                 from rank_bm25 import BM25Okapi

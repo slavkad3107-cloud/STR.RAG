@@ -156,7 +156,8 @@ def build_chunks(*, project: str, file_rel: str, section_code: str,
                  doc_sha: str, pages: list[dict], size: int = 1200,
                  overlap: int = 200, min_chunk: int = 80,
                  doc_type: str | None = None, mode: str = "char",
-                 target_tokens: int = 512, chars_per_token: float = 3.2) -> list[dict]:
+                 target_tokens: int = 512, chars_per_token: float = 3.2,
+                 contextual: bool = False) -> list[dict]:
     """Собирает чанки со всеми метаданными (payload) для индексации.
 
     pages — результат loaders.extract_file (список единиц с loc/text/is_table).
@@ -166,8 +167,14 @@ def build_chunks(*, project: str, file_rel: str, section_code: str,
       normative_ref — нормативы (СП/ГОСТ/СанПиН…), упомянутые в чанке;
       page_number   — номер страницы/листа; file_name — имя файла;
       is_table, doc_sha, chunk_index — как раньше.
+
+    contextual=True (opt-in, chunking.contextual): каждому чанку добавляется
+    embed_text = «[раздел · файл] текст» — префикс участвует в ЭМБЕДДИНГЕ и BM25
+    (payload["ctx"]), но payload["text"] для показа/ИИ остаётся чистым. «Немой»
+    обрывок таблицы выбросов без слов «ПМООС/раздел 8» становится находимым.
+    Требует переиндексации; включать после A/B на golden-set (М7).
     """
-    from .sections import section_short, section_num
+    from .sections import section_short, section_num, section_name
     from ..normatives.engine import find_references
     from pathlib import PurePath
 
@@ -175,6 +182,11 @@ def build_chunks(*, project: str, file_rel: str, section_code: str,
     sec_num = section_num(section_code)
     if not doc_type:
         doc_type = section_short(section_code) if section_code and section_code != "UNKNOWN" else "—"
+    ctx_prefix = ""
+    if contextual:
+        _sec_h = (section_name(section_code)
+                  if section_code and section_code != "UNKNOWN" else "")
+        ctx_prefix = f"[{doc_type}{' · ' + _sec_h if _sec_h else ''} · {file_name}]"
 
     out: list[dict] = []
     idx = 0
@@ -189,13 +201,26 @@ def build_chunks(*, project: str, file_rel: str, section_code: str,
                                          chars_per_token=chars_per_token, min_chunk=min_chunk)
         else:
             pieces = chunk_text(page.get("text", ""), size=size, overlap=overlap, min_chunk=min_chunk)
+        # Длинная таблица разрезана на несколько чанков → куски-продолжения теряли
+        # строку заголовка (имена колонок), и связка «код → вещество → значение»
+        # рвалась: поиск находил числа без смысла колонок. Приклеиваем заголовок
+        # к каждому продолжению (вступает в силу для новой индексации/reindex).
+        if is_table and len(pieces) > 1:
+            _header = next((ln.strip() for ln in
+                            (page.get("text", "") or "").splitlines() if ln.strip()), "")
+            if _header and len(_header) <= 400:
+                pieces = [pieces[0]] + [
+                    (p if p.lstrip().startswith(_header)
+                     else f"{_header}\n(продолжение таблицы)\n{p}")
+                    for p in pieces[1:]
+                ]
         for piece in pieces:
             cid = deterministic_id(file_rel, loc, str(idx), piece)
             try:
                 norm_refs = find_references(piece)
             except Exception:  # noqa: BLE001
                 norm_refs = []
-            out.append({
+            chunk = {
                 "id": cid,
                 "text": piece,
                 "payload": {
@@ -212,6 +237,10 @@ def build_chunks(*, project: str, file_rel: str, section_code: str,
                     "doc_sha": doc_sha,
                     "chunk_index": idx,
                 },
-            })
+            }
+            if ctx_prefix:
+                chunk["embed_text"] = f"{ctx_prefix}\n{piece}"  # для эмбеддинга
+                chunk["payload"]["ctx"] = ctx_prefix            # для BM25-корпуса
+            out.append(chunk)
             idx += 1
     return out

@@ -505,9 +505,13 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                     mode=str(cfg.get("chunking.mode", "char")),
                     target_tokens=int(cfg.get("chunking.target_tokens", 512)),
                     chars_per_token=float(cfg.get("chunking.chars_per_token", 3.2)),
+                    contextual=bool(cfg.get("chunking.contextual", False)),
                 )
                 if chunks:
-                    vectors = embedder.embed_documents([c["text"] for c in chunks])
+                    # contextual retrieval: эмбеддится текст С префиксом раздела
+                    # (embed_text), показ-текст payload["text"] остаётся чистым
+                    vectors = embedder.embed_documents(
+                        [c.get("embed_text") or c["text"] for c in chunks])
                     try:
                         store.upsert_chunks(project, chunks, vectors)
                     except Exception:
