@@ -300,6 +300,37 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
     # 1) СНАЧАЛА находим файлы и сразу показываем их число (чтобы не висело «0/0»).
     files = _iter_source_files(upload_dir)
     state = read_state(project)
+    # ЖЁСТКИЙ КРАШ прошлого прогона (диск переполнен/выключение/kill процесса):
+    # статус остался «running», а файл в current_file мог быть записан ЧАСТИЧНО.
+    # Помечаем его error — иначе при возобновлении дедуп по doc_sha посчитал бы
+    # его «дубликатом» (частичные чанки уже в базе) и файл навсегда остался бы
+    # неполным. (Кнопка «Стоп» делает это сама; краш — не делает.)
+    _crash_cur = (state.get("current_file") or "") if state.get("status") == "running" else ""
+    if _crash_cur and state.get("files", {}).get(_crash_cur, {}).get("status") \
+            not in ("done", "skipped"):
+        state.setdefault("files", {})[_crash_cur] = {
+            "status": "error", "chunks": 0,
+            "error": "прошлый прогон прерван аварийно — файл будет переиндексирован целиком",
+        }
+        print(f"[indexer] прошлый прогон упал на «{_crash_cur}» — файл будет "
+              f"переиндексирован целиком", flush=True)
+    # ПРЕФЛАЙТ ДИСКА: индексация пишет гигабайты (Qdrant+кэши) — при <1 ГБ
+    # свободного места падение неизбежно (sqlite «database or disk is full»),
+    # и лучше отказаться сразу с ПОНЯТНОЙ причиной.
+    try:
+        import shutil as _sh
+        from ..paths import data_root as _dr
+        _free_gb = _sh.disk_usage(str(_dr())).free / 2**30
+    except Exception:  # noqa: BLE001
+        _free_gb = 1e9
+    if _free_gb < 1.0:
+        state.update({"status": "error", "pid": 0,
+                      "message": (f"ДИСК ПЕРЕПОЛНЕН: на диске с данными свободно "
+                                  f"{_free_gb:.1f} ГБ. Освободите минимум 2-3 ГБ "
+                                  f"(корзина, загрузки, временные файлы) и нажмите "
+                                  f"«⏯ Продолжить». Данные приложения: {_dr()}")})
+        write_state(project, state)
+        return state
     state.update({
         "status": "running", "pause_requested": False, "pid": os.getpid(),
         "total_files": len(files), "done_files": 0,
@@ -551,7 +582,15 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         state["status"] = "error"
-        state["message"] = f"Критическая ошибка: {e}. Подробности — в журнале индексации."
+        _es = str(e).lower()
+        if ("no space left" in _es or "disk is full" in _es
+                or getattr(e, "errno", None) == 28):
+            state["message"] = ("ДИСК ПЕРЕПОЛНЕН — индексация остановлена. Освободите "
+                                "минимум 2-3 ГБ на диске с данными приложения и нажмите "
+                                "«⏯ Продолжить»: прогресс по готовым файлам сохранён, "
+                                "прерванный файл будет переиндексирован целиком.")
+        else:
+            state["message"] = f"Критическая ошибка: {e}. Подробности — в журнале индексации."
         write_state(project, state)
         return state
 
@@ -734,8 +773,10 @@ def progress_summary(project: str) -> dict:
         status = "error"
         tail = log_tail(project, 12)
         message = ("Фоновый процесс индексации завершился аварийно. Частые причины: "
-                   "не доустановлены зависимости (повторите install.bat) или прервалась "
-                   "загрузка модели bge-m3. Конец журнала:\n\n" + (tail or "(журнал пуст)"))
+                   "ПЕРЕПОЛНЕН ДИСК (см. «disk is full»/«No space left» в журнале ниже — "
+                   "освободите 2-3 ГБ и жмите «⏯ Продолжить»), не доустановлены "
+                   "зависимости (повторите install.bat) или прервалась загрузка модели "
+                   "bge-m3. Конец журнала:\n\n" + (tail or "(журнал пуст)"))
     # 2) Процесс числится живым, но «пульс» не обновлялся > 2 минут → завис.
     elif status == "running" and running and hb_age > 120:
         status = "error"
