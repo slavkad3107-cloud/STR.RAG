@@ -180,6 +180,23 @@ def test_config_deep_merge_and_get():
     assert c.get("nope.missing", "def") == "def"
 
 
+def test_env_example_has_no_real_secrets():
+    # СТРАХОВКА (по реальному инциденту 16.07.2026): в .env.example попали
+    # настоящие ключи, и GitHub push protection заблокировал публикацию.
+    # Файл-пример обязан содержать ТОЛЬКО пустые значения/плейсхолдеры.
+    from pathlib import Path
+    p = Path(__file__).resolve().parent.parent / ".env.example"
+    for line in p.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        key, _, val = s.partition("=")
+        val = val.strip().strip('"').strip("'")
+        assert len(val) < 12, (
+            f"{key.strip()} в .env.example выглядит как РЕАЛЬНЫЙ ключ — "
+            f"ключи хранятся только в ~/.pmoos-rag/.env, не в примере!")
+
+
 def test_example_config_not_stale():
     # config.example.yaml через deep-merge МОЛЧА перекрывает дефолты — если он
     # отстанет от DEFAULT_CONFIG, пользователь, скопировавший пример, откатит
