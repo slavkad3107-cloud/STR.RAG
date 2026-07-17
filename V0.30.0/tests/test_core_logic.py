@@ -180,6 +180,30 @@ def test_config_deep_merge_and_get():
     assert c.get("nope.missing", "def") == "def"
 
 
+def test_object_type_pinned_per_project(tmp_path, monkeypatch):
+    # ЛОВУШКА (закрыта в v0.30.3): «Продолжить» с переключённым в сайдбаре типом
+    # объекта домешивал в базу вторую разметку разделов ПП-87. Тип фиксируется
+    # при первом запуске; игнор переключателя при возобновлении; смена — только
+    # полной переиндексацией. Проекты пустые → ранний выход до загрузки модели.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.projects import register_project
+    from pmoos.index import indexer as I
+
+    register_project("ОТ1")
+    I.run_indexing("ОТ1", object_type="площадной")
+    assert I.read_state("ОТ1").get("object_type") == "площадной"   # зафиксирован
+
+    I.run_indexing("ОТ1", object_type="линейный")                  # «Продолжить»
+    assert I.read_state("ОТ1").get("object_type") == "площадной"   # игнор
+
+    # reindex на ПУСТОМ проекте выходит по «нет файлов» ДО drop_collection —
+    # тип НЕ перезаписывается: смена фиксируется только в момент фактического
+    # удаления коллекции (защита от падения между записью типа и drop,
+    # находка адверсариального ревью v0.30.3).
+    I.run_indexing("ОТ1", object_type="линейный", reindex=True)
+    assert I.read_state("ОТ1").get("object_type") == "площадной"
+
+
 def test_st_cache_unified_with_hub():
     # СТРАХОВКА (по инциденту 17.07.2026): SENTENCE_TRANSFORMERS_HOME обязан
     # указывать на <HF_HOME>/hub — иначе sentence-transformers ведёт ВТОРУЮ
