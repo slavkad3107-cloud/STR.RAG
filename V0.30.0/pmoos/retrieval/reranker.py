@@ -59,9 +59,18 @@ class Reranker:
         }
         if token:
             base["trust_remote_code"] = False
+        # Полный кэш → строго с диска (без единого сетевого запроса): проверка
+        # ревизии через неотвечающий прокси может висеть без таймаута.
+        from ..core.model_cache import is_model_cached
+        offline = is_model_cached(self.model_name)
+        if offline:
+            print(f"[reranker] кэш модели полон — гружу строго с диска, без сети",
+                  flush=True)
 
-        def _try(force_safetensors: bool):
+        def _try(force_safetensors: bool, offline: bool):
             kw = dict(base)
+            if offline:
+                kw["local_files_only"] = True
             if force_safetensors:
                 # форсируем safetensors (фикс CVE-2025-32434)
                 kw["automodel_args"] = {"use_safetensors": True}
@@ -72,24 +81,36 @@ class Reranker:
                 try:
                     return CrossEncoder(self.model_name, **kw)
                 except TypeError:
-                    for opt in ("automodel_args", "trust_remote_code", "max_length"):
+                    for opt in ("automodel_args", "local_files_only",
+                                "trust_remote_code", "max_length"):
                         if opt in kw:
                             kw.pop(opt)
                             break
                     else:
                         raise
 
-        try:
-            self._model = _try(True)
-        except OSError as e:
-            # Репозиторий модели без safetensors (только .bin) — безопасный откат
-            # (torch>=2.6: weights_only=True по умолчанию).
-            if "model.safetensors" in str(e):
-                print(f"[reranker] у {self.model_name} нет model.safetensors — "
-                      f"загружаю .bin (безопасно: torch>=2.6, weights_only)", flush=True)
-                self._model = _try(False)
-            else:
+        def _load_pair(offline: bool):
+            try:
+                return _try(True, offline)
+            except OSError as e:
+                # Репозиторий модели без safetensors (только .bin) — безопасный
+                # откат (torch>=2.6: weights_only=True по умолчанию).
+                if "model.safetensors" in str(e):
+                    print(f"[reranker] у {self.model_name} нет model.safetensors — "
+                          f"загружаю .bin (безопасно: torch>=2.6, weights_only)",
+                          flush=True)
+                    return _try(False, offline)
                 raise
+
+        try:
+            self._model = _load_pair(offline)
+        except Exception as e:  # noqa: BLE001
+            if not offline:
+                raise
+            # кэш оказался неполным/битым — одна попытка с сетью
+            print(f"[reranker] офлайн-загрузка не удалась ({e}) — пробую с сетью",
+                  flush=True)
+            self._model = _load_pair(False)
         # FP16: половинная точность кросс-энкодера на GPU (вдвое меньше VRAM,
         # быстрее предсказание). Внутренняя transformers-модель — в .model.
         if self.fp16:
