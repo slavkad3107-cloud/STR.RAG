@@ -300,6 +300,27 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
     # 1) СНАЧАЛА находим файлы и сразу показываем их число (чтобы не висело «0/0»).
     files = _iter_source_files(upload_dir)
     state = read_state(project)
+    # ТИП ОБЪЕКТА ФИКСИРУЕТСЯ ПРИ ПЕРВОМ ЗАПУСКЕ (v0.30.3). Раньше «⏯ Продолжить»
+    # брал тип из переключателя интерфейса на момент нажатия: переключил
+    # площадной↔линейный посреди проекта — и остаток файлов размечался по ДРУГОМУ
+    # составу разделов ПП-87, в одной базе смешивались две разметки. Теперь
+    # возобновление всегда идёт с типом из состояния проекта; сменить тип может
+    # только полная переиндексация (reindex=True).
+    _stored_ot = state.get("object_type")
+    if reindex:
+        # Смена типа при переиндексации фиксируется НИЖЕ — только после
+        # ФАКТИЧЕСКОГО удаления коллекции (по находке адверсариального ревью:
+        # если записать новый тип здесь, а прогон упадёт до drop_collection —
+        # префлайт диска, сбой загрузки модели, — база останется со старой
+        # разметкой, состояние уже залочит новую, и «⏯ Продолжить» смешает их).
+        pass
+    elif not _stored_ot:
+        state["object_type"] = object_type
+    elif _stored_ot != object_type:
+        print(f"[indexer] тип объекта зафиксирован при первом запуске: «{_stored_ot}» — "
+              f"переключатель «{object_type}» проигнорирован (смена типа — только "
+              f"полная переиндексация)", flush=True)
+        object_type = _stored_ot
     # ЖЁСТКИЙ КРАШ прошлого прогона (диск переполнен/выключение/kill процесса):
     # статус остался «running», а файл в current_file мог быть записан ЧАСТИЧНО.
     # Помечаем его error — иначе при возобновлении дедуп по doc_sha посчитал бы
@@ -395,6 +416,9 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
             state["done_files"] = 0
             state["total_chunks"] = 0
             state["done_chunks"] = 0
+            # тип объекта фиксируется ровно в момент, когда старая разметка
+            # реально уничтожена (см. комментарий у _stored_ot выше)
+            state["object_type"] = object_type
             write_state(project, state)
         store.ensure_collection(project)
         known_shas = store.existing_doc_shas(project)

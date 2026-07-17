@@ -341,6 +341,19 @@ def indexing_panel(project: str, object_type: str) -> None:
     s = progress_summary(project)
     running = s["running"]
 
+    # Тип объекта зафиксирован в состоянии проекта при первом запуске (v0.30.3):
+    # «Продолжить» использует ЕГО, а не переключатель сайдбара — иначе в одной
+    # базе смешивались две разметки разделов ПП-87.
+    from pmoos.index.indexer import read_state as _rs
+    _pinned_ot = _rs(project).get("object_type")
+    if _pinned_ot and _pinned_ot != object_type:
+        st.warning(f"Тип объекта этого проекта зафиксирован при первом запуске "
+                   f"индексации: **{_pinned_ot}** (в сайдбаре сейчас — "
+                   f"«{object_type}»). «▶ Индексировать» и «⏯ Продолжить» "
+                   f"продолжат как «{_pinned_ot}», чтобы не смешивать две "
+                   f"разметки разделов. Сменить тип можно только кнопкой "
+                   f"«♻ Переиндексировать заново» ниже.", icon="⚠️")
+
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         if st.button("▶ Индексировать", disabled=running, width='stretch',
@@ -362,7 +375,10 @@ def indexing_panel(project: str, object_type: str) -> None:
             stop_indexing(project)
             st.rerun()
     with c4:
-        if st.button("⏯ Продолжить", disabled=running, width='stretch'):
+        if st.button("⏯ Продолжить", disabled=running, width='stretch',
+                     help="Возобновляет с места остановки. Тип объекта — тот, что "
+                          "зафиксирован при первом запуске (переключатель сайдбара "
+                          "не влияет)."):
             clear_pause(project)
             start_background(project, object_type=object_type)
             st.rerun()
@@ -432,7 +448,8 @@ def indexing_panel(project: str, object_type: str) -> None:
         except Exception:  # noqa: BLE001
             pass
         rc2.warning(f"Стереть базу проекта и переиндексировать заново? "
-                    f"Режим чанкинга: **{_mode_ru}**.{_loss_note}")
+                    f"Режим чанкинга: **{_mode_ru}** · тип объекта: "
+                    f"**{object_type}** (будет зафиксирован за проектом).{_loss_note}")
         yy, nn = rc2.columns(2)
         if yy.button("Да, с нуля", key="idx_reindex_yes", width='stretch'):
             start_background(project, object_type=object_type, reindex=True)
