@@ -180,32 +180,51 @@ class Embedder:
         # и предзагрузка Модуля 2. Так модель не скачивается дважды.
         kwargs = dict(device=self.device)
 
-        def _try(force_safetensors: bool):
+        def _try(force_safetensors: bool, offline: bool):
             mk = {"use_safetensors": True} if force_safetensors else {}
             try:
                 return SentenceTransformer(self.model_name, model_kwargs=mk,
-                                           token=token, **kwargs)
+                                           token=token, local_files_only=offline,
+                                           **kwargs)
             except TypeError:
-                # старые версии sentence-transformers без model_kwargs/token
+                # старые версии sentence-transformers без model_kwargs/token/
+                # local_files_only
                 return SentenceTransformer(self.model_name, **kwargs)
 
-        # Сначала строгий safetensors (фикс CVE-2025-32434). Но некоторые модели
-        # (в т.ч. BAAI/bge-m3) публикуются ТОЛЬКО с pytorch_model.bin — тогда
-        # откатываемся на .bin: под torch>=2.6 это безопасно (weights_only=True
-        # по умолчанию), а torch==2.6 ставится установщиком явно.
-        if self.use_safetensors:
-            try:
-                self._model = _try(True)
-            except OSError as e:
-                if "model.safetensors" in str(e):
-                    print(f"[embeddings] у {self.model_name} нет model.safetensors — "
-                          f"загружаю pytorch_model.bin (безопасно: torch>=2.6, weights_only)",
-                          flush=True)
-                    self._model = _try(False)
-                else:
+        def _load_pair(offline: bool):
+            # Сначала строгий safetensors (фикс CVE-2025-32434). Но некоторые
+            # модели (в т.ч. BAAI/bge-m3) публикуются ТОЛЬКО с pytorch_model.bin —
+            # тогда откатываемся на .bin: под torch>=2.6 это безопасно
+            # (weights_only=True по умолчанию), установщик ставит torch>=2.6 явно.
+            if self.use_safetensors:
+                try:
+                    return _try(True, offline)
+                except OSError as e:
+                    if "model.safetensors" in str(e):
+                        print(f"[embeddings] у {self.model_name} нет model.safetensors — "
+                              f"загружаю pytorch_model.bin (безопасно: torch>=2.6, "
+                              f"weights_only)", flush=True)
+                        return _try(False, offline)
                     raise
-        else:
-            self._model = _try(False)
+            return _try(False, offline)
+
+        # Полный кэш → грузим СТРОГО с диска (local_files_only): ни одного
+        # сетевого запроса. Иначе проверка ревизии уходит на HuggingFace и через
+        # неотвечающий прокси может висеть без таймаута («вечная загрузка модели»).
+        from ..core.model_cache import is_model_cached
+        offline = is_model_cached(self.model_name)
+        if offline:
+            print(f"[embeddings] кэш модели полон — гружу строго с диска, без сети",
+                  flush=True)
+        try:
+            self._model = _load_pair(offline)
+        except Exception as e:  # noqa: BLE001
+            if not offline:
+                raise
+            # кэш оказался неполным/битым — одна попытка с сетью
+            print(f"[embeddings] офлайн-загрузка не удалась ({e}) — пробую с сетью",
+                  flush=True)
+            self._model = _load_pair(False)
         try:
             self._model.max_seq_length = self.max_length
         except Exception:

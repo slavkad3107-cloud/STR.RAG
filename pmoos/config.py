@@ -46,7 +46,18 @@ _load_env()
 # чтобы «проверять скачанные модели прежде чем скачивать» (замечание пользователя)
 # и чтобы кэш переживал переустановку приложения.
 os.environ.setdefault("HF_HOME", str(models_dir()))
-os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(models_dir()))
+# ВАЖНО: путь ОБЯЗАН совпадать с hub-кэшем (<HF_HOME>/hub). До v0.30.2 здесь
+# стоял models_dir() без /hub, и sentence-transformers (cache_folder →
+# snapshot_download(cache_dir=...)) вёл ВТОРУЮ полную копию модели в
+# <данные>/models/models--..., игнорируя уже скачанное в <данные>/models/hub.
+# Из-за расхождения загрузка «с диска» уходила в сеть за 2.3 ГБ и висла на прокси.
+os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(models_dir() / "hub"))
+# Сетевые походы HF не должны висеть вечно (запрос через мёртвый локальный
+# прокси может не отвечать без таймаута): метаданные 15 с, скачивание 60 с
+# на чтение порции. При полном локальном кэше сеть вообще не нужна —
+# см. local_files_only в embeddings/reranker.
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "15")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
 # Снимаем шумное предупреждение HF про неавторизованные запросы, если токена нет.
 if os.environ.get("HF_TOKEN"):
     os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", os.environ["HF_TOKEN"])

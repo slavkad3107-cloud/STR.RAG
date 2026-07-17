@@ -180,6 +180,21 @@ def test_config_deep_merge_and_get():
     assert c.get("nope.missing", "def") == "def"
 
 
+def test_st_cache_unified_with_hub():
+    # СТРАХОВКА (по инциденту 17.07.2026): SENTENCE_TRANSFORMERS_HOME обязан
+    # указывать на <HF_HOME>/hub — иначе sentence-transformers ведёт ВТОРУЮ
+    # копию модели вне hub/, «кэш найден» её не видит, и загрузка уходит в сеть
+    # (зависание на прокси при загрузке «с диска»).
+    import os
+    from pathlib import Path
+    import pmoos.config  # noqa: F401  (выставляет переменные окружения)
+    st_home = os.environ.get("SENTENCE_TRANSFORMERS_HOME", "")
+    hf_home = os.environ.get("HF_HOME", "")
+    assert st_home and hf_home
+    assert Path(st_home) == Path(hf_home) / "hub", (
+        "SENTENCE_TRANSFORMERS_HOME должен совпадать с <HF_HOME>/hub")
+
+
 def test_env_example_has_no_real_secrets():
     # СТРАХОВКА (по реальному инциденту 16.07.2026): в .env.example попали
     # настоящие ключи, и GitHub push protection заблокировал публикацию.
