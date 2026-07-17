@@ -61,6 +61,11 @@ for /f "usebackq eol=# tokens=1 delims= " %%P in ("requirements.txt") do (
   pip install --prefer-binary --timeout 120 --retries 10 "%%P"
 )
 :DEPSOK
+REM Штамп зависимостей: run.bat сравнивает хэш requirements.txt с этим файлом
+REM и при расхождении предупреждает, что нужен повторный install.bat.
+set "REQHASH="
+for /f "skip=1 tokens=1" %%h in ('certutil -hashfile requirements.txt SHA256 2^>nul') do if not defined REQHASH set "REQHASH=%%h"
+if defined REQHASH >"%VENV%\requirements.sha256" echo %REQHASH%
 
 echo.
 echo [5/5] Downloading AI models (bge-m3 + reranker, ~3.4 GB) and SELF-TEST ...
