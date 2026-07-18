@@ -409,6 +409,7 @@ def tab_m2(project: str, object_type: str) -> None:
                "стабильные ID чанков). Работает на обычном компьютере (CPU); "
                "видеокарта NVIDIA ускоряет, но не обязательна.")
     C.indexing_panel(project, object_type)
+    C.transfer_panel(_cfg())
 
 
 def tab_m3(project: str, object_type: str) -> None:

@@ -305,6 +305,61 @@ def version_map(project: str, object_type: str) -> None:
 
 
 # ─────────────────────────────── ИНДЕКСАЦИЯ ───────────────────────────────
+def transfer_panel(cfg) -> None:
+    """Перенос базы между компьютерами через OneDrive (или любую папку).
+
+    Кнопки работают из приложения: перед копированием модуль сам проверяет,
+    что база «спокойна» (нет индексации, хранилище не занято) — см.
+    pmoos/core/transfer.py. Переносится ВСЯ база (все проекты)."""
+    from pmoos.core.transfer import default_dest, sync_info, sync_out, sync_in
+
+    with st.expander("💾 Одна база на несколько компьютеров (перенос через OneDrive)"):
+        st.caption("Живой базе нельзя лежать в OneDrive напрямую — синхронизация "
+                   "на лету портит её. Поэтому база живёт на этом компьютере, а "
+                   "кнопки ниже переносят её через облако целиком (все проекты): "
+                   "закончили работу → «Выгрузить»; сели за другой компьютер → "
+                   "«Забрать». Переносятся только изменившиеся файлы.")
+        saved = str(cfg.get("transfer.dest", "") or "")
+        # путь мог приехать с ДРУГОГО компьютера вместе с config.yaml (там другой
+        # профиль пользователя) — если родителя нет на этой машине, берём дефолт
+        from pathlib import Path as _P
+        if saved and not _P(saved).parent.exists():
+            saved = ""
+        shown = saved or default_dest()
+        dest = st.text_input("Папка переноса", value=shown, key="tr_dest",
+                             help="По умолчанию — папка OneDrive. Можно указать "
+                                  "флешку или сетевой диск.")
+        # сохраняем ТОЛЬКО осознанный ввод (отличие от показанного значения) —
+        # иначе config.yaml переписывался бы на каждую перерисовку страницы
+        if dest and dest != shown:
+            cfg.set("transfer.dest", dest); cfg.save()
+        info = sync_info(dest) if dest else None
+        if info:
+            st.caption(f"В папке переноса: {info}")
+        else:
+            st.caption("В папке переноса пока нет выгруженной базы.")
+        # результат последней операции живёт в session_state — не исчезает
+        # при перерисовках (операция долгая, сообщение важно не потерять)
+        if st.session_state.get("tr_last"):
+            _ok, _m = st.session_state["tr_last"]
+            (st.success if _ok else st.error)(_m)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📤 Выгрузить базу (после работы)", width='stretch',
+                         key="tr_out"):
+                with st.spinner("Выгрузка базы… (первый раз — минуты)"):
+                    st.session_state["tr_last"] = sync_out(dest)
+                st.rerun()
+        with c2:
+            sure = st.checkbox("Понимаю: локальная база будет заменена облачной",
+                               key="tr_in_sure")
+            if st.button("📥 Забрать базу (перед работой)", width='stretch',
+                         disabled=not sure, key="tr_in"):
+                with st.spinner("Загрузка базы… (со страховочной копией)"):
+                    st.session_state["tr_last"] = sync_in(dest)
+                st.rerun()
+
+
 def indexing_panel(project: str, object_type: str) -> None:
     from pmoos.index.indexer import (
         progress_summary, start_background, request_pause, clear_pause, is_running,

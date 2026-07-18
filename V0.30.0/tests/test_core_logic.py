@@ -204,6 +204,94 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_transfer_sync_roundtrip(tmp_path, monkeypatch):
+    # Перенос базы через OneDrive/путь (v0.30.6): выгрузка -> загрузка,
+    # venv не переносится, защита от живой индексации.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path / "data"))
+    from pmoos.projects import register_project
+    from pmoos.index import indexer as I
+    from pmoos.core import transfer as T
+    from pmoos.paths import data_root
+
+    register_project("ПЕР")
+    I.write_state("ПЕР", I.read_state("ПЕР"))   # материализует projects/ПЕР
+    (data_root() / "qdrant").mkdir(parents=True, exist_ok=True)
+    (data_root() / "qdrant" / "x.bin").write_text("вектор-1", encoding="utf-8")
+    (data_root() / "venv").mkdir(exist_ok=True)
+    (data_root() / "venv" / "lib.txt").write_text("не переносить", encoding="utf-8")
+
+    dest = str(tmp_path / "cloud")
+    ok, msg = T.sync_out(dest)
+    assert ok, msg
+    from pathlib import Path
+    assert (Path(dest) / "qdrant" / "x.bin").exists()
+    assert (Path(dest) / T.INFO_NAME).exists()
+    assert not (Path(dest) / "venv").exists()          # исключён
+    assert T.sync_info(dest) and "Выгружено" in T.sync_info(dest)
+
+    # обратный перенос приносит изменения, venv цела
+    (Path(dest) / "qdrant" / "x.bin").write_text("вектор-2", encoding="utf-8")
+    ok, msg = T.sync_in(dest)
+    assert ok, msg
+    assert (data_root() / "qdrant" / "x.bin").read_text(encoding="utf-8") == "вектор-2"
+    assert (data_root() / "venv" / "lib.txt").exists()
+
+    # живой heartbeat блокирует перенос; заглохший (старый) — нет
+    st = I.read_state("ПЕР")
+    st.update({"status": "running", "pid": 0})
+    I.write_state("ПЕР", st)                           # write_state ставит свежий heartbeat
+    ok, msg = T.sync_out(dest)
+    assert not ok and "индексация" in msg
+    st = I.read_state("ПЕР")
+    st["heartbeat"] = st["updated_at"] = "2020-01-01T00:00:00"
+    import json
+    (data_root() / "projects" / "ПЕР" / "index_state.json").write_text(
+        json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    ok, msg = T.sync_out(dest)
+    assert ok, msg                                     # заглохший running не мешает
+
+    # пустой dest — понятный отказ; относительный путь — отказ
+    assert not T.sync_out("")[0]
+    assert not T.sync_out("относительный/путь")[0]
+    # dest внутри каталога данных — отказ
+    assert not T.sync_out(str(data_root() / "куда-то"))[0]
+
+    # ЗАЩИТА /MIR: чужая непустая папка не затирается
+    alien = tmp_path / "Документы"
+    alien.mkdir()
+    (alien / "важное.docx").write_text("не трогать", encoding="utf-8")
+    ok, msg = T.sync_out(str(alien))
+    assert not ok and "не пустая" in msg
+    assert (alien / "важное.docx").exists()
+
+    # КРИТИЧНО (находка ревью): чужой podкаталог projects/ — НЕ признак «нашей»
+    # папки; выгрузка обязана отказаться, а не зачистить папку зеркалом
+    alien2 = tmp_path / "Dev"
+    (alien2 / "projects").mkdir(parents=True)
+    (alien2 / "мой_код.py").write_text("х", encoding="utf-8")
+    ok, msg = T.sync_out(str(alien2))
+    assert not ok and (alien2 / "мой_код.py").exists()
+
+    # «Забрать» из папки без манифеста (чужая/недовыгруженная) — отказ
+    ok, msg = T.sync_in(str(alien2))
+    assert not ok and "манифест" in msg.lower()
+
+    # «Забрать» при недокачанной OneDrive-копии (файл пропал) — отказ по манифесту
+    ok, _ = T.sync_out(dest)
+    assert ok
+    victim = next((Path(dest) / "projects").rglob("*.json"))
+    victim.unlink()
+    ok, msg = T.sync_in(dest)
+    assert not ok and "досинхронизировал" in msg
+
+    # страховочная копия создаётся при успешном «Забрать»
+    ok, _ = T.sync_out(dest)          # восстановить целостность облака
+    assert ok
+    ok, msg = T.sync_in(dest)
+    assert ok, msg
+    assert T._backup_dir().exists() and (T._backup_dir() / "projects").exists()
+
+
 def test_st_cache_unified_with_hub():
     # СТРАХОВКА (по инциденту 17.07.2026): SENTENCE_TRANSFORMERS_HOME обязан
     # указывать на <HF_HOME>/hub — иначе sentence-transformers ведёт ВТОРУЮ
