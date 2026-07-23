@@ -204,6 +204,37 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_unknown_override_does_not_block_classification(tmp_path, monkeypatch):
+    # БАГ (найден на ОПОЧКЕ 23.07): «UNKNOWN»-override, оставшийся от прежнего типа
+    # объекта, навсегда перекрывал авто-классификацию → «переключил на линейный, а
+    # распознано не изменилось». UNKNOWN-override должен игнорироваться/сниматься.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.projects import register_project
+    from pmoos.ingest.inventory import build_inventory, set_file_section, load_inventory
+    from pmoos.paths import project_paths
+    register_project("ИНВ")
+    up = project_paths("ИНВ")["uploads"]; up.mkdir(parents=True, exist_ok=True)
+    fname = "Раздел ПД №3_ТКР.АД_том 3.1.1.pdf"
+    (up / fname).write_bytes(b"%PDF-1.4 test")
+    # под линейным файл распознаётся как TKR
+    inv = build_inventory("ИНВ", object_type="линейный")
+    assert next(f for f in inv["files"] if f["rel"] == fname)["section"] == "TKR"
+    # ставим UNKNOWN-override (как делал старый площадной-путь) — он НЕ должен
+    # сохраниться как блокирующий override
+    set_file_section("ИНВ", fname, "UNKNOWN")
+    assert fname not in (load_inventory("ИНВ").get("overrides") or {})
+    # даже если UNKNOWN как-то попал в overrides, build_inventory его игнорирует
+    inv2 = load_inventory("ИНВ"); inv2.setdefault("overrides", {})[fname] = "UNKNOWN"
+    project_paths("ИНВ")["inventory"].write_text(
+        __import__("json").dumps(inv2, ensure_ascii=False), encoding="utf-8")
+    inv3 = build_inventory("ИНВ", object_type="линейный")
+    assert next(f for f in inv3["files"] if f["rel"] == fname)["section"] == "TKR"
+    # а РЕАЛЬНЫЙ override (пользователь исправил раздел) — работает
+    set_file_section("ИНВ", fname, "POS")
+    inv4 = build_inventory("ИНВ", object_type="линейный")
+    assert next(f for f in inv4["files"] if f["rel"] == fname)["section"] == "POS"
+
+
 def test_memory_retraction(tmp_path, monkeypatch):
     # ОТЗЫВ из памяти (v0.31, замечание аудита): неверный ответ можно убрать из
     # few-shot; тот же неизменённый ответ не воскресает; исправленный — снимает отзыв.
