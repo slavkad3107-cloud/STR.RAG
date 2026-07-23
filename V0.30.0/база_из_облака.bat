@@ -1,7 +1,7 @@
 @echo off
 chcp 866 >nul
 REM ============================================================
-REM  СтройПроект: загрузка базы данных из OneDrive - перед работой.
+REM  STR.RAG: загрузка базы данных из OneDrive - перед работой.
 REM  Облачная копия, выгруженная скриптом "база_в_облако.bat" на другом
 REM  компе, заменяет локальную базу этого компьютера.
 REM  ВАЖНО для правок: НИКАКИХ скобок в echo-текстах - ломают if-блоки.
@@ -13,7 +13,7 @@ if "%OneDrive%"=="" (
   pause
   exit /b 1
 )
-set "SRCC=%OneDrive%\STROYPROEKT_BASE"
+set "SRCC=%OneDrive%\STR.RAG_BASE"
 
 if not exist "%SRCC%\projects" (
   echo [ОШИБКА] В OneDrive нет выгруженной базы: %SRCC%

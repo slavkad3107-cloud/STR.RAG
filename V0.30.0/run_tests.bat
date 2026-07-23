@@ -1,9 +1,9 @@
 @echo off
-REM Запуск юнит-тестов чистой логики СтройПроекта (двойной клик).
+REM Запуск юнит-тестов чистой логики STR.RAG (двойной клик).
 REM Тесты быстрые и не грузят нейросети; нужен pytest (pip install pytest).
 setlocal
 cd /d "%~dp0"
-echo === СтройПроект: юнит-тесты чистой логики ===
+echo === STR.RAG: юнит-тесты чистой логики ===
 python -m pytest tests -q
 if errorlevel 1 (
   echo.

@@ -1,7 +1,7 @@
 @echo off
 chcp 866 >nul
 REM ============================================================
-REM  СтройПроект: выгрузка базы данных в OneDrive - после работы.
+REM  STR.RAG: выгрузка базы данных в OneDrive - после работы.
 REM  Локальная база %USERPROFILE%\.pmoos-rag копируется в облако,
 REM  чтобы забрать её на другом компе скриптом "база_из_облака.bat".
 REM  Переносятся только ИЗМЕНИВШИЕСЯ файлы - после первого раза минуты.
@@ -14,7 +14,7 @@ if "%OneDrive%"=="" (
   pause
   exit /b 1
 )
-set "DST=%OneDrive%\STROYPROEKT_BASE"
+set "DST=%OneDrive%\STR.RAG_BASE"
 
 if not exist "%SRC%\projects" (
   echo [ОШИБКА] Локальная база не найдена: %SRC%

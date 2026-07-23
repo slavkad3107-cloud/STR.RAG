@@ -1,4 +1,4 @@
-"""Юнит-тесты ЧИСТОЙ (детерминированной) логики СтройПроекта.
+"""Юнит-тесты ЧИСТОЙ (детерминированной) логики STR.RAG.
 
 Проверяют самые хрупкие правила, которые тихо ломаются при правке регэкспов и
 невидимы до неверного результата: коды ЗВ, классификация замечаний, группировка
@@ -202,6 +202,41 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     # находка адверсариального ревью v0.30.3).
     I.run_indexing("ОТ1", object_type="линейный", reindex=True)
     assert I.read_state("ОТ1").get("object_type") == "площадной"
+
+
+def test_memory_retraction(tmp_path, monkeypatch):
+    # ОТЗЫВ из памяти (v0.31, замечание аудита): неверный ответ можно убрать из
+    # few-shot; тот же неизменённый ответ не воскресает; исправленный — снимает отзыв.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import pmoos.memory as M
+    from pmoos.config import load_config
+    cfg = load_config()
+    cfg.set("memory.semantic", False)  # лексический путь, без загрузки модели
+
+    M.record_many("ПРОШЛЫЙ", [
+        {"remark": "Указать площадь застройки участка", "answer": "Площадь 1.2 га", "number": "1"},
+        {"remark": "Обосновать выбросы диоксида азота", "answer": "ПДВ 0.45 г/с", "number": "2"}])
+    assert M.kb_size() == 2
+    assert M.similar_past("площадь застройки", k=3, cfg=cfg)  # находит
+
+    # отзыв убирает из подсказок и из счётчика
+    assert M.retract("ПРОШЛЫЙ", "1") is True
+    assert M.kb_size() == 1
+    assert not any(r.get("number") == "1"
+                   for r in M.similar_past("площадь застройки участка", k=3, cfg=cfg))
+    assert any(r.get("retracted") for r in M.list_kb())  # запись цела (аудит-след)
+
+    # повторный record_accepted с ТЕМ ЖЕ ответом НЕ воскрешает отозванное
+    M.record_many("ПРОШЛЫЙ", [{"remark": "Указать площадь застройки участка",
+                               "answer": "Площадь 1.2 га", "number": "1"}])
+    assert M.kb_size() == 1
+    assert next(r for r in M.list_kb() if r["number"] == "1").get("retracted")
+
+    # ИСПРАВЛЕННЫЙ ответ снимает отзыв
+    M.record_many("ПРОШЛЫЙ", [{"remark": "Указать площадь застройки участка",
+                               "answer": "Площадь застройки 1.24 га (уточнено)", "number": "1"}])
+    assert M.kb_size() == 2
+    assert not next(r for r in M.list_kb() if r["number"] == "1").get("retracted")
 
 
 def test_transfer_sync_roundtrip(tmp_path, monkeypatch):

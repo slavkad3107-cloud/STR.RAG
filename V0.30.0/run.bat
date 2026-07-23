@@ -39,7 +39,7 @@ echo ============================================================
 echo Нажмите любую клавишу, чтобы всё равно попробовать запустить...
 pause >nul
 :REQOK
-echo Starting STROYPROEKT ... a browser tab will open.
+echo Starting STR.RAG ... a browser tab will open.
 echo To stop: press Ctrl+C in this window.
 streamlit run app\hub.py
 pause

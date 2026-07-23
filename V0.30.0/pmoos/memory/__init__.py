@@ -145,6 +145,8 @@ def _semantic_similar(remark_text: str, *, k: int, exclude_project: str | None,
     rt_low = (remark_text or "").strip().lower()
     scored: list[tuple[float, dict]] = []
     for r, s in zip(records, sims):
+        if r.get("retracted"):
+            continue  # отозванный ответ не подсказываем
         if exclude_project and r.get("project") == exclude_project:
             continue
         if r.get("remark", "").strip().lower() == rt_low:
@@ -161,7 +163,8 @@ def _semantic_similar(remark_text: str, *, k: int, exclude_project: str | None,
 
 
 def kb_size() -> int:
-    return len(_load_cached()[0])
+    # отозванные (retracted) записи не участвуют в few-shot — не считаем их
+    return sum(1 for r in _load_cached()[0] if not r.get("retracted"))
 
 
 def _iter_records() -> list[dict]:
@@ -188,10 +191,17 @@ def record_one(*, remark: str, answer: str, correction: str = "", section: str =
         changed = False
         for r in records:
             if f"{r.get('project')}|{r.get('number')}" == key:
+                # ОТЗЫВ: если запись отозвана, а ответ не изменился — не воскрешаем
+                # (тот же плохой ответ, всё ещё «принятый» в проекте, не должен
+                # тихо вернуться в few-shot). Отредактированный ответ снимает отзыв.
+                if r.get("retracted") and answer == r.get("answer", ""):
+                    continue
                 r["answer"] = answer
                 r["correction"] = correction
                 r["section"] = section
                 r["ts"] = datetime.now().isoformat(timespec="seconds")
+                r.pop("retracted", None)
+                r.pop("retracted_ts", None)
                 changed = True
         if changed:
             with _store_path().open("w", encoding="utf-8") as f:
@@ -230,12 +240,19 @@ def record_many(project: str, items: list[dict]) -> int:
     records = _read_raw()
     by_key = {f"{r.get('project')}|{r.get('number')}": r for r in records}
     appended = []
+    n_skipped = 0
     for rec in prepared:
         key = f"{rec['project']}|{rec['number']}"
         old = by_key.get(key)
         if old is not None:
+            # ОТЗЫВ: отозванный и не изменённый ответ не воскрешаем (см. record_one)
+            if old.get("retracted") and rec["answer"] == old.get("answer", ""):
+                n_skipped += 1
+                continue
             old.update(answer=rec["answer"], correction=rec["correction"],
                        section=rec["section"], ts=rec["ts"])
+            old.pop("retracted", None)
+            old.pop("retracted_ts", None)
         else:
             appended.append(rec)
             by_key[key] = rec
@@ -243,7 +260,7 @@ def record_many(project: str, items: list[dict]) -> int:
         for r in records + appended:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     _invalidate_cache()
-    return len(prepared)
+    return len(prepared) - n_skipped
 
 
 def record_accepted(project: str) -> int:
@@ -271,6 +288,50 @@ def record_accepted(project: str) -> int:
     return n
 
 
+def retract(project: str, number: str | int) -> bool:
+    """Отозвать запись памяти: пометить retracted, чтобы она больше НЕ подмешивалась
+    как few-shot пример (аудитор: «неверный ответ, принятый в спешке, размножается»).
+    Запись НЕ удаляется (аудит-след); тот же неизменённый ответ не вернётся при
+    повторном record_accepted (см. record_many). Снять отзыв — принять в М4
+    ИСПРАВЛЕННЫЙ (отличающийся текстом) ответ, либо unretract()."""
+    return _set_retracted(project, number, True)
+
+
+def unretract(project: str, number: str | int) -> bool:
+    """Вернуть отозванную запись в работу (ручная отмена отзыва)."""
+    return _set_retracted(project, number, False)
+
+
+def _set_retracted(project: str, number: str | int, value: bool) -> bool:
+    key = f"{project}|{number}"
+    records = _read_raw()
+    changed = False
+    for r in records:
+        if f"{r.get('project')}|{r.get('number')}" == key and bool(r.get("retracted")) != value:
+            if value:
+                r["retracted"] = True
+                r["retracted_ts"] = datetime.now().isoformat(timespec="seconds")
+            else:
+                r.pop("retracted", None)
+                r.pop("retracted_ts", None)
+            changed = True
+    if changed:
+        with _store_path().open("w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        _invalidate_cache()
+    return changed
+
+
+def list_kb(include_retracted: bool = True) -> list[dict]:
+    """Все записи памяти для управления в интерфейсе (с флагом retracted).
+    Новые — сверху (по ts). Возвращаемые dict — копии, мутировать безопасно."""
+    out = [dict(r) for r in _read_raw()
+           if include_retracted or not r.get("retracted")]
+    out.sort(key=lambda r: r.get("ts", ""), reverse=True)
+    return out
+
+
 def similar_past(remark_text: str, *, k: int = 2, exclude_project: str | None = None,
                  min_score: float = 0.12, cfg=None) -> list[dict]:
     """Топ-k похожих принятых замечаний из прошлых проектов.
@@ -296,6 +357,8 @@ def similar_past(remark_text: str, *, k: int = 2, exclude_project: str | None = 
     records, tokens = _load_cached()  # токены замечаний предвычислены один раз
     scored: list[tuple[float, dict]] = []
     for r, d in zip(records, tokens):
+        if r.get("retracted"):
+            continue  # отозванный ответ не подсказываем
         if exclude_project and r.get("project") == exclude_project:
             continue
         if r.get("remark", "").strip().lower() == rt_low:
