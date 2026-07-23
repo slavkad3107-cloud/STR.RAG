@@ -362,14 +362,14 @@ def tab_m1(project: str, object_type: str) -> None:
                      type="primary" if _unk else "secondary",
                      help="Отправляет ИМЕНА нераспознанных файлов выбранному провайдеру "
                           "(включая локальную Ollama) и проставляет коды разделов."):
-            _m1_ai_classify(project, object_type, _unk)
+            _m1_ai_classify(project, _eff_ot, _unk)
             st.rerun()
     with u2:
         st.caption("Базовая систематизация — детерминированная (по именам файлов, без ИИ), "
                    "поэтому она одинакова для всех провайдеров. ИИ подключается кнопкой слева.")
 
     st.subheader("Карта разделов проектной документации")
-    C.section_map(project, object_type)
+    C.section_map(project, _eff_ot)
 
     _exp_title = ("✏️ Подтвердить / исправить раздел и версию файла"
                   + (f" · без раздела: {len(_unk)}" if _unk else " (догадку не навязываем)"))
@@ -378,9 +378,9 @@ def tab_m1(project: str, object_type: str) -> None:
         from pmoos.ingest.sections import required_sections, SURVEYS, section_name
         inv = load_inventory(project)
         if inv and inv.get("files"):
-            st.caption(f"Тип объекта проекта: **{inv.get('object_type', object_type)}** "
-                       f"(меняется слева; влияет на состав разделов и определение версий)")
-            codes = [s["code"] for s in required_sections(object_type)] + [s["code"] for s in SURVEYS] + ["UNKNOWN"]
+            st.caption(f"Тип объекта проекта: **{_eff_ot}** "
+                       f"(зафиксирован за проектом; влияет на состав разделов и определение версий)")
+            codes = [s["code"] for s in required_sections(_eff_ot)] + [s["code"] for s in SURVEYS] + ["UNKNOWN"]
             for it in inv["files"]:
                 cands = ", ".join(f"{c['code']}({c['score']})" for c in it.get("candidates", [])) or "—"
                 cols = st.columns([3, 2, 2, 2])
@@ -404,7 +404,7 @@ def tab_m1(project: str, object_type: str) -> None:
             st.info("Сначала загрузите файлы.")
 
     st.subheader("Версии разделов")
-    C.version_map(project, object_type)
+    C.version_map(project, _eff_ot)
     # блок C.contacts_panel УДАЛЁН: он писал в contacts.json СВОЮ схему
     # (designers/experts) поверх схемы экспандера «📇 Контакты…» (люди/организации) —
     # сохранение одного блока стирало данные другого. Контакты — в экспандере выше.
