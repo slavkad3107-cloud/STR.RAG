@@ -22,5 +22,7 @@ Thumbs.db
 .vscode/
 
 # нумерованные релизы (тяжёлые zip) — хранятся в OneDrive, не в git
-V0.30.0/releases/*.zip
-releases/*.zip
+
+# нумерованные релизы (папки + zip) — живут в OneDrive, не в git
+releases/
+V0.30.0/releases/
