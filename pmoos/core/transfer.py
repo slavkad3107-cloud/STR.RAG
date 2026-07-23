@@ -41,12 +41,12 @@ EXCLUDE_DIR_NAMES = ("venv", "pip-cache", "models")
 INFO_NAME = "_SYNC_INFO.txt"
 MANIFEST_NAME = "_SYNC_MANIFEST.json"
 META_FILES = (INFO_NAME, MANIFEST_NAME)
-SUBDIR = "STROYPROEKT_BASE"
+SUBDIR = "STR.RAG_BASE"
 BACKUP_SUFFIX = ".backup"
 
 
 def default_dest() -> str:
-    """Папка переноса по умолчанию: <OneDrive>/STROYPROEKT_BASE (если OneDrive есть)."""
+    """Папка переноса по умолчанию: <OneDrive>/STR.RAG_BASE (если OneDrive есть)."""
     od = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or ""
     return str(Path(od) / SUBDIR) if od else ""
 

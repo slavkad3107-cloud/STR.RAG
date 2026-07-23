@@ -1,4 +1,4 @@
-"""Скачивание и САМОПРОВЕРКА локальных моделей СтройПроект.
+"""Скачивание и САМОПРОВЕРКА локальных моделей STR.RAG.
 
 Запускается установщиком (install.bat / install.sh, шаг [5/5]) и вручную:
     python setup_models.py
@@ -100,7 +100,7 @@ def verify_models() -> None:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Скачивание и самопроверка моделей СтройПроект")
+    ap = argparse.ArgumentParser(description="Скачивание и самопроверка моделей STR.RAG")
     ap.add_argument("--models", help="список моделей через запятую (по умолчанию — из config)")
     ap.add_argument("--skip-download", action="store_true", help="только проверка")
     ap.add_argument("--skip-verify", action="store_true", help="только скачивание")

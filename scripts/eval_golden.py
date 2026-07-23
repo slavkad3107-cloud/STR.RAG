@@ -1,4 +1,4 @@
-"""Golden-set eval harness СтройПроект (v0.21, «сначала измеритель»).
+"""Golden-set eval harness STR.RAG (v0.21, «сначала измеритель»).
 
 Делает улучшения качества ИЗМЕРИМЫМИ: фиксируем эталонный набор (замечание →
 принятый ответ → файлы-источники) и меряем retrieval и качество ответов до/после
@@ -179,7 +179,7 @@ def cmd_judge(args) -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Golden-set eval harness СтройПроект")
+    ap = argparse.ArgumentParser(description="Golden-set eval harness STR.RAG")
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build", help="собрать golden-set из принятых ответов")
     b.add_argument("--project", required=True)

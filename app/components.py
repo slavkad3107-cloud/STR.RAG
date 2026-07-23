@@ -1,4 +1,4 @@
-"""Переиспользуемые компоненты Streamlit для СтройПроект.
+"""Переиспользуемые компоненты Streamlit для STR.RAG.
 
 Здесь сосредоточены: панель настроек ИИ (с авто-сменой модели по провайдеру и
 списком локальных моделей Ollama), карта разделов (таблица + версии), панель
@@ -305,6 +305,47 @@ def version_map(project: str, object_type: str) -> None:
 
 
 # ─────────────────────────────── ИНДЕКСАЦИЯ ───────────────────────────────
+def memory_panel() -> None:
+    """Управление памятью экспертизы: просмотр и ОТЗЫВ неверных ответов, чтобы
+    они больше не подмешивались как few-shot примеры (замечание аудита о том, что
+    «принятый в спешке неверный ответ размножается»)."""
+    from pmoos.memory import list_kb, retract, unretract, kb_size
+
+    with st.expander(f"🧠 Память экспертизы — просмотр и отзыв ответов "
+                     f"(активных: {kb_size()})"):
+        st.caption("Если в память попал неудачный ответ, «Отозвать» уберёт его из "
+                   "подсказок для будущих ответов. Запись сохраняется (не удаляется); "
+                   "тот же неизменённый ответ не вернётся сам. Чтобы вернуть — "
+                   "«Вернуть» или примите в М4 исправленный ответ.")
+        records = list_kb()
+        if not records:
+            st.caption("Память пока пуста — принимайте ответы в М4, они копятся здесь.")
+            return
+        show_all = st.checkbox("Показывать и отозванные", value=False, key="mem_show_all")
+        shown = records if show_all else [r for r in records if not r.get("retracted")]
+        st.caption(f"Записей: {len(shown)} из {len(records)}")
+        for r in shown[:100]:
+            proj = r.get("project", "?")
+            num = r.get("number", "?")
+            retr = bool(r.get("retracted"))
+            head = f"{'🚫 ' if retr else ''}№{num} · {proj} · {r.get('section','') or '—'}"
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.markdown(f"**{head}**")
+                st.caption(f"Замечание: {r.get('remark','')[:200]}")
+                st.caption(f"Ответ: {r.get('answer','')[:200]}")
+            with col2:
+                kkey = f"mem_{proj}_{num}"
+                if retr:
+                    if st.button("Вернуть", key="unr_" + kkey, width='stretch'):
+                        unretract(proj, num); st.rerun()
+                else:
+                    if st.button("Отозвать", key="ret_" + kkey, width='stretch'):
+                        retract(proj, num); st.rerun()
+        if len(shown) > 100:
+            st.caption(f"…показаны первые 100 из {len(shown)}.")
+
+
 def transfer_panel(cfg) -> None:
     """Перенос базы между компьютерами через OneDrive (или любую папку).
 

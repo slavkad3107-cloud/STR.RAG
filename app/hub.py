@@ -1,4 +1,4 @@
-"""СтройПроект v0.30.0 «Context» — единый интерфейс (Streamlit).
+"""STR.RAG v0.30.0 «Context» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются ОТДЕЛЬНО:
@@ -36,7 +36,7 @@ import app.components as C  # type: ignore
 # set_page_config НЕ на уровне модуля: иначе hub.py нельзя импортировать из
 # отдельных модульных приложений (app/modules_ui/*) без побочного эффекта.
 # Вызывается в main() и в каждом модульном приложении ПЕРВОЙ Streamlit-командой.
-PAGE_TITLE = "СтройПроект"
+PAGE_TITLE = "STR.RAG"
 PAGE_ICON = "🌍"
 
 
@@ -172,7 +172,7 @@ def _workflow_state(project: str) -> dict:
 
 # ─────────────────────────────── сайдбар ───────────────────────────────
 def sidebar() -> tuple[str, str]:
-    st.sidebar.title("🌍 СтройПроект")
+    st.sidebar.title("🌍 STR.RAG")
     st.sidebar.caption(f"v{__version__} «{__codename__}»")
 
     projects = list_projects()
@@ -965,6 +965,8 @@ def tab_m7(project: str, object_type: str) -> None:
     st.caption("Простыми словами: «эталон» — это ваши УЖЕ ПРИНЯТЫЕ ответы. По ним "
                "можно замерить, находит ли поиск те же документы-источники, и сравнить "
                "качество ДО/ПОСЛЕ изменения настроек (например, режима нарезки в М2).")
+
+    C.memory_panel()
 
     from pmoos.pipeline.block1_answers import load_answers
     import json as _json
