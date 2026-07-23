@@ -1,61 +1,22 @@
 @echo off
-chcp 866 >nul
+chcp 65001 >nul
+set "PYTHONUTF8=1"
 REM ============================================================
-REM  STR.RAG: загрузка базы данных из OneDrive - перед работой.
-REM  Облачная копия, выгруженная скриптом "база_в_облако.bat" на другом
-REM  компе, заменяет локальную базу этого компьютера.
-REM  ВАЖНО для правок: НИКАКИХ скобок в echo-текстах - ломают if-блоки.
+REM  STR.RAG: zagruzka bazy iz OneDrive (pered rabotoy).
+REM  Tonkaya obertka nad pmoos.core.transfer.sync_in - vsya zaschita
+REM  (manifest: nedokachannaya OneDrive-kopiya NE stavitsya; strahovochnaya
+REM  kopiya + avtootkat; zamok bazy) realizovana TAM, kak v knopke Modulya 2.
+REM  ETO ZAMENYAET lokalnuyu bazu oblachnoy - podtverdite nizhe.
 REM ============================================================
-set "DSTL=%PMOOS_DATA_DIR%"
-if "%DSTL%"=="" set "DSTL=%USERPROFILE%\.pmoos-rag"
-if "%OneDrive%"=="" (
-  echo [ОШИБКА] Папка OneDrive не найдена на этом компьютере.
-  pause
-  exit /b 1
-)
-set "SRCC=%OneDrive%\STR.RAG_BASE"
-
-if not exist "%SRCC%\projects" (
-  echo [ОШИБКА] В OneDrive нет выгруженной базы: %SRCC%
-  echo Сначала на другом компьютере запустите "база_в_облако.bat".
-  pause
-  exit /b 1
-)
-
-if exist "%SRCC%\_SYNC_INFO.txt" (
-  echo Облачная копия:
-  type "%SRCC%\_SYNC_INFO.txt"
-  echo.
-)
-echo [ВНИМАНИЕ] Локальная база этого компьютера будет ЗАМЕНЕНА облачной:
-echo   %SRCC%  -^>  %DSTL%
-echo Если вы работали здесь после последней выгрузки - эти изменения пропадут.
-echo Приложение должно быть ЗАКРЫТО.
-echo Нажмите любую клавишу, чтобы продолжить, или закройте это окно...
+cd /d "%~dp0"
+set "PY=%PMOOS_DATA_DIR%\venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=%USERPROFILE%\.pmoos-rag\venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=python"
+echo VNIMANIE: lokalnaya baza budet ZAMENENA oblachnoy kopiey.
+echo Prilozhenie dolzhno byt ZAKRYTO.
+echo Nazhmite lyubuyu klavishu dlya prodolzheniya ili zakroyte okno...
 pause >nul
-
-REM -- защита: не затирать базу, пока идёт индексация --
-findstr /s /m /c:"\"status\": \"running\"" "%DSTL%\projects\*.json" >nul 2>&1
-if not errorlevel 1 (
-  echo [СТОП] На ЭТОМ компьютере сейчас идёт индексация - остановите её
-  echo или дождитесь окончания, затем повторите.
-  pause
-  exit /b 1
-)
-
 echo.
-echo Загрузка: %SRCC%  -^>  %DSTL%
-robocopy "%SRCC%" "%DSTL%" /MIR /XD venv pip-cache models /XF *.lock /R:2 /W:2 /NFL /NDL /NP
-if errorlevel 8 (
-  echo.
-  echo [ОШИБКА] Копирование не удалось. Проверьте два условия и повторите:
-  echo пузырёк OneDrive в трее - зелёная галочка, приложение закрыто.
-  pause
-  exit /b 1
-)
+"%PY%" -c "import sys; from pmoos.core.transfer import sync_in, default_dest; ok,msg=sync_in(default_dest()); print(msg); sys.exit(0 if ok else 1)"
 echo.
-echo ============================================================
-echo   ГОТОВО. Запускайте приложение: run.bat
-echo   После работы не забудьте "база_в_облако.bat".
-echo ============================================================
 pause

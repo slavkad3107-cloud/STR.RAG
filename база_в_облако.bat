@@ -1,56 +1,18 @@
 @echo off
-chcp 866 >nul
+chcp 65001 >nul
+set "PYTHONUTF8=1"
 REM ============================================================
-REM  STR.RAG: выгрузка базы данных в OneDrive - после работы.
-REM  Локальная база %USERPROFILE%\.pmoos-rag копируется в облако,
-REM  чтобы забрать её на другом компе скриптом "база_из_облака.bat".
-REM  Переносятся только ИЗМЕНИВШИЕСЯ файлы - после первого раза минуты.
-REM  ВАЖНО для правок: НИКАКИХ скобок в echo-текстах - ломают if-блоки.
+REM  STR.RAG: vygruzka bazy v OneDrive (posle raboty).
+REM  Tonkaya obertka nad pmoos.core.transfer.sync_out - vsya zaschita
+REM  (zamok bazy, manifest tselostnosti, otkaz pri zhivoy indeksatsii)
+REM  realizovana TAM, chtoby povedenie sovpadalo s knopkoy v Module 2.
 REM ============================================================
-set "SRC=%PMOOS_DATA_DIR%"
-if "%SRC%"=="" set "SRC=%USERPROFILE%\.pmoos-rag"
-if "%OneDrive%"=="" (
-  echo [ОШИБКА] Папка OneDrive не найдена на этом компьютере.
-  pause
-  exit /b 1
-)
-set "DST=%OneDrive%\STR.RAG_BASE"
-
-if not exist "%SRC%\projects" (
-  echo [ОШИБКА] Локальная база не найдена: %SRC%
-  pause
-  exit /b 1
-)
-
-REM -- защита: не выгружать, пока идёт индексация --
-findstr /s /m /c:"\"status\": \"running\"" "%SRC%\projects\*.json" >nul 2>&1
-if not errorlevel 1 (
-  echo [СТОП] Сейчас идёт индексация - дождитесь окончания или нажмите
-  echo "Стоп" в Модуле 2, затем запустите выгрузку снова.
-  pause
-  exit /b 1
-)
-echo Перед выгрузкой ЗАКРОЙТЕ окно приложения - Ctrl+C в окне run.bat,
-echo иначе в облако может попасть недописанный файл базы.
-echo Нажмите любую клавишу, когда приложение закрыто...
-pause >nul
-
+cd /d "%~dp0"
+set "PY=%PMOOS_DATA_DIR%\venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=%USERPROFILE%\.pmoos-rag\venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=python"
+echo Prilozhenie luchshe zakryt (Ctrl+C v okne run.bat).
 echo.
-echo Выгрузка: %SRC%  -^>  %DST%
-echo Без venv, pip-cache и моделей - они на каждом компе свои.
-robocopy "%SRC%" "%DST%" /MIR /XD venv pip-cache models /XF *.lock /R:2 /W:2 /NFL /NDL /NP
-if errorlevel 8 (
-  echo.
-  echo [ОШИБКА] Копирование не удалось. Часто это значит, что приложение
-  echo ещё открыто - закройте его и повторите.
-  pause
-  exit /b 1
-)
->"%DST%\_SYNC_INFO.txt" echo Выгружено с компьютера %COMPUTERNAME% - %DATE% %TIME%
+"%PY%" -c "import sys; from pmoos.core.transfer import sync_out, default_dest; ok,msg=sync_out(default_dest()); print(msg); sys.exit(0 if ok else 1)"
 echo.
-echo ============================================================
-echo   ГОТОВО. Дождитесь, пока OneDrive досинхронизирует папку:
-echo   значок OneDrive в трее должен стать зелёной галочкой.
-echo   Только после этого забирайте базу на другом компьютере.
-echo ============================================================
 pause

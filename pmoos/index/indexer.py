@@ -307,16 +307,12 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
     # возобновление всегда идёт с типом из состояния проекта; сменить тип может
     # только полная переиндексация (reindex=True).
     _stored_ot = state.get("object_type")
+    # Резолвим ТОЛЬКО переменную object_type для классификации; в state тип пишем
+    # НИЖЕ (после префлайта диска / после drop_collection), чтобы не залочить тип,
+    # если прогон оборвётся до какой-либо индексации (находка ревью).
     if reindex:
-        # Смена типа при переиндексации фиксируется НИЖЕ — только после
-        # ФАКТИЧЕСКОГО удаления коллекции (по находке адверсариального ревью:
-        # если записать новый тип здесь, а прогон упадёт до drop_collection —
-        # префлайт диска, сбой загрузки модели, — база останется со старой
-        # разметкой, состояние уже залочит новую, и «⏯ Продолжить» смешает их).
-        pass
-    elif not _stored_ot:
-        state["object_type"] = object_type
-    elif _stored_ot != object_type:
+        pass  # новый тип фиксируется после ФАКТИЧЕСКОГО drop_collection
+    elif _stored_ot and _stored_ot != object_type:
         print(f"[indexer] тип объекта зафиксирован при первом запуске: «{_stored_ot}» — "
               f"переключатель «{object_type}» проигнорирован (смена типа — только "
               f"полная переиндексация)", flush=True)
@@ -352,6 +348,12 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
                                   f"«⏯ Продолжить». Данные приложения: {_dr()}")})
         write_state(project, state)
         return state
+    # ФИКСАЦИЯ ТИПА за проектом (первый запуск): только теперь, когда префлайт
+    # диска пройден и мы реально приступаем — иначе тип залочился бы даже при
+    # отказе на переполненном диске (находка ревью). reindex-случай пишет тип
+    # после drop_collection ниже.
+    if not reindex and not state.get("object_type"):
+        state["object_type"] = object_type
     state.update({
         "status": "running", "pause_requested": False, "pid": os.getpid(),
         "total_files": len(files), "done_files": 0,
@@ -651,7 +653,10 @@ def start_background(project: str, *, object_type: str | None = None,
     st.update({
         "status": "running", "pid": 0,
         "total_files": len(files), "done_files": st.get("done_files", 0),
-        "current_file": "",
+        # current_file НЕ обнуляем: если прошлый прогон жёстко упал, здесь лежит
+        # имя недописанного файла — дочерний run_indexing прочитает его и пометит
+        # error (краш-маркер). Обнуление тут делало краш-маркер мёртвым на
+        # GUI-пути: файл оставался «дубликатом» по sha и не переиндексировался.
         "message": f"Запуск фонового процесса ({len(files)} файлов)…",
     })
     write_state(project, st)

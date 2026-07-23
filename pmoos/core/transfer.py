@@ -137,7 +137,12 @@ def _robocopy(src: Path, dst: Path) -> tuple[bool, str]:
            "/XD", *_xd_paths(src, dst), "/XF", "*.lock", *META_FILES,
            "/R:2", "/W:2", "/NFL", "/NDL", "/NP", "/NJH"]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    res = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
+    # robocopy пишет в кодировке КОНСОЛИ (на рус. Windows — CP866/OEM), а не UTF-8:
+    # с text=True по умолчанию поток-читатель падал UnicodeDecodeError на кириллице
+    # в выводе (имена файлов/ошибки), и res.stdout ломался. Декодируем как OEM с
+    # заменой нечитаемого — stdout нужен лишь для диагностического «хвоста».
+    res = subprocess.run(cmd, capture_output=True, text=True,
+                         encoding="oem", errors="replace", creationflags=flags)
     if res.returncode >= 8:  # 0-7 успех, >=8 ошибка
         tail = (res.stdout or "").strip().splitlines()[-6:]
         return False, "robocopy code %d: %s" % (res.returncode, " | ".join(tail))
