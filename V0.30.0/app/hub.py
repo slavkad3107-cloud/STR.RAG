@@ -276,13 +276,24 @@ def tab_m1(project: str, object_type: str) -> None:
                         if q.is_file() and q.suffix.lower() in _SUP)
                  if _up.exists() else [])
         st.session_state["_m1_scan"] = (project, _time.monotonic(), _disk)
+    # Тип объекта: если проект уже проиндексирован, берём ЗАФИКСИРОВАННЫЙ за ним
+    # тип (state.object_type), а не сайдбар — иначе карта разделов зависела бы от
+    # случайного положения переключателя (жалоба: «переключил на линейный, а
+    # распознано не изменилось»). Для новых проектов — тип из сайдбара.
+    from pmoos.index.indexer import read_state as _rs_ot
+    _eff_ot = _rs_ot(project).get("object_type") or object_type
     _inv0 = _li(project)
     _invf = sorted(f.get("rel", "") for f in (_inv0 or {}).get("files", []))
-    if _disk and _disk != _invf:
-        _bi(project, object_type=object_type)
-        st.info(f"Найдено файлов в проекте: {len(_disk)} — карта разделов обновлена автоматически.")
+    _inv_ot = (_inv0 or {}).get("object_type")
+    # пересобираем при изменении состава файлов ИЛИ при смене типа объекта
+    if _disk and (_disk != _invf or (_inv_ot and _inv_ot != _eff_ot)):
+        _bi(project, object_type=_eff_ot)
+        _why = ("тип объекта: " + _eff_ot) if (_inv_ot and _inv_ot != _eff_ot) \
+            else f"найдено файлов: {len(_disk)}"
+        st.info(f"Карта разделов обновлена автоматически ({_why}).")
     elif _disk:
-        st.caption(f"Файлов в проекте: **{len(_disk)}** · карта разделов актуальна.")
+        st.caption(f"Файлов в проекте: **{len(_disk)}** · карта разделов актуальна "
+                   f"(тип: {_eff_ot}).")
 
     files = st.file_uploader(
         "Загрузите файлы ПД (pdf / docx / xlsx). Можно перетащить много файлов.",
@@ -294,12 +305,12 @@ def tab_m1(project: str, object_type: str) -> None:
         if st.button("📥 Загрузить и систематизировать", disabled=not files, width='stretch'):
             n = _save_uploads(project, files)
             from pmoos.ingest.inventory import build_inventory
-            build_inventory(project, object_type=object_type)
+            build_inventory(project, object_type=_eff_ot)
             st.success(f"Учтено файлов: {n}. Карта разделов обновлена.")
     with c2:
         if st.button("🔁 Пересобрать карту разделов", width='stretch'):
             from pmoos.ingest.inventory import build_inventory
-            build_inventory(project, object_type=object_type)
+            build_inventory(project, object_type=_eff_ot)
             st.success("Карта разделов пересобрана.")
     with c3:
         if st.button("🧹 Очистить временные файлы", width='stretch',

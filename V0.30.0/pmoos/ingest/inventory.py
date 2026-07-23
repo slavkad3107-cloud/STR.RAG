@@ -60,7 +60,10 @@ def build_inventory(project: str, *, uploads_dir: str | Path | None = None,
     for f in files:
         rel = str(f.relative_to(up)) if up in f.parents or f.parent == up else f.name
         cands = classify_filename(f.name, object_type, top=3)
-        best = overrides.get(rel) or (cands[0]["code"] if cands else "UNKNOWN")
+        # override учитываем ТОЛЬКО если это реальный раздел; «UNKNOWN»-override
+        # (мог остаться от прежнего типа объекта) игнорируем и классифицируем заново
+        _ov = overrides.get(rel)
+        best = _ov if (_ov and _ov != "UNKNOWN") else (cands[0]["code"] if cands else "UNKNOWN")
         try:
             st = f.stat()
             size, mtime = st.st_size, datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")
@@ -116,7 +119,14 @@ def load_inventory(project: str) -> dict[str, Any] | None:
 def set_file_section(project: str, file_rel: str, section_code: str) -> dict[str, Any]:
     """Переопределить раздел для файла (пользователь подтверждает/исправляет догадку)."""
     inv = load_inventory(project) or {"overrides": {}}
-    inv.setdefault("overrides", {})[file_rel] = section_code
+    ov = inv.setdefault("overrides", {})
+    # «UNKNOWN» как override бессмысленен и ВРЕДЕН: он навсегда перекрывал бы
+    # авто-классификацию — в т.ч. после смены типа объекта (площадной→линейный),
+    # когда файл начинает распознаваться. Выбор «UNKNOWN» = снять переопределение.
+    if section_code == "UNKNOWN":
+        ov.pop(file_rel, None)
+    else:
+        ov[file_rel] = section_code
     for it in inv.get("files", []):
         if it["rel"] == file_rel:
             it["section"] = section_code
