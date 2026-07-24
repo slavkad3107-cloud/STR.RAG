@@ -60,7 +60,8 @@ def _global_entity_contradictions(answers: list[dict]) -> list[str]:
     val_map: dict[str, set[str]] = {}
     issues = []
     for a in answers:
-        text = (a.get("user_answer") or a.get("answer", "")) + " " + a.get("correction", "")
+        # or "": в старых answers.json (до v0.26) поля могли быть null — как в block2
+        text = (a.get("user_answer") or a.get("answer") or "") + " " + (a.get("correction") or "")
         for m in re.finditer(r"(\d+[.,]?\d*)\s*(г/с|т/год|дБА|мг/м3|мг/м³|м3/сут|га)", text, re.I):
             unit = m.group(2).lower()
             val = m.group(1).replace(",", ".")
@@ -83,7 +84,7 @@ def run_block3(project: str, cfg: Config | None = None, *, object_type: str | No
         raise ValueError("Нет принятых ответов для финальной проверки.")
 
     # сводная проверка нормативов по всем ответам
-    all_text = "\n".join((a.get("user_answer") or a.get("answer", "")) + " " + a.get("correction", "")
+    all_text = "\n".join((a.get("user_answer") or a.get("answer") or "") + " " + (a.get("correction") or "")
                          for a in answers)
     norm = check_text(all_text)
     norm_summary = "; ".join(p["recommendation"] for p in norm["problems"]) or "проблем не найдено"

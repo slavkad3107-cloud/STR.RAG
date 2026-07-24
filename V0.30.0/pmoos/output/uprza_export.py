@@ -207,8 +207,25 @@ def build_uprza_export(project: str) -> dict[str, Path]:
     pol = out_dir / "uprza_vybrosy.csv"
     task = out_dir / "ЗАДАНИЕ_УПРЗА.txt"
 
+    # БЭКАП ПЕРЕД ПЕРЕЗАПИСЬЮ (находка аудита): эти CSV инженер ДОЗАПОЛНЯЕТ
+    # ВРУЧНУЮ (высоты/координаты/г_с/т_год — так велит сам ЗАДАНИЕ_УПРЗА.txt),
+    # а повторная выгрузка писала плейсхолдеры поверх без предупреждения —
+    # ручная работа терялась безвозвратно. Теперь прежние файлы сохраняются
+    # рядом с отметкой времени.
+    from datetime import datetime as _dt
+    stamp = _dt.now().strftime("%Y%m%d-%H%M%S")
+    backups: list[str] = []
+    for p in (src, pol):
+        if p.exists():
+            b = p.with_name(f"{p.stem}.до-{stamp}{p.suffix}")
+            try:
+                p.replace(b)
+                backups.append(b.name)
+            except OSError:
+                pass  # файл занят (открыт в Excel) — новая запись всё равно перезапишет
+
     _write_sources_csv(src)
     _write_pollutants_csv(pol, rows)
     _write_task_txt(task, project, rows, extra, validation)
 
-    return {"istochniki": src, "vybrosy": pol, "zadanie": task}
+    return {"istochniki": src, "vybrosy": pol, "zadanie": task, "backups": backups}

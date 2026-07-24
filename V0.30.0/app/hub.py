@@ -910,8 +910,12 @@ def tab_m5(project: str, object_type: str) -> None:
                         p = _convert_doc_with_word(p)
                     ready.append(p)
                 sst.write(f"Вставка правок в {len(ready)} том(а)…")
-                outs = write_corrected_volumes(project, ready)
+                outs, _failed = write_corrected_volumes(project, ready)
                 sst.update(label="Готово", state="complete")
+            if _failed:
+                st.error("⚠ В эти тома правки НЕ внесены (файл не открылся): "
+                         + "; ".join(_failed) + ". Откройте их в Word, пересохраните "
+                         "как .docx и повторите — остальные тома готовы.")
             if outs:
                 for o in outs:
                     _download(o)
@@ -962,11 +966,15 @@ def tab_m6(project: str, object_type: str) -> None:
         rows, extra = collect_emissions(project)
         paths = build_uprza_export(project)
         st.success(f"Готово. Распознано ЗВ: {len(rows)}.")
+        if paths.get("backups"):
+            st.warning("Прежние CSV сохранены рядом (вы могли заполнять их вручную): "
+                       + ", ".join(paths["backups"]) + " — при необходимости перенесите "
+                       "из них высоты/координаты/значения в новые файлы.")
         if rows:
             st.dataframe([{"Код ЗВ": r["code"], "Наименование": r["name"]} for r in rows],
                          width='stretch', hide_index=True)
-        for p in paths.values():
-            _download(p)
+        for k in ("istochniki", "vybrosy", "zadanie"):
+            _download(paths[k])
 
     _list_outputs(project)
 

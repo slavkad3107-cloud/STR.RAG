@@ -362,6 +362,19 @@ def run_block1(project: str, cfg: Config | None = None, *,
         if progress:
             progress(idx + 1, len(remarks), f"Замечание {r.number}")
 
+    # СОХРАНЯЕМ РЕШЕНИЯ ПОЛЬЗОВАТЕЛЯ (находка аудита): повторный запуск Блока 1
+    # раньше МОЛЧА затирал принятые/правленые ответы (status → proposed,
+    # user_answer → None) без бэкапа. Принятое решение — финал: такие ответы
+    # переносятся из прежнего файла как есть; свежая генерация заменяет только
+    # непринятые (proposed/rejected).
+    prev = load_answers(project) or {}
+    kept = {str(a.get("number")): a for a in prev.get("answers", [])
+            if a.get("status") in ("accepted", "edited")}
+    if kept:
+        answers = [kept.get(str(a.get("number")), a) for a in answers]
+        n_kept = sum(1 for a in answers if a.get("status") in ("accepted", "edited"))
+        print(f"[block1] сохранено принятых/правленых ответов: {n_kept}", flush=True)
+
     out = {
         "project": project, "object_type": object_type,
         "block": 1, "count": len(answers),

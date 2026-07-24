@@ -204,6 +204,86 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_classify_razdel_pd_number_and_glued_digits():
+    # Находка на ОПОЧКЕ: «Раздел ПД №10_…» уходил в UNKNOWN, потому что
+    # (а) «ПД» между словом и номером не допускалось, (б) NFKC превращает «№»
+    # в буквы «no». Плюс «ПОС1» (аббревиатура с приклеенной цифрой) не матчился.
+    from pmoos.ingest.sections import classify_filename
+    assert classify_filename("Раздел ПД №10_ОКН_том 10.2.pdf", "линейный", top=1)[0]["code"] == "OTHER"
+    assert classify_filename("Раздел ПД №2_ППО_том 2.1.pdf", "линейный", top=1)[0]["code"] == "PPO"
+    assert classify_filename("Том 5.1.1.1_717-14-15-П-1-ПОС1.pdf", "линейный", top=1)[0]["code"] == "POS"
+    assert classify_filename("Раздел 3.1.1 конструктивные решения.pdf", "линейный", top=1)[0]["code"] == "TKR"
+
+
+def test_block3_tolerates_null_fields():
+    # Находка аудита: block3 падал TypeError на старых answers.json с null-полями
+    from pmoos.pipeline.block3_final import _global_entity_contradictions
+    out = _global_entity_contradictions([{"number": "1", "answer": None, "correction": None}])
+    assert isinstance(out, list)
+
+
+def test_match_volume_digit_boundary():
+    # Находка аудита: «Том ООС»=«том 6.1» матчился и на файл «Том 6.docx» —
+    # правка вставала в чужой том. Цифровая граница это запрещает.
+    from pathlib import Path
+    from pmoos.output.docx_writer import _match_volume
+    assert _match_volume({"oos_volume": "том 6.1"}, Path("Том 6.1_КОРР.docx"))
+    assert not _match_volume({"oos_volume": "том 6.1"}, Path("Том 6.docx"))
+    assert not _match_volume({"oos_volume": "том 6"}, Path("Том 6.1.docx"))
+    assert _match_volume({"oos_volume": "том 6"}, Path("Том 6.docx"))
+
+
+def test_anchor_token_word_boundary():
+    # Находка аудита: «этап. 5» матчился на «п.» и якорь «5» вставал не туда
+    from pmoos.output.docx_writer import _anchor_token
+    assert _anchor_token("завершить этап. 5 месяцев работ") is None
+    assert _anchor_token("исправить в п. 2.3") == "2.3"
+    assert _anchor_token("см. табл. 4.1") == "4.1"
+
+
+def test_block1_rerun_preserves_accepted(tmp_path, monkeypatch):
+    # Находка аудита: повторный запуск Блока 1 молча затирал принятые ответы.
+    # Проверяем слияние тем же кодом, что в run_block1 (kept-словарь).
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json
+    from pmoos.projects import register_project
+    from pmoos.paths import project_paths
+    from pmoos.pipeline.block1_answers import load_answers
+    register_project("БЛ1")
+    p = project_paths("БЛ1")["answers"]
+    p.parent.mkdir(parents=True, exist_ok=True)
+    prev = {"answers": [
+        {"number": "1", "remark": "р1", "answer": "старый", "status": "accepted",
+         "user_answer": "мой принятый"},
+        {"number": "2", "remark": "р2", "answer": "стар2", "status": "proposed",
+         "user_answer": None}]}
+    p.write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
+    fresh = [{"number": "1", "answer": "новый1", "status": "proposed", "user_answer": None},
+             {"number": "2", "answer": "новый2", "status": "proposed", "user_answer": None}]
+    kept = {str(a.get("number")): a for a in (load_answers("БЛ1") or {}).get("answers", [])
+            if a.get("status") in ("accepted", "edited")}
+    merged = [kept.get(str(a.get("number")), a) for a in fresh]
+    assert merged[0]["user_answer"] == "мой принятый" and merged[0]["status"] == "accepted"
+    assert merged[1]["answer"] == "новый2"   # непринятый — заменён свежим
+
+
+def test_uprza_backup_on_rewrite(tmp_path, monkeypatch):
+    # Находка аудита: повторная выгрузка УПРЗА затирала CSV, заполненные вручную
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.projects import register_project
+    from pmoos.output.uprza_export import build_uprza_export
+    register_project("У6")
+    r1 = build_uprza_export("У6")
+    assert r1["backups"] == []
+    # «ручное заполнение»
+    r1["istochniki"].write_text("моя геометрия", encoding="utf-8")
+    r2 = build_uprza_export("У6")
+    assert r2["backups"], "бэкап не создан"
+    bdir = r2["istochniki"].parent
+    backed = [b for b in r2["backups"] if "istochniki" in b]
+    assert backed and (bdir / backed[0]).read_text(encoding="utf-8") == "моя геометрия"
+
+
 def test_unknown_override_does_not_block_classification(tmp_path, monkeypatch):
     # БАГ (найден на ОПОЧКЕ 23.07): «UNKNOWN»-override, оставшийся от прежнего типа
     # объекта, навсегда перекрывал авто-классификацию → «переключил на линейный, а

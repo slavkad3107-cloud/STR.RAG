@@ -165,6 +165,12 @@ def classify_filename(filename: str, object_type: str = "площадной", to
     # нормализуем разделители
     norm = re.sub(r"[._\-]+", " ", name)
     tokens = set(re.findall(r"[а-яёa-z0-9]+", norm))
+    # «ПОС1», «ООС2» и т.п. — аббревиатура с приклеенной цифрой тома должна
+    # матчиться на токен без цифры (реальные имена: «...П-1-ПОС1.pdf»)
+    for t in list(tokens):
+        t2 = re.sub(r"\d+$", "", t)
+        if len(t2) >= 2 and t2 != t:
+            tokens.add(t2)
     valid = {s["code"] for s in required_sections(object_type)} | {s["code"] for s in SURVEYS}
 
     scores: dict[str, float] = {}
@@ -186,7 +192,11 @@ def classify_filename(filename: str, object_type: str = "площадной", to
     # «Раздел N[.M]» по НОМЕРУ ПП-87 (файлы часто называются «Раздел 3.1.1 …»
     # без аббревиатур — раньше такие уходили в UNKNOWN). Точный номер ценнее;
     # если точного нет в составе — поднимаемся к родителю (3.1.1 → 3.1 → 3).
-    m = re.search(r"(?:под)?раздел[аы]?\s*№?\s*(\d+(?:\.\d+)*)", name)
+    # реальные имена томов: «Раздел ПД №10_...» — допускаем «ПД» между словом
+    # «раздел» и номером. ВАЖНО: NFKC-нормализация превращает символ «№» в
+    # буквы «no» — поэтому матчим и «№», и «no»/«n» (раньше такие файлы
+    # уходили в UNKNOWN именно из-за этого).
+    m = re.search(r"(?:под)?раздел[аы]?\s*(?:пд\s*)?(?:№|no|n)?\s*(\d+(?:\.\d+)*)", name)
     if m:
         by_num = {s["num"]: s["code"] for s in required_sections(object_type)}
         probe, bonus = m.group(1), 6.0

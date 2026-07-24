@@ -47,13 +47,16 @@ def build_triples(project: str, *, accepted_only: bool = True) -> list[dict]:
         positive = _best_snippet(a)
         if not anchor or not positive:
             continue
-        # hard negative: топ-источник другого замечания, не входящий в текущие источники
+        # hard negative: топ-источник другого замечания, НЕ входящий в файлы
+        # текущих источников (находка аудита: my_files вычислялся, но фильтр не
+        # применялся — негативом мог стать сниппет из того же документа)
         my_files = {s.get("file") for s in (a.get("sources") or [])}
         negative = ""
         for j in range(1, n):
             other = pool[(i + j) % n]
+            ofile = ((other.get("sources") or [{}])[0]).get("file")
             neg = _best_snippet(other)
-            if neg and neg != positive:
+            if neg and neg != positive and (not ofile or ofile not in my_files):
                 negative = neg
                 break
         triples.append({
