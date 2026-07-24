@@ -175,7 +175,9 @@ def _anchor_token(text: str) -> str | None:
     Падежи учтены («в разделУ/пунктЕ/таблицАХ…») — иначе правка молча уходила
     «в конец» при обычной канцелярской формулировке замечания."""
     import re as _re
-    m = _re.search(r"(?:табл(?:иц[аыеуах]{1,2}|\.)?|т\.|разд(?:ел[аеуы]?|\.)?|"
+    # (?<![а-яёa-z]) — граница слова СЛЕВА: без неё «этап. 5» матчился на «п.»,
+    # а «результат. 6» — на «т.» (находка аудита: якорь вставал в чужое место)
+    m = _re.search(r"(?<![а-яёa-z])(?:табл(?:иц[аыеуах]{1,2}|\.)?|т\.|разд(?:ел[аеуы]?|\.)?|"
                    r"п(?:ункт[аеуы]?|\.)\.?)"
                    r"\s*№?\s*([\d][\d.]*)", (text or "").lower())
     return m.group(1).rstrip(".") if m else None
@@ -239,19 +241,27 @@ def _insert_paragraph_after(par, runs):
     return np
 
 
+def _sub_bounded(needle: str, hay: str) -> bool:
+    """Подстрока с ЦИФРОВОЙ границей справа: «том 6» НЕ находится в «том 6.1»
+    (иначе правка для тома 6.1 вставала и в том 6 — находка аудита; тома у
+    пользователя реально нумеруются 6/6.1/6.2)."""
+    import re as _re
+    return bool(needle) and _re.search(_re.escape(needle) + r"(?![\d.])", hay) is not None
+
+
 def _match_volume(a: dict, src: Path) -> bool:
     """Относится ли принятый ответ к данному тому (по полю «Том ООС»)."""
     v = (a.get("oos_volume") or "").lower().strip()
     if not v:
         return False
     n, stem = src.name.lower(), src.stem.lower()
-    if v in n or n in v or stem in v:
+    if _sub_bounded(v, n) or _sub_bounded(n, v) or _sub_bounded(stem, v):
         return True
     vp = Path(v)
     # stem берём ТОЛЬКО если v — имя файла с настоящим расширением
     # (иначе Path("том 6.1").stem == "том 6" и правка утекает в чужой том)
     if vp.suffix.lower() in (".docx", ".doc", ".pdf"):
-        return vp.stem.lower() in n
+        return _sub_bounded(vp.stem.lower(), n)
     return False
 
 
@@ -304,7 +314,7 @@ def preview_corrections(project: str, sources: list) -> dict:
     return result
 
 
-def write_corrected_volumes(project: str, sources: list) -> list[Path]:
+def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], list[str]]:
     """РЕАЛЬНО откорректированные тома ООС: открываем ИСХОДНЫЙ .docx, вставляем
     правки по принятым/правленым ответам с ЖЁЛТОЙ заливкой — по якорю
     («табл./п./раздел N») сразу после нужного абзаца, иначе — в конец, в раздел
@@ -322,7 +332,7 @@ def write_corrected_volumes(project: str, sources: list) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     outs: list[Path] = []
     if not srcs:
-        return outs
+        return outs, []
 
     matched_ids = {id(a) for s2 in srcs for a in answers if _match_volume(a, s2)}
     failed: list[str] = []
@@ -382,4 +392,7 @@ def write_corrected_volumes(project: str, sources: list) -> list[Path]:
     if failed and not outs:
         raise RuntimeError("Ни один том не удалось открыть: " + "; ".join(failed)
                            + ". Откройте файлы в Word и пересохраните как .docx.")
-    return outs
+    # failed возвращаем ВСЕГДА (находка аудита): раньше при частичном сбое —
+    # один том битый из нескольких — GUI показывал «Готово», и пользователь
+    # не знал, что в пропущенный том правки НЕ внесены.
+    return outs, failed
