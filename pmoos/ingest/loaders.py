@@ -236,7 +236,12 @@ def extract_xlsx(path: Path) -> list[Page]:
     for ws in wb.worksheets:
         rows = []
         for row in ws.iter_rows(values_only=True):
-            cells = [str(c) for c in row if c is not None]
+            # None → "" (НЕ выбрасываем): пустая ячейка должна сохранить позицию
+            # колонки, иначе значения съезжают под чужие заголовки и рвётся
+            # связка «код → вещество → значение» (аудит; в remarks.py так и было)
+            cells = ["" if c is None else str(c) for c in row]
+            while cells and cells[-1] == "":
+                cells.pop()
             if cells:
                 rows.append(" | ".join(cells))
         if rows:
@@ -266,8 +271,15 @@ def extract_file(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
         return extract_xlsx(path)
     if ext in (".txt", ".md", ".csv"):
         try:
-            return [{"loc": "файл", "text": path.read_text(encoding="utf-8", errors="ignore"),
-                     "is_table": ext == ".csv"}]
+            raw = path.read_bytes()
+            try:
+                txt = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                # ANSI/cp1251 — дефолт русской Windows (Блокнот, CSV из Excel).
+                # Раньше файл читался как utf-8 с errors="ignore", и ВСЯ кириллица
+                # молча выбрасывалась — документ индексировался пустышкой (аудит).
+                txt = raw.decode("cp1251", errors="replace")
+            return [{"loc": "файл", "text": txt, "is_table": ext == ".csv"}]
         except Exception:
             return []
     if ext in (".doc", ".xls"):

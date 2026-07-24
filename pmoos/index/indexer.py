@@ -274,6 +274,36 @@ def _iter_source_files(upload_dir: Path) -> list[Path]:
     return files
 
 
+def _cleanup_sources(files: list, state: dict, cfg) -> str:
+    """Удалить исходные тома ПД после УСПЕШНОЙ индексации (просьба пользователя:
+    «не надо хранить файлы проекта — лишнее место»; в базе остаются чанки, карта
+    разделов и производные данные — этого достаточно для ответов).
+
+    Исходники СОХРАНЯЮТСЯ, если: (а) storage.keep_sources: true в config.yaml,
+    (б) хоть один файл завершился ошибкой (нужен для повторной попытки).
+    Возвращает строку-отчёт («N файлов, M МБ») или "" если ничего не удаляли."""
+    try:
+        if cfg.get("storage.keep_sources", False):
+            return ""
+        if any(i.get("status") == "error" for i in state.get("files", {}).values()):
+            return ""
+        n = freed = 0
+        for f in files:
+            try:
+                freed += f.stat().st_size
+                f.unlink()
+                n += 1
+            except OSError:
+                pass  # файл занят (открыт в просмотрщике) — удалится в следующий раз
+        if n:
+            print(f"[indexer] исходники удалены после индексации: {n} файлов, "
+                  f"{freed / 2**20:.0f} МБ (вернуть хранение: storage.keep_sources: true)",
+                  flush=True)
+        return f"{n} файлов, {freed / 2**20:.0f} МБ" if n else ""
+    except Exception:  # noqa: BLE001 — чистка не должна ронять успешную индексацию
+        return ""
+
+
 def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | None = None,
                  reindex: bool = False) -> dict:
     """Синхронная индексация (вызывается в фоновом процессе или напрямую).
@@ -603,6 +633,9 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
         state["current_file"] = ""
         state["message"] = (f"Индексация завершена: файлов {state.get('done_files', 0)}/"
                             f"{state.get('total_files', 0)}, чанков {state.get('total_chunks', 0)}.")
+        cleaned = _cleanup_sources(files, state, cfg)
+        if cleaned:
+            state["message"] += f" Исходники удалены ({cleaned})."
         write_state(project, state)
         return state
     except Exception as e:  # noqa: BLE001

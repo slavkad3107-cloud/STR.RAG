@@ -49,6 +49,11 @@ def download_remarks_url(project: str, url: str) -> Path:
                      ".docx" if "wordprocessingml" in ctype else
                      ".doc" if "msword" in ctype else
                      ".xlsx" if "spreadsheetml" in ctype else ".bin")
+    # имя из Content-Disposition контролирует СЕРВЕР: берём только базовое имя
+    # (без ../../ — защита от выхода за папку проекта, аудит) и вычищаем
+    # запрещённые для Windows символы (иначе write_bytes падал бы OSError)
+    name = Path(str(name).replace("\\", "/")).name
+    name = re.sub(r'[<>:"|?*]', "_", name).strip() or "замечания_по_ссылке.bin"
     rdir = project_paths(project)["remarks_dir"]
     rdir.mkdir(parents=True, exist_ok=True)
     out = rdir / name

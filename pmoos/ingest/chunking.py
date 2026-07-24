@@ -142,7 +142,19 @@ def chunk_text_semantic(text: str, *, target_tokens: int = 512,
             buf = (buf + "\n" + u) if buf else u
     if buf.strip():
         chunks.append(buf.strip())
-    res = [c for c in chunks if len(c) >= min_chunk]
+    # короткие куски НЕ выбрасываем, а приклеиваем к соседу: раньше хвост
+    # «ИТОГО: … т/год» под таблицей молча пропадал из индекса (аудит) —
+    # терялись ровно суммарные показатели, которые запрашивает экспертиза
+    merged: list[str] = []
+    for c in chunks:
+        if len(c) >= min_chunk or not merged:
+            merged.append(c)
+        else:
+            merged[-1] += "\n" + c
+    if len(merged) > 1 and len(merged[0]) < min_chunk:
+        merged[1] = merged[0] + "\n" + merged[1]
+        merged.pop(0)
+    res = [c for c in merged if len(c) >= min_chunk]
     return res or ([text] if len(text) >= min_chunk else [])
 
 

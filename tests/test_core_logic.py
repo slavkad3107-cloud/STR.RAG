@@ -204,6 +204,108 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_txt_cp1251_fallback(tmp_path):
+    # Аудит: ANSI/cp1251 .txt (дефолт Блокнота) индексировался пустышкой —
+    # utf-8 + errors="ignore" молча выбрасывал ВСЮ кириллицу
+    from pmoos.ingest.loaders import extract_file
+    p = tmp_path / "заметка.txt"
+    p.write_bytes("Отходы IV класса опасности размещаются на полигоне ТКО".encode("cp1251"))
+    pages = extract_file(p)
+    assert "полигоне" in pages[0]["text"]
+    p2 = tmp_path / "юникод.txt"
+    p2.write_text("обычный utf-8 текст", encoding="utf-8")
+    assert "utf-8" in extract_file(p2)[0]["text"]
+
+
+def test_xlsx_none_cells_keep_position(tmp_path):
+    # Аудит: None-ячейки выбрасывались — значения съезжали под чужие колонки
+    import openpyxl
+    from pmoos.ingest.loaders import extract_xlsx
+    wb = openpyxl.Workbook(); ws = wb.active
+    ws.append(["Код", "Вещество", "ПДК", "Выброс, т/год"])
+    ws.append(["0330", None, 0.5, 9.999])
+    f = tmp_path / "т.xlsx"; wb.save(str(f))
+    text = extract_xlsx(f)[0]["text"]
+    assert "0330 |  | 0.5 | 9.999" in text          # позиция колонки сохранена
+
+
+def test_remarks_page_number_does_not_split():
+    # Аудит: одиночный номер страницы PDF резал многостраничное замечание пополам
+    from pmoos.ingest.remarks import _split_numbered
+    txt = ("1. Первое замечание о составе проекта документации.\n"
+           "2. Уточнить количество отходов строительства по группе IV.\n"
+           "2\n"
+           "а также представить договор со специализированной организацией.")
+    out = _split_numbered(txt)
+    assert len(out) == 2
+    assert "договор" in out[1].text                 # хвост остался в замечании №2
+    # а честная колонка «№» из таблиц (строгая последовательность) работает
+    txt2 = "1\nПервое замечание достаточной длины для распознавания.\n2\nВторое замечание тоже достаточной длины."
+    assert len(_split_numbered(txt2)) == 2
+
+
+def test_semantic_chunking_keeps_short_tail():
+    # Аудит: короткий хвост «ИТОГО: … т/год» молча выпадал из индекса
+    from pmoos.ingest.chunking import chunk_text_semantic
+    body = "Пункт 5.1. " + ("Мероприятия по охране атмосферного воздуха. " * 40)
+    tail = "Таблица 8.1 ИТОГО: 12,5 т/год"
+    chunks = chunk_text_semantic(body + "\n" + tail)
+    assert any("ИТОГО" in c for c in chunks), "хвост с ИТОГО потерян"
+
+
+def test_transfer_excludes_uploads(tmp_path, monkeypatch):
+    # Просьба пользователя: исходники томов (tmp_uploads) в облако не гоняем
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path / "d"))
+    from pmoos.projects import register_project
+    from pmoos.core import transfer as T
+    from pmoos.index import indexer as I
+    from pmoos.paths import data_root
+    from pathlib import Path
+    register_project("БЕЗИСХ")
+    I.write_state("БЕЗИСХ", I.read_state("БЕЗИСХ"))
+    up = data_root() / "projects" / "БЕЗИСХ" / "tmp_uploads"
+    up.mkdir(parents=True)
+    (up / "том.pdf").write_bytes(b"%PDF big source")
+    (data_root() / "projects" / "БЕЗИСХ" / "answers.json").write_text("{}", encoding="utf-8")
+    dest = str(tmp_path / "cloud")
+    ok, msg = T.sync_out(dest)
+    assert ok, msg
+    assert not (Path(dest) / "projects" / "БЕЗИСХ" / "tmp_uploads" / "том.pdf").exists()
+    assert (Path(dest) / "projects" / "БЕЗИСХ" / "answers.json").exists()
+    ok, msg = T.sync_in(dest)                       # манифест сходится без исходников
+    assert ok, msg
+    assert (up / "том.pdf").exists()                # локальные исходники не тронуты
+
+
+def test_cleanup_sources_after_done(tmp_path, monkeypatch):
+    # Авточистка исходников: удаляет после успеха, НЕ удаляет при ошибках/настройке
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.index.indexer import _cleanup_sources
+    from pmoos.config import load_config
+    cfg = load_config()
+    f1 = tmp_path / "a.pdf"; f1.write_bytes(b"x" * 100)
+    rep = _cleanup_sources([f1], {"files": {"a.pdf": {"status": "done"}}}, cfg)
+    assert rep and not f1.exists()
+    f2 = tmp_path / "b.pdf"; f2.write_bytes(b"x")
+    rep = _cleanup_sources([f2], {"files": {"b.pdf": {"status": "error"}}}, cfg)
+    assert rep == "" and f2.exists()                # ошибки → исходники нужны
+    cfg.set("storage.keep_sources", True)
+    f3 = tmp_path / "c.pdf"; f3.write_bytes(b"x")
+    rep = _cleanup_sources([f3], {"files": {"c.pdf": {"status": "done"}}}, cfg)
+    assert rep == "" and f3.exists()                # выключатель работает
+    cfg.set("storage.keep_sources", False)
+
+
+def test_remarks_fetch_name_sanitized():
+    # Аудит: имя из Content-Disposition сервера — path traversal и запрещённые символы
+    import re
+    from pathlib import Path
+    name = "../../evil?.docx"
+    name = Path(str(name).replace("\\", "/")).name
+    name = re.sub(r'[<>:"|?*]', "_", name).strip()
+    assert name == "evil_.docx"
+
+
 def test_classify_razdel_pd_number_and_glued_digits():
     # Находка на ОПОЧКЕ: «Раздел ПД №10_…» уходил в UNKNOWN, потому что
     # (а) «ПД» между словом и номером не допускалось, (б) NFKC превращает «№»

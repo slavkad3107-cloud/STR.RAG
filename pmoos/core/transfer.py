@@ -128,6 +128,14 @@ def _xd_paths(src: Path, dst: Path) -> list[str]:
     out: list[str] = []
     for name in EXCLUDE_DIR_NAMES:
         out += [str(src / name), str(dst / name)]
+    # ИСХОДНИКИ ТОМОВ НЕ ПЕРЕНОСИМ (просьба пользователя: «хранить только базу
+    # и полученные данные»): tmp_uploads каждого проекта — гигабайты PDF,
+    # которые после индексации не нужны (чанки уже в базе)
+    for base in (src, dst):
+        try:
+            out += [str(p) for p in (base / "projects").glob("*/tmp_uploads")]
+        except OSError:
+            pass
     return out
 
 
@@ -153,6 +161,10 @@ def _measure(root: Path) -> tuple[int, int]:
     """(файлов, байт) в дереве без исключаемых каталогов и наших мета-файлов.
     У OneDrive-плейсхолдеров метаданные (имя+размер) доступны без скачивания."""
     excl = {str(root / n).lower() for n in EXCLUDE_DIR_NAMES}
+    try:  # исходники томов не переносятся — и в манифесте не учитываются
+        excl |= {str(p).lower() for p in (root / "projects").glob("*/tmp_uploads")}
+    except OSError:
+        pass
     n_files = n_bytes = 0
     for cur, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if str(Path(cur) / d).lower() not in excl]

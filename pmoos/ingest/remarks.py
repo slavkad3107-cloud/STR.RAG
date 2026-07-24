@@ -194,16 +194,22 @@ def _split_numbered(text: str) -> list[Remark]:
     по началам номеров, а тело пункта — всё до следующего номера.
     """
     text = text or ""
-    starts = [(m.start(), m.end(), m.group(1)) for m in _NUM_START.finditer(text)]
+    starts = [(m.start(), m.end(), m.group(1),
+               ("." in m.group(0)) or (")" in m.group(0)))
+              for m in _NUM_START.finditer(text)]
     if not starts:
         return []
     # защита от ложных срабатываний (числа в тексте): номера должны в целом
-    # возрастать; «провалы» назад отбрасываем (кроме перезапуска с 1)
+    # возрастать; «провалы» назад отбрасываем (кроме перезапуска с 1).
+    # ОДИНОЧНОЕ число на строке (колонка «№» из таблиц) принимаем ТОЛЬКО при
+    # СТРОГОЙ последовательности prev+1: номера страниц PDF — тоже одиночные
+    # числа, и мягкий фильтр резал многостраничные замечания пополам (аудит).
     filt: list[tuple[int, int, str]] = []
     prev = 0
-    for s, e, num in starts:
+    for s, e, num, dotted in starts:
         n = int(num)
-        if n >= prev or n == 1:
+        ok = (n >= prev or n == 1) if dotted else (n == prev + 1)
+        if ok:
             filt.append((s, e, num))
             prev = n
     out: list[Remark] = []
