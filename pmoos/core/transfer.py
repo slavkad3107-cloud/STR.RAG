@@ -101,8 +101,11 @@ def _acquire_qdrant():
     """(client, причина_отказа). Держите client открытым на время выгрузки —
     это замок: никто не начнёт писать в базу посреди копирования."""
     try:
+        import warnings as _w
         from qdrant_client import QdrantClient
-        return QdrantClient(path=str(qdrant_dir())), ""
+        with _w.catch_warnings():
+            _w.filterwarnings("ignore", message="Local mode is not recommended")
+            return QdrantClient(path=str(qdrant_dir())), ""
     except RuntimeError as e:
         if "already accessed" in str(e):
             return None, ("база сейчас занята поиском — подождите пару секунд и "

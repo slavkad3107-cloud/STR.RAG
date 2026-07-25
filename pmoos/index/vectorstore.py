@@ -66,9 +66,14 @@ class VectorStore:
             self._client = QdrantClient(url=url, timeout=60)
         else:
             last_err = None
+            import warnings as _w
             for _ in range(3):
                 try:
-                    self._client = QdrantClient(path=str(qdrant_dir()))
+                    with _w.catch_warnings():
+                        # штатный режим: >20k точек в embedded работает нормально
+                        # для нашего объёма; предупреждение лишь пугает в консоли
+                        _w.filterwarnings("ignore", message="Local mode is not recommended")
+                        self._client = QdrantClient(path=str(qdrant_dir()))
                     break
                 except RuntimeError as e:
                     if "already accessed" in str(e):

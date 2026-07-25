@@ -598,8 +598,16 @@ def indexing_panel(project: str, object_type: str) -> None:
             checks: list[tuple[str, bool, str]] = []
             up = _pp(project)["uploads"]
             files = _isf(up) if up.exists() else []
-            checks.append(("Файлы для индексации", bool(files),
-                           f"{len(files)} шт. в {up}"))
+            _chunks0 = int(_rs(project).get("total_chunks") or 0)
+            if files:
+                checks.append(("Файлы для индексации", True, f"{len(files)} шт. в {up}"))
+            elif _chunks0 > 0:
+                # v0.32 «Lean»: исходники удаляются после индексации — их
+                # отсутствие при непустой базе НЕ проблема, а норма
+                checks.append(("Исходники (не хранятся)", True,
+                               f"удалены после индексации — база готова ({_chunks0} чанков)"))
+            else:
+                checks.append(("Файлы для индексации", False, f"0 шт. в {up}"))
             try:
                 r = _sp.run([_sys.executable, "-c", "print('ok')"], cwd=str(_AR),
                             capture_output=True, timeout=30)
