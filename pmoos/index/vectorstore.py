@@ -35,6 +35,22 @@ def _close_all() -> None:  # вызывается при нормальном з
     _CLIENTS.clear()
 
 
+def release_leaked_clients() -> int:
+    """СБРОС «база занята» внутри ЭТОГО процесса: закрыть клиенты, которых
+    не отпустил упавший на середине поиск (частая причина «already accessed»
+    без всякой индексации — просьба пользователя «сброс при поиске ответов»).
+    Возвращает число закрытых. Чужие процессы не трогаем — это опасно."""
+    n = 0
+    for c in list(_CLIENTS):
+        try:
+            c.close()
+            n += 1
+        except Exception:  # noqa: BLE001
+            pass
+    _CLIENTS.clear()
+    return n
+
+
 def collection_name(project: str) -> str:
     return f"pmoos_{slugify(project)}"
 
@@ -67,7 +83,7 @@ class VectorStore:
         else:
             last_err = None
             import warnings as _w
-            for _ in range(3):
+            for attempt in range(3):
                 try:
                     with _w.catch_warnings():
                         # штатный режим: >20k точек в embedded работает нормально
@@ -78,16 +94,24 @@ class VectorStore:
                 except RuntimeError as e:
                     if "already accessed" in str(e):
                         last_err = e
+                        # АВТОСБРОС: замок мог остаться от нашего же упавшего
+                        # поиска — закрываем неотпущенные клиенты этого процесса
+                        # и пробуем снова (чужие процессы не трогаем)
+                        if attempt == 0:
+                            freed = release_leaked_clients()
+                            if freed:
+                                print(f"[vectorstore] сброшено неотпущенных "
+                                      f"подключений: {freed}", flush=True)
                         time.sleep(1.5)
                         continue
                     raise
             else:
                 raise RuntimeError(
-                    "Локальная база Qdrant занята другим процессом. Обычно это значит, "
-                    "что идёт фоновая индексация (Модуль 2) — дождитесь её завершения "
-                    "или нажмите «⏹ Стоп». Если индексация не идёт, а ошибка осталась — "
-                    "перезапустите приложение (run.bat): предыдущий поиск мог не "
-                    "освободить базу."
+                    "Локальная база Qdrant занята другим процессом. Частые причины: "
+                    "1) открыто ВТОРОЕ окно приложения — два run.bat, например старая "
+                    "и новая папка релиза: закройте лишнее окно; 2) идёт фоновая "
+                    "индексация (Модуль 2) — дождитесь окончания или нажмите «⏹ Стоп»; "
+                    "3) если ничего из этого — перезапустите приложение (run.bat)."
                 ) from last_err
         _register_close(self._client)
         return self._client

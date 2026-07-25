@@ -41,10 +41,9 @@ def _keep(p: Path) -> bool:
 
 
 def build() -> Path:
-    # релизы кладём НА УРОВЕНЬ ВЫШE папки приложения (рядом с ней), как в ЭКО.DOC:
-    # <репозиторий>/releases/STR.RAG-vX.Y.Z/ — так они на виду, а не спрятаны
-    # внутри рабочей папки.
-    rel_dir = APP.parent / "releases"
+    # Структура с v0.32.1: код приложения живёт в КОРНЕ репозитория, релизы —
+    # в <корень>/releases/STR.RAG-vX.Y.Z/ (запускать run.bat из папки релиза).
+    rel_dir = APP / "releases"
     rel_dir.mkdir(exist_ok=True)
     top = f"STR.RAG-v{__version__}"
     folder = rel_dir / top                 # РАСПАКОВАННАЯ папка релиза (запускать из неё)

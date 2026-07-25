@@ -16,6 +16,20 @@ goto GO
 call .venv\Scripts\activate.bat
 set "VENVDIR=.venv"
 :GO
+REM ---- Защита от ВТОРОГО запуска: два экземпляра дерутся за базу ----
+netstat -ano | findstr /c:":8501" | findstr /c:"LISTENING" >nul 2>&1
+if not errorlevel 1 (
+  echo.
+  echo ============================================================
+  echo   Приложение УЖЕ ЗАПУЩЕНО - порт 8501 занят.
+  echo   Второе окно не нужно: два экземпляра дерутся за базу -
+  echo   поиск ответов падал бы с ошибкой "база занята".
+  echo   Откройте в браузере localhost:8501 - либо закройте старое
+  echo   окно run.bat и запустите это заново.
+  echo ============================================================
+  pause
+  exit /b 1
+)
 REM ---- Предупреждение, если после обновления кода изменились зависимости ----
 REM install.bat пишет хэш requirements.txt в venv; расхождение = нужен install.
 if not exist requirements.txt goto REQOK
