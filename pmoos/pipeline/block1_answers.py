@@ -180,14 +180,23 @@ def run_block1(project: str, cfg: Config | None = None, *,
 
     # 1) замечания
     if remarks_path is None:
-        # ищем файл замечаний: сначала постоянная папка remarks/, затем
-        # (для обратной совместимости) старое место — tmp_uploads
+        # ищем файл замечаний: постоянная папка remarks/ — приоритет имени со
+        # словом «замечания»; если такого нет — единственный файл папки или
+        # новейший (ревью: «⏯ Продолжить» после перезапуска приложения не
+        # находил файл с произвольным именем и падал). Затем — старое место.
         cand = []
-        for folder in (paths.get("remarks_dir"), paths["uploads"]):
-            if folder and folder.exists():
-                for fp in sorted(folder.rglob("*")):
-                    if fp.is_file() and any(k in fp.name.lower() for k in ("замечан", "remark")):
-                        cand.append(fp)
+        rd = paths.get("remarks_dir")
+        if rd and rd.exists():
+            allf = [fp for fp in sorted(rd.rglob("*")) if fp.is_file()]
+            kw = [fp for fp in allf
+                  if any(k in fp.name.lower() for k in ("замечан", "remark"))]
+            cand = kw or (allf if len(allf) == 1 else
+                          sorted(allf, key=lambda f: f.stat().st_mtime,
+                                 reverse=True)[:1])
+        if not cand and paths["uploads"].exists():
+            cand = [fp for fp in sorted(paths["uploads"].rglob("*"))
+                    if fp.is_file() and any(k in fp.name.lower()
+                                            for k in ("замечан", "remark"))]
         remarks_path = cand[0] if cand else None
     if not remarks_path:
         raise FileNotFoundError("Не найден файл замечаний (ожидается имя со словом «замечания»). "
@@ -214,10 +223,81 @@ def run_block1(project: str, cfg: Config | None = None, *,
     if not remarks:
         raise ValueError("Из файла замечаний не удалось извлечь ни одного пункта.")
 
-    # 2) ресурсы и батчевый retrieval только по разделам-источникам
+    # РЕЗЮМ (v0.33): уже отвеченные замечания не переспрашиваем — «Продолжить»
+    # после Стопа/обрыва доделывает только остаток. Готовым считаем ответ
+    # принятый/правленый ЛИБО с непустым текстом.
+    clear_answers_stop(project)   # прошлый «Стоп» не должен глушить новый запуск
+
+    # ДУБЛИ НОМЕРОВ (ревью): «перезапуск нумерации с 1» из PDF/таблиц давал два
+    # замечания №N — by_num схлопывал бы их в один ответ. Перенумеровываем:
+    # второй дубль становится «N.2» и живёт своей жизнью.
+    _seen: dict[str, int] = {}
+    for r in remarks:
+        k = str(r.number)
+        _seen[k] = _seen.get(k, 0) + 1
+        if _seen[k] > 1:
+            r.number = f"{k}.{_seen[k]}"
+
+    import re as _re
+
+    def _norm_txt(s: str) -> str:
+        return _re.sub(r"\s+", " ", (s or "")).strip().lower()
+
+    prev_by_num = {str(a.get("number")): a
+                   for a in (load_answers(project) or {}).get("answers", [])}
+    rem_by_num = {str(r.number): r for r in remarks}
+    # Готовым считаем ответ, только если ТЕКСТ замечания не изменился (ревью:
+    # замена файла замечаний с теми же номерами иначе молча выдавала старые
+    # ответы на новые вопросы) и он принят/правлен ЛИБО непустой и не отклонён.
+    done_prev = {}
+    for n, a in prev_by_num.items():
+        r = rem_by_num.get(n)
+        if r is not None and _norm_txt(a.get("remark")) not in ("", _norm_txt(r.text)):
+            continue  # текст замечания сменился → переспросить
+        if a.get("status") in ("accepted", "edited") or (
+                a.get("status") != "rejected"           # ✗ отклонён → переспросить
+                and (a.get("user_answer") or a.get("answer") or "").strip()):
+            done_prev[n] = a
+    pending = [r for r in remarks if str(r.number) not in done_prev]
+    by_num: dict[str, dict] = {n: a for n, a in done_prev.items()}
+    total = len(remarks)
+    _ans_progress(project, total, len(by_num),
+                  (f"Возобновление: готово {len(by_num)}/{total}…" if by_num
+                   else f"Старт: замечаний {total}…"))
+
+    # 2) обработка ПАКЕТАМИ (v0.33): между пакетами — сохранение на диск,
+    #    прогресс и проверка «Стоп». Обрыв/стоп теряет максимум один пакет.
+    pack_size = max(1, int(cfg.get("answers.batch_size", 10)))
+    src_codes = source_section_codes(object_type)
+    for p0 in range(0, len(pending), pack_size):
+        if _ans_stop_requested(project):
+            _save_merged(project, remarks, by_num, cfg, object_type, partial=True)
+            _ans_progress(project, total, len(by_num),
+                          f"⏹ Остановлено: готово {len(by_num)}/{total}. "
+                          f"«⏯ Продолжить» доделает остальные.", status="paused")
+            return load_answers(project)
+        pack = pending[p0:p0 + pack_size]
+        _ans_progress(project, total, len(by_num),
+                      f"Пакет {p0 // pack_size + 1}: замечания "
+                      f"{pack[0].number}–{pack[-1].number}…")
+        for a in _answer_pack(project, cfg, object_type, pack, src_codes, progress):
+            by_num[str(a["number"])] = a
+        _save_merged(project, remarks, by_num, cfg, object_type, partial=True)
+        _ans_progress(project, total, len(by_num),
+                      f"Готово ответов: {len(by_num)}/{total}")
+
+    out = _save_merged(project, remarks, by_num, cfg, object_type, partial=False)
+    _ans_progress(project, total, len(by_num),
+                  f"Готово: {len(by_num)} ответов.", status="done")
+    return out
+
+
+def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
+                 src_codes: list, progress=None) -> list[dict]:
+    """Обработать ПАКЕТ замечаний: retrieval → задания ИИ → batch → сборка.
+    Тело прежнего монолитного run_block1, вынесенное для пакетного режима."""
     retr = HybridRetriever(cfg)
     try:
-        src_codes = source_section_codes(object_type)
         queries = [r.text for r in remarks]
         if progress:
             progress(0, len(remarks), "Поиск источников по замечаниям…")
@@ -362,34 +442,49 @@ def run_block1(project: str, cfg: Config | None = None, *,
         if progress:
             progress(idx + 1, len(remarks), f"Замечание {r.number}")
 
-    # СОХРАНЯЕМ РЕШЕНИЯ ПОЛЬЗОВАТЕЛЯ (находка аудита): повторный запуск Блока 1
-    # раньше МОЛЧА затирал принятые/правленые ответы (status → proposed,
-    # user_answer → None) без бэкапа. Принятое решение — финал: такие ответы
-    # переносятся из прежнего файла как есть; свежая генерация заменяет только
-    # непринятые (proposed/rejected).
-    prev = load_answers(project) or {}
-    kept = {str(a.get("number")): a for a in prev.get("answers", [])
-            if a.get("status") in ("accepted", "edited")}
-    if kept:
-        answers = [kept.get(str(a.get("number")), a) for a in answers]
-        n_kept = sum(1 for a in answers if a.get("status") in ("accepted", "edited"))
-        print(f"[block1] сохранено принятых/правленых ответов: {n_kept}", flush=True)
+    return answers
+    # Примечание: прежний kept-merge «не затирать принятые» теперь живёт выше —
+    # в резюм-логике run_block1 (готовые ответы вообще не переспрашиваются).
 
+
+def _save_merged(project: str, remarks: list, by_num: dict[str, dict],
+                 cfg: Config, object_type: str, *, partial: bool) -> dict:
+    """Собрать answers.json из готовых ответов (в порядке файла замечаний) и
+    сохранить. partial=True — промежуточное сохранение между пакетами."""
+    # РЕШЕНИЯ ПОЛЬЗОВАТЕЛЯ ПОБЕЖДАЮТ (ревью, high): пока фон генерирует,
+    # пользователь мог принять/править/отклонить ответ в интерфейсе — версия
+    # С ДИСКА главнее нашей в памяти, иначе очередное пакетное сохранение
+    # молча откатывало бы его решение в «proposed».
+    for n, a in {str(x.get("number")): x
+                 for x in (load_answers(project) or {}).get("answers", [])}.items():
+        if a.get("status") in ("accepted", "edited", "rejected"):
+            by_num[n] = a
+    ordered = [by_num[str(r.number)] for r in remarks if str(r.number) in by_num]
+    known = {str(r.number) for r in remarks}
+    # ответы прошлых прогонов на замечания, которых нет в текущем файле, — не
+    # теряем (файл замечаний могли заменить), складываем в конец
+    ordered += [a for n, a in by_num.items() if n not in known]
     out = {
         "project": project, "object_type": object_type,
-        "block": 1, "count": len(answers),
+        "block": 1, "count": len(ordered),
+        "partial": bool(partial),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "provenance": _provenance(cfg, object_type),   # снимок пайплайна (атрибуция регрессий)
-        "answers": answers,
+        "answers": ordered,
     }
     _save(project, out)
     return out
 
 
 def _save(project: str, data: dict) -> Path:
+    import os
     p = project_paths(project)["answers"]
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # атомарно (tmp+replace, tmp уникален для процесса, замена с повторами):
+    # «Стоп»/чтение из GUI не должны оставить answers.json битым (ревью)
+    tmp = p.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _replace_atomic(tmp, p)
     return p
 
 
@@ -490,3 +585,269 @@ def set_decision(project: str, number: str, *, status: str,
     """Пользователь принимает/правит/отклоняет конкретное предложение."""
     return set_decisions(project, [{"number": number, "status": status,
                                     "user_answer": user_answer}])
+
+
+# ─────────── фоновая генерация ответов (v0.33 — «как в индексации») ───────────
+# Раньше «① Найти ответы» крутился в процессе интерфейса: час без прогресса,
+# без пульса и стопа; обрыв вкладки убивал всё. Теперь — отдельный процесс с
+# файлом состояния answers_state.json (прогресс/пульс/пауза), журналом
+# answers_log.txt и возобновлением (готовые ответы не переспрашиваются).
+
+_ANS_BG = False  # выставляется в True только в дочернем CLI-процессе
+
+
+def _ans_state_path(project: str) -> Path:
+    return project_paths(project)["root"] / "answers_state.json"
+
+
+def read_answers_state(project: str) -> dict:
+    p = _ans_state_path(project)
+    if not p.exists():
+        return {"status": "idle"}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {"status": "idle"}
+
+
+def _replace_atomic(tmp: Path, dst: Path) -> None:
+    """tmp→dst с повторами: на Windows os.replace падает PermissionError, если
+    другой процесс в этот миг читает dst (ревью; open() без FILE_SHARE_DELETE)."""
+    import time
+    for _ in range(6):
+        try:
+            tmp.replace(dst)
+            return
+        except PermissionError:
+            time.sleep(0.15)
+    tmp.replace(dst)
+
+
+def write_answers_state(project: str, st: dict) -> None:
+    import os
+    import threading
+    global _ANS_WRITE_LOCK
+    try:
+        _ANS_WRITE_LOCK
+    except NameError:
+        _ANS_WRITE_LOCK = threading.Lock()
+    with _ANS_WRITE_LOCK:
+        st["updated_at"] = st["heartbeat"] = datetime.now().isoformat(timespec="seconds")
+        p = _ans_state_path(project)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # tmp уникален ДЛЯ ПРОЦЕССА (ревью: GUI и фон писали один tmp-путь —
+        # межпроцессная коллизия при одновременной записи)
+        tmp = p.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+        _replace_atomic(tmp, p)
+
+
+def _ans_progress(project: str, total: int, done: int, message: str,
+                  status: str = "running") -> None:
+    import os
+    st = read_answers_state(project)
+    st.update({"status": status, "total": int(total), "done": int(done),
+               "message": message})
+    if status == "running":
+        st["pid"] = os.getpid() if _ANS_BG else int(st.get("pid") or 0)
+    else:
+        st["pid"] = 0
+    write_answers_state(project, st)
+    print(f"[block1] {message}", flush=True)
+
+
+# Стоп — ОТДЕЛЬНЫМ файлом-флагом, а не полем в state (ревью: чтение-изменение-
+# запись state из двух процессов затирало флаг — «Стоп» терялся).
+def _ans_stop_flag(project: str) -> Path:
+    return project_paths(project)["root"] / "answers_stop.flag"
+
+
+def _ans_stop_requested(project: str) -> bool:
+    return _ans_stop_flag(project).exists()
+
+
+answers_stop_requested = _ans_stop_requested  # публичное имя для GUI
+
+
+def request_answers_stop(project: str) -> None:
+    try:
+        _ans_stop_flag(project).touch()
+    except OSError:
+        pass
+
+
+def clear_answers_stop(project: str) -> None:
+    try:
+        _ans_stop_flag(project).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def answers_running(project: str) -> bool:
+    """True = фоновая генерация жива (running/starting + свежий пульс).
+    Пульс «из будущего» (перевод часов, файл с другой машины) считаем живым —
+    иначе открывался бы двойной запуск (ревью)."""
+    st = read_answers_state(project)
+    if st.get("status") not in ("running", "starting"):
+        return False
+    try:
+        age = (datetime.now() - datetime.fromisoformat(
+            st.get("heartbeat") or "")).total_seconds()
+    except (ValueError, TypeError):
+        return False
+    return age < 60
+
+
+def stop_answers(project: str, *, hard: bool = False) -> bool:
+    """«⏹ Стоп» (hard=False) — МЯГКО: флаг, генерация остановится после
+    текущего пакета, всё готовое сохранено. «✋ Прервать» (hard=True) — жёстко:
+    завершить процесс, но ТОЛЬКО опознанный как наш воркер (по командной
+    строке) — не слепой kill по pid (ревью: pid мог переиспользоваться)."""
+    import os
+    import signal
+    request_answers_stop(project)
+    st = read_answers_state(project)
+    if not hard:
+        if st.get("status") in ("running", "starting"):
+            st["message"] = ("⏹ Останавливаюсь после текущего пакета… "
+                             "(готовые ответы сохранены)")
+            write_answers_state(project, st)
+        else:  # процесса нет — просто зафиксировать паузу
+            st.update({"status": "paused", "pid": 0,
+                       "message": "⏹ Остановлено. «⏯ Продолжить» доделает."})
+            write_answers_state(project, st)
+        return True
+    pid = int(st.get("pid") or 0)
+    if pid and pid != os.getpid():
+        from ..core.session_guard import _cmdline
+        if "block1_answers" in _cmdline(pid).lower():
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+    st = read_answers_state(project)
+    st.update({"status": "paused", "pid": 0,
+               "message": "✋ Прервано. Пакет в работе не сохранился; "
+                          "«⏯ Продолжить» доделает оставшиеся."})
+    write_answers_state(project, st)
+    return True
+
+
+def answers_log_path(project: str) -> Path:
+    return project_paths(project)["root"] / "answers_log.txt"
+
+
+def start_answers_background(project: str, *, object_type: str | None = None,
+                             remarks_path: str | None = None) -> int:
+    """Запустить генерацию ответов ОТДЕЛЬНЫМ процессом (переживает перерисовки
+    интерфейса и закрытие вкладки). Возвращает pid (0 = не удалось/уже идёт)."""
+    import os
+    import subprocess
+    import sys
+    from ..paths import APP_ROOT
+    # ЗАЩИТА ОТ ДВОЙНОГО ЗАПУСКА (ревью, high): disabled-кнопка в интерфейсе не
+    # останавливает второй клик, пришедший до перерисовки — два процесса
+    # отвечали бы на одни замечания (двойной расход API).
+    if answers_running(project):
+        return 0
+    st = read_answers_state(project)
+    st.update({"status": "starting", "pid": 0,
+               "message": "Запуск фонового процесса…"})
+    write_answers_state(project, st)
+    lp = answers_log_path(project)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    logf = open(lp, "ab")  # журнал ДОПИСЫВАЕТСЯ (история прогонов непрерывна)
+    logf.write(f"\n===== {datetime.now().isoformat(timespec='seconds')} "
+               f"генерация ответов: {project} =====\n".encode("utf-8"))
+    logf.flush()
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    args = [sys.executable, "-m", "pmoos.pipeline.block1_answers",
+            "--project", project]
+    if object_type:
+        args += ["--object-type", object_type]
+    if remarks_path:
+        args += ["--remarks", str(remarks_path)]
+    kwargs: dict[str, Any] = {"env": env, "cwd": str(APP_ROOT),
+                              "stdout": logf, "stderr": logf}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x00000200 | 0x00000008  # NEW_GROUP | DETACHED
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(args, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        err = f"Не удалось запустить фоновый процесс: {e}"
+        logf.write((err + "\n").encode("utf-8"))
+        logf.close()
+        st = read_answers_state(project)
+        st.update({"status": "error", "pid": 0, "message": err})
+        write_answers_state(project, st)
+        return 0
+    logf.close()  # дескриптор унаследован дочерним процессом
+    return proc.pid
+
+
+def _start_ans_heartbeat(project: str) -> None:
+    """Пульс каждые 5 с — по нему видно, что процесс жив во время долгого
+    вызова ИИ (reasoner может думать минутами)."""
+    import os
+    import threading
+    import time
+
+    def beat() -> None:
+        while True:
+            time.sleep(5)
+            try:
+                st = read_answers_state(project)
+                if int(st.get("pid") or 0) != os.getpid():
+                    return
+                if st.get("status") != "running":
+                    return
+                write_answers_state(project, st)
+            except Exception:  # noqa: BLE001
+                pass
+
+    threading.Thread(target=beat, daemon=True).start()
+
+
+def _main() -> None:
+    import argparse
+    import os
+    import traceback
+    global _ANS_BG
+    ap = argparse.ArgumentParser(description="Фоновая генерация ответов STR.RAG (Блок 1)")
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--object-type", default=None)
+    ap.add_argument("--remarks", default=None)
+    a = ap.parse_args()
+    _ANS_BG = True
+    print(f"[block1] старт: проект «{a.project}», pid={os.getpid()}", flush=True)
+    st = read_answers_state(a.project)
+    # самозащита от параллельного двойника: другой ЖИВОЙ pid уже отвечает
+    _other = int(st.get("pid") or 0)
+    if st.get("status") == "running" and _other and _other != os.getpid():
+        try:
+            age = (datetime.now() - datetime.fromisoformat(
+                st.get("heartbeat") or "")).total_seconds()
+        except (ValueError, TypeError):
+            age = 1e9
+        if age < 60:
+            print(f"[block1] уже работает pid={_other} — выходим без дубля", flush=True)
+            return
+    st.update({"status": "running", "pid": os.getpid(),
+               "message": "Подготовка (разбор файла замечаний)…"})
+    write_answers_state(a.project, st)
+    _start_ans_heartbeat(a.project)
+    try:
+        run_block1(a.project, object_type=a.object_type, remarks_path=a.remarks)
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        st = read_answers_state(a.project)
+        st.update({"status": "error", "pid": 0,
+                   "message": f"Ошибка: {e}. Готовые ответы сохранены — "
+                              f"«⏯ Продолжить» доделает остальные."})
+        write_answers_state(a.project, st)
+
+
+if __name__ == "__main__":
+    _main()

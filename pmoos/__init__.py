@@ -4,8 +4,8 @@
 Версия меняется при каждой значимой доработке (см. README -> История версий).
 """
 
-__version__ = "0.32.2"
-__codename__ = "Lean"
+__version__ = "0.33.0"
+__codename__ = "Steady"
 
 # Человекочитаемая версия для вывода в UI и логах
 VERSION = f"STR.RAG v{__version__} «{__codename__}»"

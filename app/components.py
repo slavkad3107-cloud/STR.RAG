@@ -29,7 +29,9 @@ PROVIDER_LABEL = {
 
 # Известные модели по провайдерам (пресеты; всегда можно ввести свою вручную).
 KNOWN_MODELS = {
-    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    # июль 2026: DeepSeek принимает только v4-модели (старые имена мапятся
+    # автоматически в ai_providers, но выбирать лучше сразу новые)
+    "deepseek": ["deepseek-v4-pro", "deepseek-v4-flash"],
     "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "o3-mini"],
     "gemini": ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash"],
     "anthropic": ["claude-3-5-sonnet-latest", "claude-3-7-sonnet-latest", "claude-3-5-haiku-latest"],
@@ -147,9 +149,13 @@ def module_ai_selector(cfg, module: str, *, title: str | None = None) -> None:
                 val = st.text_input(f"Ключ API {PROVIDER_LABEL.get(provider, provider)} (ввести вручную)",
                                     value="", type="password", key=f"mkey_{module}")
                 if val:
-                    _envp = write_env_key(provider, val)
-                    st.session_state.pop(f"mkey_{module}", None)  # анти-зацикливание rerun
-                    st.success(f"Ключ сохранён: {_envp}"); st.rerun()
+                    try:
+                        _envp = write_env_key(provider, val)
+                    except ValueError as _ve:
+                        st.error(str(_ve))  # мусор вместо ключа — прежний ключ цел
+                    else:
+                        st.session_state.pop(f"mkey_{module}", None)  # анти-зацикливание rerun
+                        st.success(f"Ключ сохранён: {_envp}"); st.rerun()
 
 
 def ai_settings_panel(cfg) -> None:

@@ -590,19 +590,118 @@ def tab_m4(project: str, object_type: str) -> None:
             remarks_path = Path(_sp)
             st.caption(f"Используется файл, скачанный по ссылке: {remarks_path.name}")
 
+    # v0.33: поиск ответов идёт ФОНОВЫМ процессом (как индексация в М2):
+    # прогресс/пульс/Стоп/Продолжить; обрыв вкладки ничего не теряет —
+    # ответы сохраняются пакетами, «Продолжить» доделывает остаток.
+    from pmoos.pipeline.block1_answers import (
+        start_answers_background, stop_answers, read_answers_state,
+        answers_running, answers_log_path)
+    _as = read_answers_state(project)
+    _alive = answers_running(project)
+    _ast = _as.get("status", "idle")
+    if _ast == "running" and not _alive:
+        _ast = "stalled"  # процесс умер, пульс пропал — предложим «Продолжить»
+
     c1, c2, c3 = st.columns(3)
-    run1 = c1.button("① Найти ответы", width='stretch')
-    run2 = c2.button("② Проверить правки", width='stretch')
-    run3 = c3.button("③ Финальная проверка", width='stretch')
+    run1 = c1.button("① Найти ответы", width='stretch', disabled=_alive,
+                     help="Работает в фоне: можно закрывать вкладку. Уже готовые "
+                          "и принятые ответы не переспрашиваются.")
+    run2 = c2.button("② Проверить правки", width='stretch', disabled=_alive)
+    run3 = c3.button("③ Финальная проверка", width='stretch', disabled=_alive)
 
     if run1:
-        from pmoos.pipeline.block1_answers import run_block1
-        with st.spinner("Поиск ответов (retrieval + ИИ)…"):
+        pid = start_answers_background(
+            project, object_type=object_type,
+            remarks_path=str(remarks_path) if remarks_path else None)
+        if pid:
+            st.toast(f"Фоновый поиск ответов запущен (pid {pid})")
+        st.rerun()
+
+    # ── панель прогресса поиска ответов (как в М2) ──
+    if _alive or _ast in ("paused", "error", "stalled"):
+        _tot = int(_as.get("total") or 0)
+        _don = int(_as.get("done") or 0)
+        if _tot:
+            st.progress(min(1.0, _don / max(1, _tot)),
+                        text=f"Ответов готово: {_don}/{_tot}")
+        _badge = {"running": "🟢 выполняется", "paused": "🟡 пауза",
+                  "error": "🔴 ошибка", "stalled": "🟡 прервано — пульс пропал",
+                  "done": "✅ завершено"}.get(_ast, _ast)
+        st.write(f"Статус: {_badge}" +
+                 (f" · {_as.get('message', '')}" if _as.get("message") else ""))
+        pc1, pc2, pc3 = st.columns(3)
+        if _alive:
             try:
-                out = run_block1(project, cfg, remarks_path=remarks_path, object_type=object_type)
-                st.success(f"Готово: {out.get('count', 0)} ответов.")
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Ошибка блока 1: {e}")
+                from datetime import datetime as _dt
+                _hb = (_dt.now() - _dt.fromisoformat(_as.get("heartbeat", ""))).total_seconds()
+                st.caption(f"Пульс процесса: {_hb:.0f} с назад — норма ≤ 10 с. "
+                           f"Ответы появляются ниже по мере готовности пакетов.")
+            except (ValueError, TypeError):
+                pass
+            from pmoos.pipeline.block1_answers import answers_stop_requested
+            if not answers_stop_requested(project):
+                if pc1.button("⏹ Стоп", key="m4_stop", width='stretch',
+                              help="МЯГКО: останавливает после текущего пакета "
+                                   "(готовые ответы сохранены); «⏯ Продолжить» доделает."):
+                    stop_answers(project)
+                    st.rerun()
+            else:
+                pc1.caption("⏹ Останавливается после текущего пакета…")
+                if pc3.button("✋ Прервать немедленно", key="m4_kill", width='stretch',
+                              help="Жёстко завершает процесс: ответы текущего "
+                                   "пакета не сохранятся."):
+                    stop_answers(project, hard=True)
+                    st.rerun()
+        else:
+            if pc1.button("⏯ Продолжить", key="m4_resume", width='stretch',
+                          help="Доделает только неотвеченные замечания."):
+                start_answers_background(
+                    project, object_type=object_type,
+                    remarks_path=str(remarks_path) if remarks_path else None)
+                st.rerun()
+        if pc2.button("🔄 Обновить", key="m4_refresh", width='stretch'):
+            st.rerun()
+
+    _alog = answers_log_path(project)
+    if _alog.exists():
+        with st.expander("📋 Журнал поиска ответов (answers_log.txt)"):
+            try:
+                _lines = _alog.read_text(encoding="utf-8", errors="replace").splitlines()
+                st.code("\n".join(_lines[-60:]) or "(пусто)")
+            except OSError:
+                st.caption("журнал пока недоступен")
+
+    with st.expander("🩺 Диагностика поиска ответов (если «не стартует»)"):
+        if st.button("Проверить", key="m4_diag", width='stretch'):
+            _checks: list[tuple[str, bool, str]] = []
+            _prov = cfg.resolve_provider("module4")
+            _checks.append((f"Ключ провайдера ({_prov})",
+                            bool(cfg.has_key(_prov) or _prov == "ollama"),
+                            "задан" if (cfg.has_key(_prov) or _prov == "ollama")
+                            else "нет ключа — задайте в «🤖 ИИ этого модуля»"))
+            _checks.append(("Файл замечаний", bool(remarks_path),
+                            str(remarks_path) if remarks_path else
+                            "не найден — загрузите в поле выше"))
+            try:
+                from pmoos.index.vectorstore import VectorStore
+                _vs = VectorStore(cfg, dim=1024)
+                _n = len(_vs.existing_doc_shas(project))
+                _vs.close()
+                _checks.append(("База Qdrant свободна и читается", True,
+                                f"документов в проекте: {_n}"))
+            except Exception as _e:  # noqa: BLE001
+                _checks.append(("База Qdrant", False, str(_e)[:160]))
+            import subprocess as _sp2
+            import sys as _sys2
+            try:
+                _r = _sp2.run([_sys2.executable, "-c", "print('ok')"],
+                              capture_output=True, timeout=30)
+                _checks.append(("Запуск дочернего python", _r.returncode == 0,
+                                _sys2.executable))
+            except Exception as _e:  # noqa: BLE001
+                _checks.append(("Запуск дочернего python", False, str(_e)[:160]))
+            for _t, _ok2, _d in _checks:
+                st.write(("✅" if _ok2 else "❌") + f" {_t} — {_d}")
 
     if run2:
         from pmoos.pipeline.block2_review import run_block2
@@ -682,9 +781,19 @@ def _render_answers(project: str) -> None:
     f1, f2 = st.columns(2)
     cats = [c for c in CATEGORIES if c in cat_counts] + \
            [c for c in cat_counts if c not in CATEGORIES]
-    sel_cat = f1.multiselect("Типы замечаний", cats, default=cats, key="m4_flt_cat")
+    # ключи С ПРОЕКТОМ (ревью: keyed-виджеты Streamlit переживали смену проекта —
+    # текст ответа проекта А показывался в проекте Б). Плюс сброс выбора при
+    # ПОЯВЛЕНИИ новых категорий (во время фоновой генерации список растёт, а
+    # multiselect с key иначе молча скрывал бы новые ответы).
+    _csig = f"m4_flt_opts_{project}"
+    if st.session_state.get(_csig) != cats:
+        st.session_state[_csig] = list(cats)
+        st.session_state.pop(f"m4_flt_cat_{project}", None)
+    sel_cat = f1.multiselect("Типы замечаний", cats, default=cats,
+                             key=f"m4_flt_cat_{project}")
     sel_st = f2.multiselect("Статусы", list(ST_RU), default=list(ST_RU),
-                            format_func=lambda k: ST_RU[k], key="m4_flt_st")
+                            format_func=lambda k: ST_RU[k],
+                            key=f"m4_flt_st_{project}")
     view = [a for a in answers
             if (a.get("category") or "Правка по источникам") in sel_cat
             and a.get("status", "proposed") in sel_st]
@@ -784,7 +893,7 @@ def _render_answers(project: str) -> None:
 
     st.markdown("#### Работа с отдельным замечанием")
     nums = [str(a.get("number", "")) for a in (view or answers)]
-    pick = st.selectbox("Замечание №", nums, key="m4_sel")
+    pick = st.selectbox("Замечание №", nums, key=f"m4_sel_{project}")
     a = next((x for x in answers if str(x.get("number")) == str(pick)), None)
     if not a:
         return
@@ -807,7 +916,7 @@ def _render_answers(project: str) -> None:
         st.error(a["error"])
     txt = st.text_area("Ответ (можно отредактировать):",
                        value=a.get("user_answer") or a.get("answer", ""),
-                       key=f"ans_{num}", height=140)
+                       key=f"ans_{project}_{num}", height=140)
     if a.get("correction"):
         st.caption(f"Правка в ПМООС: {a['correction']}")
     if a.get("unsupported_refs") and not a.get("low_support"):
@@ -1090,6 +1199,17 @@ def main() -> None:
     st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="wide")
     st.session_state["_uid"] = 0  # сброс счётчика ключей на каждый рендер
     apply_font_css(_cfg())  # размер шрифта из config (ui.font_size)
+    # закрытие СТАРЫХ сеансов при запуске (v0.33): заглохшие running-состояния
+    # переводятся в «пауза», а живой процесс прошлого экземпляра приложения
+    # (держал бы базу «занятой») закрывается — см. pmoos/core/session_guard.py
+    if not st.session_state.get("_stale_swept"):
+        st.session_state["_stale_swept"] = True
+        try:
+            from pmoos.core.session_guard import close_stale_sessions
+            for _note in close_stale_sessions():
+                st.toast(_note)
+        except Exception:  # noqa: BLE001 — уборка не должна мешать запуску
+            pass
     project, object_type = sidebar()
     if not project:
         st.info("Создайте или выберите проект слева, чтобы начать.")

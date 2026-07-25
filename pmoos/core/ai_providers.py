@@ -160,12 +160,25 @@ def _ollama(base_url: str, model: str, messages: list[Message],
     return (data.get("message") or {}).get("content", "") or ""
 
 
+# DeepSeek переименовал модели (июль 2026): API принимает ТОЛЬКО
+# deepseek-v4-pro / deepseek-v4-flash. Старые имена из конфига мапим тихо —
+# иначе каждый запрос падал бы 400 invalid_request_error («поиск ответов
+# висит»), а непрограммисту не понять почему.
+_DEEPSEEK_RENAMES = {"deepseek-chat": "deepseek-v4-flash",
+                     "deepseek-reasoner": "deepseek-v4-pro"}
+
+
 # --- публичный API ----------------------------------------------------------
 def _chat_once(cfg: Config, messages: list[Message], *, provider: str, role: str,
                model: str | None, temperature: float, max_tokens: int,
                json_mode: bool, use_cache: bool) -> str:
     """Одна попытка вызова конкретного провайдера (без fallback)."""
     model = model or cfg.model_for(provider, role)
+    if provider == "deepseek" and model in _DEEPSEEK_RENAMES:
+        new_model = _DEEPSEEK_RENAMES[model]
+        print(f"[ai] DeepSeek переименовал модели: {model} → {new_model} "
+              f"(обновите выбор в настройках ИИ)", flush=True)
+        model = new_model
     json_mode = json_mode and cfg.supports_json_mode(provider)
     if not model:
         raise LLMError(f"Не задана модель для провайдера '{provider}' (роль '{role}')")

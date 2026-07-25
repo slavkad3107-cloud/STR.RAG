@@ -344,6 +344,18 @@ def write_env_key(provider_or_var: str, value: str) -> Path:
     if provider_or_var in ENV_KEYS:
         keys = ENV_KEYS[provider_or_var]
         var = keys[0] if keys else provider_or_var.upper() + "_API_KEY"
+    # ЗАЩИТА ОТ МУСОРА (реальный случай: в поле ключа вставился SSH-ключ из
+    # буфера — рабочий ключ DeepSeek оказался затёрт, все ответы падали 401).
+    # Ключи API не содержат пробелов/переводов строк/знака «=» и не бывают
+    # километровыми.
+    v = (value or "").strip()
+    if (not v or len(v) > 300 or any(ch in v for ch in " \t\n\r=")
+            or v.upper().startswith(var.upper())):
+        raise ValueError(
+            "Это не похоже на ключ API (пробелы/перенос строки/«=» или слишком "
+            "длинно). Скопируйте ключ целиком с сайта провайдера и вставьте "
+            "заново — прежний ключ НЕ изменён.")
+    value = v
     env_path = data_root() / ".env"
     env_path.touch(exist_ok=True)
     if set_key is not None:
