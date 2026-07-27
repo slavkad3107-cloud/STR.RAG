@@ -55,14 +55,48 @@ def build() -> Path:
     files = [p for p in sorted(APP.rglob("*"))
              if p.is_file() and _keep(p.relative_to(APP))]
 
-    # 2) распакованная папка: чистим прошлую сборку этой версии и копируем заново
-    if folder.exists():
-        shutil.rmtree(folder)
+    # 2) распакованная папка. НЕ сносим её целиком: OneDrive держит файлы, и
+    #    rmtree падал PermissionError ПОСРЕДИ удаления — оставался БИТЫЙ релиз
+    #    (пропадал app/hub.py, приложение не запускалось). Теперь копируем
+    #    поверх с повторами, а лишнее удаляем по одному файлу.
+    import time as _t
+    expected: set[Path] = set()
+    failed: list[str] = []
     for p in files:
         rel = p.relative_to(APP)
+        expected.add(rel)
         dst = folder / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(p, dst)
+        for attempt in range(4):
+            try:
+                shutil.copy2(p, dst)
+                break
+            except (PermissionError, OSError):
+                _t.sleep(0.4)          # файл занят синхронизацией — подождём
+        else:
+            failed.append(str(rel))
+    if folder.exists():                 # снести устаревшее из прошлой сборки
+        for old in sorted(folder.rglob("*"), reverse=True):
+            try:
+                rel_old = old.relative_to(folder)
+                if old.is_file() and rel_old not in expected:
+                    old.unlink()
+                elif old.is_dir() and not any(old.iterdir()):
+                    old.rmdir()
+            except OSError:
+                pass                    # занято — не критично, перезапишется
+
+    # 3) ПРОВЕРКА ЦЕЛОСТНОСТИ: релиз без этих файлов не запустится
+    must = ["app/hub.py", "app/components.py", "pmoos/__init__.py", "run.bat"]
+    missing = [m for m in must if not (folder / m).exists()]
+    if missing or failed:
+        print("ОШИБКА СБОРКИ: релиз НЕПОЛНЫЙ.")
+        if missing:
+            print("  нет обязательных файлов:", ", ".join(missing))
+        if failed:
+            print("  не скопировались (заняты):", ", ".join(failed[:8]))
+        print("  Закройте приложение/подождите синхронизации OneDrive и повторите.")
+        raise SystemExit(2)
 
     # 3) zip рядом (та же структура, верхняя папка = имя версии)
     with zipfile.ZipFile(zip_out, "w", zipfile.ZIP_DEFLATED) as z:

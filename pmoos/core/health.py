@@ -51,10 +51,14 @@ MIN_LOCAL_B = 13.0
 # Качество внутри одного tier (меньше = лучше): латентность — плохой критерий,
 # порядок задаём осознанно под русские инженерные тексты.
 QUALITY: dict[str, int] = {
-    "gemini": 0,       # 2.5-flash: свободный лимит, отличный русский, 1М контекст
-    "mistral": 1,      # mistral-large — сильная модель, free tier
-    "cohere": 2,       # command-a: ок, но триальный ключ ~1000 запросов/мес
-    "openrouter": 3,   # бесплатные модели, но капризные лимиты
+    # Порядок ЗАМЕРЕН на реальном замечании экспертизы (v0.34):
+    # mistral-large 2858 символов и лучшая структура; cohere command-a 2230;
+    # gemini через совместимый эндпоинт обрывает ответ (12 токенов из 300);
+    # openrouter на бесплатных моделях вернул пустоту.
+    "mistral": 0,
+    "cohere": 1,
+    "gemini": 2,
+    "openrouter": 3,
     "cerebras": 0, "groq": 1,
     "deepseek": 0, "anthropic": 0, "openai": 1, "kimi": 2, "ollama": 0,
 }
@@ -78,8 +82,10 @@ PREFERRED: dict[str, list[str]] = {
                    r"gemma", r"mistral", r"."],
     "cerebras":   [r"qwen-3-235b", r"qwen-3-32b", r"gpt-oss-120b", r"llama-3\.3-70b", r"."],
     "groq":       [r"kimi-k2", r"llama-3\.3-70b", r"qwen3?-32b", r"gpt-oss-120b", r"."],
-    "openrouter": [r"deepseek.*:free", r"qwen.*(235|32)b.*:free", r"llama-3\.3-70b.*:free",
-                   r"gemini-2\.\d-flash.*:free", r":free", r"."],
+    # у OpenRouter мелкие бесплатные модели молчат — сначала крупные
+    "openrouter": [r"deepseek.*(v3|chat).*:free", r"qwen.*235b.*:free",
+                   r"llama-3\.3-70b.*:free", r"qwen.*(32|30)b.*:free",
+                   r"mistral.*:free", r":free", r"."],
     # ВАЖНО: «gemini-2.5-flash» новым ключам отдаёт 404, поэтому первым идёт
     # проверенный алиас gemini-flash-latest (v0.34)
     "gemini":     [r"gemini-flash-latest", r"gemini-pro-latest", r"gemini-2\.0-flash",

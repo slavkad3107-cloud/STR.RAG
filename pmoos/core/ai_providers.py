@@ -96,10 +96,22 @@ def _openai_like(base_url: str, api_key: str, model: str, messages: list[Message
         "model": model, "messages": messages,
         "temperature": temperature, "max_tokens": max_tokens,
     }
+    # ЗАМЕЧАНИЕ ПО GEMINI (замерено v0.34): через OpenAI-совместимый эндпоинт
+    # модель «думает» внутри бюджета max_tokens и отдаёт обрывок (12 токенов из
+    # 300), а параметры отключения размышлений эндпоинт не принимает (400).
+    # Поэтому Gemini НЕ ставим основным (см. QUALITY в core/health.py), а бюджет
+    # ему увеличиваем, чтобы хватило и на размышления, и на ответ.
+    if "generativelanguage" in (base_url or ""):
+        kwargs["max_tokens"] = max(max_tokens, 4096) * 2
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
     resp = client.chat.completions.create(**kwargs)
-    return resp.choices[0].message.content or ""
+    out = resp.choices[0].message.content or ""
+    if not out.strip():
+        # пустой ответ = модель истратила бюджет на размышления/фильтр
+        raise LLMError(f"провайдер вернул пустой ответ (модель {model}); "
+                       f"пробуем следующего")
+    return out
 
 
 def _gemini(api_key: str, model: str, messages: list[Message],
@@ -197,13 +209,17 @@ def _chat_once(cfg: Config, messages: list[Message], *, provider: str, role: str
 
     api_key = cfg.api_key(provider)
     base = cfg.base_url(provider)
-    if provider in ("deepseek", "openai", "kimi", "mistral",
-                    "groq", "cerebras", "openrouter", "cohere") or (
-            provider == "gemini" and "openai" in (base or "")):
-        # gemini тоже идёт сюда: у Google есть OpenAI-совместимый эндпоинт, а
-        # пакет google-generativeai снят с поддержки (v0.34)
+    if provider == "gemini":
+        # ВСЕГДА через OpenAI-совместимый эндпоинт Google: пакет
+        # google-generativeai снят с поддержки и ломается на пустом ответе
+        # («response.text quick accessor…»). base из СТАРОГО config.yaml мог
+        # остаться пустым — не полагаемся на него (v0.34).
+        if not base or "generativelanguage" not in base:
+            base = "https://generativelanguage.googleapis.com/v1beta/openai"
+    if provider in ("deepseek", "openai", "kimi", "mistral", "gemini",
+                    "groq", "cerebras", "openrouter", "cohere"):
         out = _openai_like(base, api_key, model, messages, temperature, max_tokens, json_mode)
-    elif provider == "gemini":
+    elif provider == "gemini_sdk_legacy":  # прежний путь через SDK — не используется
         out = _gemini(api_key, model, messages, temperature, max_tokens, json_mode)
     elif provider == "anthropic":
         out = _anthropic(api_key, model, messages, temperature, max_tokens, json_mode)
