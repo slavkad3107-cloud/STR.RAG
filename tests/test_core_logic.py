@@ -204,6 +204,79 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_save_merged_keeps_fresh_answer_for_rejected(tmp_path, monkeypatch):
+    # АУДИТ (critical): слияние решений возвращало с диска и «отклонённые»
+    # ответы, затирая только что сгенерированный новый — отклонение означает
+    # «переспроси», а не «верни старое».
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json
+    from pmoos.projects import register_project
+    from pmoos.paths import project_paths
+    from pmoos.config import load_config
+    from pmoos.ingest.remarks import Remark
+    from pmoos.pipeline.block1_answers import _save_merged
+    register_project("СЛИЯН")
+    p = project_paths("СЛИЯН")["answers"]
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"answers": [
+        {"number": "1", "remark": "р1", "answer": "СТАРЫЙ отклонённый",
+         "status": "rejected"},
+        {"number": "2", "remark": "р2", "answer": "старый", "status": "accepted",
+         "user_answer": "МОЙ ПРИНЯТЫЙ"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    rems = [Remark(number="1", text="р1"), Remark(number="2", text="р2")]
+    by_num = {"1": {"number": "1", "remark": "р1", "answer": "СВЕЖИЙ ответ",
+                    "status": "proposed"},
+              "2": {"number": "2", "remark": "р2", "answer": "свежий2",
+                    "status": "proposed"}}
+    out = _save_merged("СЛИЯН", rems, by_num, load_config(), "линейный", partial=False)
+    a1 = next(a for a in out["answers"] if a["number"] == "1")
+    a2 = next(a for a in out["answers"] if a["number"] == "2")
+    assert a1["answer"] == "СВЕЖИЙ ответ"          # отклонённый переспрошен
+    assert a2["user_answer"] == "МОЙ ПРИНЯТЫЙ"     # принятый пользователем цел
+
+
+def test_auto_select_preserves_user_settings(tmp_path, monkeypatch):
+    # АУДИТ (high): автовыбор при каждом старте стирал ручные настройки модулей
+    # и затирал дешёвые модели вспомогательных ролей.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.config import load_config
+    from pmoos.core.health import auto_select
+    cfg = load_config()
+    cfg.set("ai.default_provider", "mistral")
+    cfg.set("ai.modules.module4.provider", "deepseek")
+    cfg.set("ai.providers.mistral.extract", "mistral-small-latest")
+    cfg.save()
+    health = {"mistral": {"ok": True, "tier": 2, "best_model": "mistral-large-2512", "ms": 900},
+              "deepseek": {"ok": True, "tier": 3, "best_model": "deepseek-v4-pro", "ms": 800}}
+    # текущий провайдер работает → ничего не меняем
+    auto_select(cfg, health)
+    cfg2 = load_config()
+    assert cfg2.get("ai.modules.module4.provider") == "deepseek"
+    assert cfg2.model_for("mistral", "extract") == "mistral-small-latest"
+    # текущий УМЕР → переключаемся, но рабочее переопределение модуля сохраняем
+    health["mistral"] = {"ok": False, "tier": 2, "error": "лимит"}
+    p, m = auto_select(cfg2, health)
+    cfg3 = load_config()
+    assert p == "deepseek" and cfg3.default_provider() == "deepseek"
+    assert cfg3.get("ai.modules.module4.provider") == "deepseek"  # не стёрто
+
+
+def test_read_health_ttl(tmp_path, monkeypatch):
+    # АУДИТ (high): старт опрашивал провайдеров заново при каждом F5 — теперь
+    # свежий кэш используется как есть, а устаревший не мешает.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json, os, time
+    from pmoos.core.health import read_health, _health_path
+    _health_path().parent.mkdir(parents=True, exist_ok=True)
+    _health_path().write_text(json.dumps({"mistral": {"ok": True}}), encoding="utf-8")
+    assert read_health(max_age_h=24)                    # свежий — есть
+    old = time.time() - 48 * 3600
+    os.utime(_health_path(), (old, old))
+    assert read_health(max_age_h=24) == {}              # устаревший — пусто
+    assert read_health()                                # без TTL — читается
+
+
 def test_health_ranking_and_model_pick():
     # v0.34: автовыбор провайдера. Порядок: локальные → бесплатные → DeepSeek
     # (платный) → дорогие. Мелкая локальная (7B) уступает бесплатным облачным.

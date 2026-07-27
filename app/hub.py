@@ -726,6 +726,7 @@ def tab_m4(project: str, object_type: str) -> None:
     st.divider()
     rc1, rc2 = st.columns([1, 3])
     if rc1.button("🗑 Сбросить ответы", key="m4_reset", width='stretch',
+                  disabled=_alive,   # во время генерации сброс = гонка за файл
                   help="Полностью очистить предложенные ответы. "
                        "Журнал принятых решений (decisions.jsonl) сохраняется."):
         st.session_state["m4_reset_arm"] = True
@@ -1224,16 +1225,19 @@ def main() -> None:
         try:
             _c0 = _cfg()
             if bool(_c0.get("ai.auto_select", True)):
-                from pmoos.core.health import probe_all, auto_select, rank_working
-                with st.spinner("Проверяю доступные модели ИИ…"):
-                    _h = probe_all(_c0)
-                _ok = rank_working(_h)
-                _p0, _m0 = auto_select(_c0, _h) if _ok else ("", "")
-                if _p0:
-                    st.toast(f"🤖 Выбран лучший доступный ИИ: {_p0} · {_m0}")
+                from pmoos.core.health import (read_health, probe_all_async,
+                                               auto_select, rank_working)
+                # СВЕЖИЙ кэш (сутки) — мгновенно; иначе опрос уходит В ФОН и
+                # интерфейс рисуется сразу (раньше старт молчал до 100 с)
+                _h = read_health(max_age_h=24)
+                if _h:
+                    _p0, _m0 = auto_select(_c0, _h) if rank_working(_h) else ("", "")
+                    if _p0:
+                        st.toast(f"🤖 ИИ: {_p0} · {_m0}")
                 else:
-                    st.toast("⚠ Ни один провайдер ИИ не отвечает — проверьте ключи "
-                             "в «Настройки ИИ»")
+                    if probe_all_async(_c0):
+                        st.toast("🔎 Проверяю доступные модели ИИ в фоне — "
+                                 "результат в «Настройки ИИ → 🩺 Провайдеры»")
         except Exception:  # noqa: BLE001
             pass
     project, object_type = sidebar()

@@ -226,7 +226,17 @@ def run_block1(project: str, cfg: Config | None = None, *,
     # РЕЗЮМ (v0.33): уже отвеченные замечания не переспрашиваем — «Продолжить»
     # после Стопа/обрыва доделывает только остаток. Готовым считаем ответ
     # принятый/правленый ЛИБО с непустым текстом.
-    clear_answers_stop(project)   # прошлый «Стоп» не должен глушить новый запуск
+    # «Стоп», нажатый ПОКА ИДЁТ подготовка (разбор PDF бывает долгим), раньше
+    # терялся: флаг сбрасывался уже ПОСЛЕ разбора (находка аудита). Теперь флаг
+    # снимает тот, кто ЗАПУСКАЕТ прогон: фоновый _main — до подготовки, прямой
+    # вызов — здесь; а тут мы только проверяем нажатие «во время подготовки».
+    if _ANS_BG:
+        if _ans_stop_requested(project):
+            _ans_progress(project, 0, 0,
+                          "⏹ Остановлено до начала генерации.", status="paused")
+            return load_answers(project) or {"answers": []}
+    else:
+        clear_answers_stop(project)
 
     # ДУБЛИ НОМЕРОВ (ревью): «перезапуск нумерации с 1» из PDF/таблиц давал два
     # замечания №N — by_num схлопывал бы их в один ответ. Перенумеровываем:
@@ -457,7 +467,12 @@ def _save_merged(project: str, remarks: list, by_num: dict[str, dict],
     # молча откатывало бы его решение в «proposed».
     for n, a in {str(x.get("number")): x
                  for x in (load_answers(project) or {}).get("answers", [])}.items():
-        if a.get("status") in ("accepted", "edited", "rejected"):
+        # ТОЛЬКО принятые/правленые: «отклонён» означает «переспроси заново», и
+        # возврат старого отклонённого ответа затирал бы свежесгенерированный
+        # (находка аудита, critical). Если нового ответа ещё нет — старый
+        # отклонённый остаётся как есть.
+        if a.get("status") in ("accepted", "edited") or (
+                a.get("status") == "rejected" and n not in by_num):
             by_num[n] = a
     ordered = [by_num[str(r.number)] for r in remarks if str(r.number) in by_num]
     known = {str(r.number) for r in remarks}
@@ -837,6 +852,7 @@ def _main() -> None:
     st.update({"status": "running", "pid": os.getpid(),
                "message": "Подготовка (разбор файла замечаний)…"})
     write_answers_state(a.project, st)
+    clear_answers_stop(a.project)   # старый флаг «Стоп» не глушит новый запуск
     _start_ans_heartbeat(a.project)
     try:
         run_block1(a.project, object_type=a.object_type, remarks_path=a.remarks)

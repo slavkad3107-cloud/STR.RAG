@@ -202,7 +202,9 @@ def provider_health_panel(cfg) -> None:
     else:
         title = "🩺 Провайдеры ИИ — проверить доступность"
     with st.expander(title, expanded=not health):
-        st.caption("Проверка не тратит токены (спрашивается только список моделей). "
+        st.caption("Проверка почти бесплатна: список моделей + пробный ответ на "
+                   "5 токенов у каждого провайдера (нужен, чтобы поймать "
+                   "«модель есть в списке, но не отвечает»). "
                    "Порядок автовыбора: локальные → бесплатные → DeepSeek (платный).")
         b1, b2 = st.columns(2)
         if b1.button("🔄 Проверить все", key="hp_probe", width='stretch'):
@@ -211,8 +213,10 @@ def provider_health_panel(cfg) -> None:
             st.rerun()
         if b2.button("⚡ Выбрать лучший", key="hp_auto", width='stretch',
                      disabled=not ranked,
-                     help="Ставит лучшего рабочего провайдера всем модулям."):
-            p, m = auto_select(cfg, health)
+                     help="Ставит лучшего рабочего провайдера по умолчанию "
+                          "(ручные настройки модулей сохраняются, если их "
+                          "провайдер работает)."):
+            p, m = auto_select(cfg, health, force=True)
             if p:
                 st.success(f"Выбран: {PROVIDER_LABEL.get(p, p)} · {m}")
             st.rerun()

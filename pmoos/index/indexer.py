@@ -63,8 +63,17 @@ def _write_state_unlocked(project: str, state: dict[str, Any]) -> None:
     state["heartbeat"] = _now()  # любая запись состояния = признак жизни процесса
     p = project_paths(project)["index_state"]
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
+    # tmp УНИКАЛЕН для процесса + замена с повторами: индексатор и интерфейс —
+    # разные процессы, общий tmp-путь давал гонку и PermissionError на Windows
+    # (находка аудита; в block1_answers это уже было исправлено)
+    tmp = p.with_suffix(f".{os.getpid()}.json.tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    for _ in range(6):
+        try:
+            tmp.replace(p)
+            return
+        except PermissionError:
+            time.sleep(0.15)
     tmp.replace(p)
 
 
@@ -127,6 +136,18 @@ def stop_indexing(project: str) -> bool:
     st = read_state(project)
     pid = int(st.get("pid") or 0)
     killed = False
+    if pid and _pid_alive(pid):
+        # ОПОЗНАЁМ процесс перед убийством: pid из состояния мог быть
+        # переиспользован системой, и мы завершили бы ЧУЖУЮ программу
+        # (находка аудита; в block1_answers проверка уже была)
+        try:
+            from ..core.session_guard import _cmdline
+            _cl = _cmdline(pid).lower()
+            if _cl and "pmoos.index.indexer" not in _cl:
+                print(f"[indexer] pid {pid} — не наш процесс, не трогаю", flush=True)
+                pid = 0
+        except Exception:  # noqa: BLE001
+            pass
     if pid and _pid_alive(pid):
         try:
             if os.name == "nt":
@@ -784,6 +805,12 @@ def prefetch_models(project: str, models: list[str] | None = None) -> dict:
 
 def start_prefetch_background(project: str) -> int:
     """Скачивание всех моделей отдельным фоновым процессом (журнал и «пульс» — общие)."""
+    # НЕ затираем состояние идущей индексации (находка аудита): у скачивания и
+    # индексации один файл состояния — запуск скачивания посреди индексации
+    # перезаписал бы её прогресс и pid
+    if is_running(project):
+        print("[indexer] идёт индексация — скачивание моделей не запускаю", flush=True)
+        return 0
     st = read_state(project)
     st.update({"status": "running", "pid": 0, "current_file": "",
                "message": "Запуск фонового скачивания моделей…"})

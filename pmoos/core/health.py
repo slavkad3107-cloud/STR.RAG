@@ -119,7 +119,7 @@ def _get_json(url: str, headers: dict[str, str], timeout: float = 12.0) -> Any:
 
 
 def _try_generate(provider: str, base: str, api_key: str, model: str,
-                  timeout: float = 25.0) -> tuple[bool, str]:
+                  timeout: float = 12.0) -> tuple[bool, str]:
     """РЕАЛЬНАЯ мини-генерация (1-5 токенов): единственная честная проверка.
 
     Список моделей врёт: реальный случай — gemini-2.5-flash есть в /models, но
@@ -275,14 +275,49 @@ def _health_path():
     return data_root() / "provider_health.json"
 
 
-def read_health() -> dict:
+def read_health(max_age_h: float = 0.0) -> dict:
+    """Кэш проверок. max_age_h > 0 — вернуть только СВЕЖИЙ кэш (иначе {})."""
     p = _health_path()
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return {}
+    if max_age_h > 0:
+        try:
+            import os
+            age_h = (time.time() - os.path.getmtime(p)) / 3600.0
+            if age_h > max_age_h:
+                return {}
+        except OSError:
+            return {}
+    return data
+
+
+_PROBE_LOCK = __import__("threading").Lock()
+
+
+def probe_all_async(cfg, providers: list[str] | None = None) -> bool:
+    """Опросить провайдеров В ФОНОВОМ ПОТОКЕ — интерфейс не ждёт.
+
+    Синхронный опрос на старте держал приложение «немым» до 100 с (находка
+    аудита): у зависшего провайдера уходило 4 кандидата × таймаут. Теперь
+    результат просто появляется в кэше, а интерфейс рисуется сразу."""
+    import threading
+    if not _PROBE_LOCK.acquire(blocking=False):
+        return False                       # опрос уже идёт
+
+    def run() -> None:
+        try:
+            probe_all(cfg, providers)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            _PROBE_LOCK.release()
+
+    threading.Thread(target=run, daemon=True).start()
+    return True
 
 
 def probe_all(cfg, providers: list[str] | None = None) -> dict:
@@ -322,7 +357,8 @@ def probe_all(cfg, providers: list[str] | None = None) -> dict:
             # ответит (список моделей врёт — см. _try_generate)
             gen_base = (base or _OPENAI_LIKE.get(p, ""))
             last = ""
-            for cand in rank_models(p, res.get("models") or [], top=4):
+            # top=2: каждый лишний кандидат — ещё один таймаут в бюджете старта
+            for cand in rank_models(p, res.get("models") or [], top=2):
                 ok_gen, err = _try_generate(p, gen_base or "", key, cand)
                 if ok_gen:
                     res["best_model"] = cand
@@ -364,20 +400,42 @@ def rank_working(health: dict) -> list[tuple[str, dict]]:
                                       kv[1].get("ms", 10**6)))
 
 
-def auto_select(cfg, health: dict | None = None) -> tuple[str, str]:
-    """Поставить лучшего рабочего провайдера/модель в конфиг. (провайдер, модель)."""
+def auto_select(cfg, health: dict | None = None, *, force: bool = False) -> tuple[str, str]:
+    """Поставить лучшего РАБОЧЕГО провайдера, НЕ ломая ручные настройки.
+
+    Правки по находке аудита (high): раньше при каждом запуске стирались
+    выбранные пользователем провайдеры модулей (М1/М3/М4) и затирались дешёвые
+    модели вспомогательных ролей — необратимо, прямо в config.yaml. Теперь:
+      • если текущий провайдер по умолчанию РАБОТАЕТ — не трогаем ничего;
+      • меняем только answer/review (extract/expand — лишь если пусты);
+      • переопределение модуля снимаем ТОЛЬКО если его провайдер не работает.
+    force=True — явное действие пользователя (кнопка «Выбрать лучший»)."""
     health = health or read_health() or probe_all(cfg)
     ranked = rank_working(health)
     if not ranked:
         return "", ""
+    cur = cfg.default_provider()
+    cur_ok = bool((health.get(cur) or {}).get("ok"))
     provider, res = ranked[0]
     model = res.get("best_model", "")
+    if cur_ok and not force:
+        # текущий жив — оставляем как есть (уважаем выбор пользователя)
+        return cur, cfg.model_for(cur, "answer") or model
     cfg.set("ai.default_provider", provider)
-    for role in ("answer", "review", "extract", "expand"):
+    for role in ("answer", "review"):
         cfg.set(f"ai.providers.{provider}.{role}", model)
-    # модульные переопределения снимаем — иначе М1/М3/М4 остались бы на старом
+    for role in ("extract", "expand"):
+        if not cfg.model_for(provider, role):
+            cfg.set(f"ai.providers.{provider}.{role}", model)
+    if provider == "ollama":  # генерация должна идти на ТОТ ЖЕ адрес, где нашли
+        host = res.get("host")
+        if host:
+            cfg.set("ai.providers.ollama.base_url", host)
+    # переопределения модулей: снимаем только НЕРАБОЧИЕ
     for mod in ("module1", "module3", "module4"):
-        cfg.set(f"ai.modules.{mod}", {})
+        ov = cfg.get(f"ai.modules.{mod}.provider")
+        if ov and not (health.get(ov) or {}).get("ok"):
+            cfg.set(f"ai.modules.{mod}", {})
     cfg.save()
     return provider, model
 

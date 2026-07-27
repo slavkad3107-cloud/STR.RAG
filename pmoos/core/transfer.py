@@ -85,6 +85,7 @@ def _indexing_running() -> str | None:
         except (ValueError, TypeError):
             return 1e9  # нечитаемый heartbeat = считаем давно умершим
 
+    from ..pipeline.block1_answers import answers_running  # генерация ответов М4
     for prj in list_projects():
         st = read_state(prj)
         if st.get("status") == "running":
@@ -94,6 +95,14 @@ def _indexing_running() -> str | None:
             if age < 120:
                 return (f"идёт индексация проекта «{prj}» — дождитесь окончания "
                         f"или нажмите «Стоп» в Модуле 2")
+        # ФОНОВЫЙ ПОИСК ОТВЕТОВ тоже пишет в базу проекта (находка аудита:
+        # перенос посреди генерации давал рассинхрон answers.json)
+        try:
+            if answers_running(prj):
+                return (f"идёт поиск ответов по проекту «{prj}» — дождитесь "
+                        f"окончания или нажмите «Стоп» в Модуле 4")
+        except Exception:  # noqa: BLE001
+            pass
     return None
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -91,7 +92,11 @@ def _openai_like(base_url: str, api_key: str, model: str, messages: list[Message
         from openai import OpenAI
     except Exception as e:  # pragma: no cover
         raise LLMError("Не установлен пакет openai (pip install openai)") from e
-    client = OpenAI(api_key=api_key, base_url=base_url or None)
+    # ТАЙМАУТ обязателен: без него зависший провайдер вешал генерацию ответов
+    # на десятки минут без единого признака жизни (находка аудита)
+    client = OpenAI(api_key=api_key, base_url=base_url or None,
+                    timeout=float(os.environ.get("PMOOS_LLM_TIMEOUT", "180")),
+                    max_retries=1)
     kwargs: dict[str, Any] = {
         "model": model, "messages": messages,
         "temperature": temperature, "max_tokens": max_tokens,
@@ -269,6 +274,7 @@ def chat(cfg: Config, messages: list[Message], *, module: str | None = None,
         except Exception:  # noqa: BLE001
             pass
         seen = {provider}
+        first_err = e          # причина падения ОСНОВНОГО провайдера — важнее
         last_err = e
         for fbp in chain:
             if fbp in seen or not (cfg.has_key(fbp) or fbp == "ollama"):
@@ -284,7 +290,9 @@ def chat(cfg: Config, messages: list[Message], *, module: str | None = None,
             except Exception as e2:  # noqa: BLE001
                 last_err = e2
                 continue
-        raise last_err
+        # в сообщении СНАЧАЛА причина основного провайдера (аудит: раньше
+        # пользователь видел только ошибку последнего запасного)
+        raise LLMError(f"{provider}: {first_err} | последний запасной: {last_err}")
 
 
 def chat_json(cfg: Config, messages: list[Message], *, expect: str = "auto", **kw) -> Any:
