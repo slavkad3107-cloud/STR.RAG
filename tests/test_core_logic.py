@@ -204,6 +204,55 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_health_ranking_and_model_pick():
+    # v0.34: автовыбор провайдера. Порядок: локальные → бесплатные → DeepSeek
+    # (платный) → дорогие. Мелкая локальная (7B) уступает бесплатным облачным.
+    from pmoos.core.health import pick_model, rank_working, effective_tier
+    # эмбеддер bge-m3 НЕ должен попасть в чат-модели
+    assert pick_model("ollama", ["bge-m3:latest", "qwen2.5:14b"]) == "qwen2.5:14b"
+    assert pick_model("ollama", ["bge-m3:latest"]) == ""
+    assert pick_model("deepseek", ["deepseek-v4-flash", "deepseek-v4-pro"]) == "deepseek-v4-pro"
+    assert ":free" in pick_model("openrouter", ["x/paid-model", "y/qwen3-32b:free"])
+
+    big_local = {"ok": True, "tier": 0, "best_model": "qwen3:32b", "ms": 900}
+    small_local = {"ok": True, "tier": 0, "best_model": "qwen2.5:7b", "ms": 700}
+    gem = {"ok": True, "tier": 2, "best_model": "gemini-2.5-flash", "ms": 2000}
+    dsk = {"ok": True, "tier": 3, "best_model": "deepseek-v4-pro", "ms": 1500}
+    # крупная локальная — первая
+    assert rank_working({"ollama": big_local, "gemini": gem, "deepseek": dsk})[0][0] == "ollama"
+    # мелкая локальная уступает бесплатному облачному, но опережает платный
+    order = [p for p, _ in rank_working({"ollama": small_local, "gemini": gem, "deepseek": dsk})]
+    assert order == ["gemini", "ollama", "deepseek"]
+    assert effective_tier("ollama", small_local) == 2.5
+
+
+def test_keysync_merges_from_cloud(tmp_path, monkeypatch):
+    # Ключи должны сами обновляться из папки переноса (просьба пользователя)
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path / "data"))
+    from pmoos.paths import data_root
+    from pmoos.core.keysync import sync_keys_from_transfer, push_keys_to_transfer
+    cloud = tmp_path / "cloud"
+    cloud.mkdir()
+    (cloud / ".env").write_text("DEEPSEEK_API_KEY=sk-new123\nGEMINI_API_KEY=g-new\n",
+                                encoding="utf-8")
+    data_root().mkdir(parents=True, exist_ok=True)
+    local = data_root() / ".env"
+    local.write_text("DEEPSEEK_API_KEY=sk-старый\nPMOOS_LOCAL_ONLY=x\n", encoding="utf-8")
+    import os, time
+    old = time.time() - 3600
+    os.utime(local, (old, old))                       # локальный старее облачного
+    changed = sync_keys_from_transfer(str(cloud))
+    txt = local.read_text(encoding="utf-8")
+    assert "sk-new123" in txt and "GEMINI_API_KEY=g-new" in txt
+    assert "PMOOS_LOCAL_ONLY=x" in txt                # локальное не теряется
+    assert set(changed) == {"DEEPSEEK_API_KEY", "GEMINI_API_KEY"}
+    # повторный вызов ничего не делает (локальный уже свежее)
+    assert sync_keys_from_transfer(str(cloud)) == []
+    # выгрузка ключей в облако
+    assert push_keys_to_transfer(str(cloud)) is True
+    assert "sk-new123" in (cloud / ".env").read_text(encoding="utf-8")
+
+
 def test_write_env_key_rejects_garbage(tmp_path, monkeypatch):
     # Реальный инцидент: в поле ключа вставился SSH-ключ — рабочий ключ DeepSeek
     # затёрся, все ответы падали 401. Мусор должен отвергаться, ключ — целеть.

@@ -41,10 +41,12 @@ def _keep(p: Path) -> bool:
 
 
 def build() -> Path:
-    # Структура с v0.32.1: код приложения живёт в КОРНЕ репозитория, релизы —
-    # в <корень>/releases/STR.RAG-vX.Y.Z/ (запускать run.bat из папки релиза).
-    rel_dir = APP / "releases"
-    rel_dir.mkdir(exist_ok=True)
+    # Структура с v0.34: ИСХОДНЫЙ КОД живёт отдельно (папка разработки), а
+    # витрина STR.RAG содержит только релизы и резюме — как просил пользователь.
+    # Собираем из папки с кодом → в <...>/STR.RAG/releases/STR.RAG-vX.Y.Z/.
+    showcase = APP.parent / "STR.RAG"
+    rel_dir = (showcase / "releases") if showcase.is_dir() else (APP / "releases")
+    rel_dir.mkdir(parents=True, exist_ok=True)
     top = f"STR.RAG-v{__version__}"
     folder = rel_dir / top                 # РАСПАКОВАННАЯ папка релиза (запускать из неё)
     zip_out = rel_dir / f"{top}.zip"        # zip рядом (перенос/архив)

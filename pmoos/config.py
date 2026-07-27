@@ -70,6 +70,12 @@ ENV_KEYS: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY",),
     "kimi": ("MOONSHOT_API_KEY", "KIMI_API_KEY"),
     "mistral": ("MISTRAL_API_KEY",),
+    # бесплатные/быстрые (v0.34): принимаем и короткие имена переменных —
+    # пользователь мог записать ключ так, как они названы в ТЗ
+    "cerebras": ("CEREBRAS_API_KEY", "CEREBRAS", "CELEBR"),
+    "groq": ("GROQ_API_KEY", "GROQ"),
+    "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER"),
+    "cohere": ("COHERE_API_KEY", "COHERE"),
     "ollama": (),  # локально, ключ не нужен
 }
 
@@ -97,11 +103,14 @@ DEFAULT_AI: dict[str, Any] = {
             "supports_json_mode": True,
         },
         "gemini": {
-            "base_url": "",  # SDK google-generativeai
-            "answer": "gemini-1.5-pro",
-            "review": "gemini-1.5-pro",
-            "extract": "gemini-1.5-flash",
-            "expand": "gemini-1.5-flash",
+            # OpenAI-совместимый эндпоинт Google (SDK google-generativeai снят
+            # с поддержки). Имена «gemini-2.5-flash» и т.п. новым ключам уже
+            # недоступны (404) — рабочее имя-алиас: gemini-flash-latest.
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "answer": "gemini-flash-latest",
+            "review": "gemini-flash-latest",
+            "extract": "gemini-flash-latest",
+            "expand": "gemini-flash-latest",
             "supports_json_mode": True,
         },
         "anthropic": {
@@ -128,6 +137,42 @@ DEFAULT_AI: dict[str, Any] = {
             "review": "mistral-large-latest",
             "extract": "mistral-small-latest",
             "expand": "mistral-small-latest",
+            "supports_json_mode": True,
+        },
+        # ── бесплатные / быстрые (v0.34) — все OpenAI-совместимые ──
+        "cerebras": {
+            # очень быстрый инференс, щедрый free tier
+            "base_url": "https://api.cerebras.ai/v1",
+            "answer": "qwen-3-235b-a22b-instruct-2507",
+            "review": "qwen-3-235b-a22b-instruct-2507",
+            "extract": "llama-3.3-70b",
+            "expand": "llama-3.3-70b",
+            "supports_json_mode": True,
+        },
+        "groq": {
+            "base_url": "https://api.groq.com/openai/v1",
+            "answer": "moonshotai/kimi-k2-instruct",
+            "review": "moonshotai/kimi-k2-instruct",
+            "extract": "llama-3.3-70b-versatile",
+            "expand": "llama-3.3-70b-versatile",
+            "supports_json_mode": True,
+        },
+        "openrouter": {
+            # витрина десятков моделей, есть бесплатные (суффикс «:free»)
+            "base_url": "https://openrouter.ai/api/v1",
+            "answer": "deepseek/deepseek-chat-v3.1:free",
+            "review": "deepseek/deepseek-chat-v3.1:free",
+            "extract": "qwen/qwen3-32b:free",
+            "expand": "qwen/qwen3-32b:free",
+            "supports_json_mode": True,
+        },
+        "cohere": {
+            # OpenAI-совместимый режим Cohere
+            "base_url": "https://api.cohere.ai/compatibility/v1",
+            "answer": "command-a-03-2025",
+            "review": "command-a-03-2025",
+            "extract": "command-r7b-12-2024",
+            "expand": "command-r7b-12-2024",
             "supports_json_mode": True,
         },
         "ollama": {

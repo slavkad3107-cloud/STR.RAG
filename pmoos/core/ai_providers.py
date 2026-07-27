@@ -197,7 +197,11 @@ def _chat_once(cfg: Config, messages: list[Message], *, provider: str, role: str
 
     api_key = cfg.api_key(provider)
     base = cfg.base_url(provider)
-    if provider in ("deepseek", "openai", "kimi", "mistral"):
+    if provider in ("deepseek", "openai", "kimi", "mistral",
+                    "groq", "cerebras", "openrouter", "cohere") or (
+            provider == "gemini" and "openai" in (base or "")):
+        # gemini тоже идёт сюда: у Google есть OpenAI-совместимый эндпоинт, а
+        # пакет google-generativeai снят с поддержки (v0.34)
         out = _openai_like(base, api_key, model, messages, temperature, max_tokens, json_mode)
     elif provider == "gemini":
         out = _gemini(api_key, model, messages, temperature, max_tokens, json_mode)
@@ -235,15 +239,36 @@ def chat(cfg: Config, messages: list[Message], *, module: str | None = None,
                           temperature=temperature, max_tokens=max_tokens,
                           json_mode=json_mode, use_cache=use_cache)
     except Exception as e:  # noqa: BLE001
+        # ЦЕПОЧКА ЗАПАСНЫХ (v0.34): раньше был ОДИН резервный из конфига — если
+        # у основного кончился лимит/умер ключ, все 75 ответов падали (реальный
+        # случай: 401 у DeepSeek → пустые ответы). Теперь идём по проверенным
+        # провайдерам в порядке ранжирования: локальные → бесплатные → платные.
+        chain: list[str] = []
         fb = str(cfg.get("ai.fallback_provider", "") or "").strip()
-        if not fb or fb == provider or not cfg.has_key(fb):
-            raise
-        print(f"[ai] провайдер '{provider}' недоступен ({e}) — повтор через '{fb}'",
-              flush=True)
-        # модель основного к резервному не применима — резервный берёт свою (role)
-        return _chat_once(cfg, messages, provider=fb, role=role, model=None,
-                          temperature=temperature, max_tokens=max_tokens,
-                          json_mode=json_mode, use_cache=use_cache)
+        if fb:
+            chain.append(fb)
+        try:
+            from .health import fallback_order
+            chain += fallback_order(cfg)
+        except Exception:  # noqa: BLE001
+            pass
+        seen = {provider}
+        last_err = e
+        for fbp in chain:
+            if fbp in seen or not (cfg.has_key(fbp) or fbp == "ollama"):
+                continue
+            seen.add(fbp)
+            print(f"[ai] провайдер '{provider}' недоступен ({last_err}) — "
+                  f"повтор через '{fbp}'", flush=True)
+            try:
+                # модель основного к резервному неприменима — берёт свою (role)
+                return _chat_once(cfg, messages, provider=fbp, role=role, model=None,
+                                  temperature=temperature, max_tokens=max_tokens,
+                                  json_mode=json_mode, use_cache=use_cache)
+            except Exception as e2:  # noqa: BLE001
+                last_err = e2
+                continue
+        raise last_err
 
 
 def chat_json(cfg: Config, messages: list[Message], *, expect: str = "auto", **kw) -> Any:

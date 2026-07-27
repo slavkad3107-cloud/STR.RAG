@@ -15,16 +15,22 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-PROVIDERS = ["deepseek", "openai", "gemini", "anthropic", "kimi", "mistral", "ollama"]
+PROVIDERS = ["ollama", "cerebras", "groq", "gemini", "openrouter", "cohere",
+             "mistral", "deepseek", "openai", "anthropic", "kimi"]
 MODULES = [
     ("module1", "М1 · Систематизация ПД"),
     ("module3", "М3 · Граф связей"),
     ("module4", "М4 · Ответы на замечания"),
 ]
 PROVIDER_LABEL = {
-    "deepseek": "DeepSeek", "openai": "OpenAI (GPT)", "gemini": "Google Gemini",
+    "deepseek": "DeepSeek (платный)", "openai": "OpenAI (GPT)",
+    "gemini": "Google Gemini (free tier)",
     "anthropic": "Anthropic (Claude)", "kimi": "Kimi (Moonshot)",
-    "mistral": "Mistral", "ollama": "Ollama (локально)",
+    "mistral": "Mistral (free tier)", "ollama": "Ollama (локально, бесплатно)",
+    "cerebras": "Cerebras (бесплатно, очень быстро)",
+    "groq": "Groq (бесплатно, быстро)",
+    "openrouter": "OpenRouter (в т.ч. бесплатные модели)",
+    "cohere": "Cohere (free tier)",
 }
 
 # Известные модели по провайдерам (пресеты; всегда можно ввести свою вручную).
@@ -36,7 +42,17 @@ KNOWN_MODELS = {
     "gemini": ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash"],
     "anthropic": ["claude-3-5-sonnet-latest", "claude-3-7-sonnet-latest", "claude-3-5-haiku-latest"],
     "kimi": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
-    "mistral": ["mistral-large-latest", "mistral-small-latest", "open-mistral-nemo"],
+    "mistral": ["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest",
+                "open-mistral-nemo"],
+    "cerebras": ["qwen-3-235b-a22b-instruct-2507", "qwen-3-32b", "gpt-oss-120b",
+                 "llama-3.3-70b", "llama3.1-8b"],
+    "groq": ["moonshotai/kimi-k2-instruct", "llama-3.3-70b-versatile",
+             "openai/gpt-oss-120b", "qwen/qwen3-32b", "llama-3.1-8b-instant"],
+    "openrouter": ["deepseek/deepseek-chat-v3.1:free", "qwen/qwen3-235b-a22b:free",
+                   "qwen/qwen3-32b:free", "meta-llama/llama-3.3-70b-instruct:free",
+                   "google/gemini-2.0-flash-exp:free", "mistralai/mistral-small-3.2-24b-instruct:free"],
+    "cohere": ["command-a-03-2025", "command-r-plus-08-2024", "command-r-08-2024",
+               "command-r7b-12-2024"],
 }
 _MANUAL = "✍️ ввести вручную…"
 
@@ -57,8 +73,17 @@ def _guarded_select(label: str, options: list, *, key: str, current,
     kw = dict(key=key, label_visibility=label_visibility)
     if format_func is not None:
         kw["format_func"] = format_func
-    idx = options.index(current) if current in options else 0
-    choice = st.selectbox(label, options, index=idx, **kw)
+    # Streamlit ругается, если у виджета С КЛЮЧОМ задан ещё и index-«умолчание»
+    # («created with a default value but also had its value set via Session State»).
+    # Когда состояние уже есть — index не передаём; если состояние стало
+    # невалидным (список моделей изменился) — снимаем его и задаём index.
+    if key in st.session_state and st.session_state.get(key) not in options:
+        st.session_state.pop(key, None)
+    if key in st.session_state:
+        choice = st.selectbox(label, options, **kw)
+    else:
+        idx = options.index(current) if current in options else 0
+        choice = st.selectbox(label, options, index=idx, **kw)
     user_changed = (akey in st.session_state) and (choice != st.session_state[akey])
     st.session_state[akey] = choice
     return choice, user_changed
@@ -158,6 +183,74 @@ def module_ai_selector(cfg, module: str, *, title: str | None = None) -> None:
                         st.success(f"Ключ сохранён: {_envp}"); st.rerun()
 
 
+def provider_health_panel(cfg) -> None:
+    """Статус провайдеров ИИ и автовыбор лучшего (v0.34).
+
+    Ранжирование по просьбе пользователя: сначала ЛОКАЛЬНЫЕ (Ollama — бесплатно
+    и приватно), затем бесплатные облачные, и только потом платный DeepSeek."""
+    from pmoos.core.health import (read_health, probe_all, rank_working,
+                                   auto_select, TIER_RU)
+
+    health = read_health()
+    ranked = rank_working(health)
+    cur = cfg.default_provider()
+    cur_model = cfg.model_for(cur, "answer") or "—"
+    if health:
+        _r = health.get(cur, {})
+        _icon = "✅" if _r.get("ok") else ("🚫" if _r.get("limited") else "❌")
+        title = f"🩺 Провайдеры: {_icon} {PROVIDER_LABEL.get(cur, cur)} · рабочих {len(ranked)}"
+    else:
+        title = "🩺 Провайдеры ИИ — проверить доступность"
+    with st.expander(title, expanded=not health):
+        st.caption("Проверка не тратит токены (спрашивается только список моделей). "
+                   "Порядок автовыбора: локальные → бесплатные → DeepSeek (платный).")
+        b1, b2 = st.columns(2)
+        if b1.button("🔄 Проверить все", key="hp_probe", width='stretch'):
+            with st.spinner("Опрашиваю провайдеров…"):
+                health = probe_all(cfg)
+            st.rerun()
+        if b2.button("⚡ Выбрать лучший", key="hp_auto", width='stretch',
+                     disabled=not ranked,
+                     help="Ставит лучшего рабочего провайдера всем модулям."):
+            p, m = auto_select(cfg, health)
+            if p:
+                st.success(f"Выбран: {PROVIDER_LABEL.get(p, p)} · {m}")
+            st.rerun()
+        if health:
+            rows = []
+            for p, r in sorted(health.items(),
+                               key=lambda kv: (kv[1].get("tier", 9), kv[0])):
+                if r.get("ok"):
+                    state = f"✅ {r.get('ms', '?')} мс"
+                elif r.get("limited"):
+                    state = "🚫 лимит исчерпан"
+                else:
+                    state = f"❌ {r.get('error', 'нет')}"
+                rows.append({"Провайдер": PROVIDER_LABEL.get(p, p),
+                             "Тип": TIER_RU.get(r.get("tier", 9), "?"),
+                             "Состояние": state,
+                             "Лучшая модель": r.get("best_model", "") or "—"})
+            st.dataframe(rows, width='stretch', hide_index=True)
+        st.caption(f"Сейчас работает: **{PROVIDER_LABEL.get(cur, cur)} · {cur_model}**")
+        auto = st.checkbox("Выбирать лучшего автоматически при запуске",
+                           value=bool(cfg.get("ai.auto_select", True)),
+                           key="hp_auto_chk")
+        if bool(cfg.get("ai.auto_select", True)) != auto:
+            cfg.set("ai.auto_select", auto); cfg.save()
+        # ключи между компьютерами
+        k1, k2 = st.columns(2)
+        if k1.button("🔑 Ключи → в облако", key="hp_keys_out", width='stretch',
+                     help="Положить ключи в папку переноса, чтобы второй "
+                          "компьютер подхватил их при запуске."):
+            from pmoos.core.keysync import push_keys_to_transfer
+            st.success("Ключи выгружены." if push_keys_to_transfer()
+                       else "Папка переноса не задана (Модуль 2).")
+        if k2.button("🔑 Ключи ← из облака", key="hp_keys_in", width='stretch'):
+            from pmoos.core.keysync import sync_keys_from_transfer
+            ch = sync_keys_from_transfer()
+            st.success(f"Обновлено ключей: {len(ch)}" if ch else "Обновлять нечего.")
+
+
 def ai_settings_panel(cfg) -> None:
     """Сайдбар «Настройки ИИ» — КОМПАКТНЫЙ (редизайн v0.22).
 
@@ -171,6 +264,7 @@ def ai_settings_panel(cfg) -> None:
     from pmoos.core.model_cache import model_status
 
     st.subheader("⚙️ Настройки ИИ")
+    provider_health_panel(cfg)
 
     # 1) провайдер по умолчанию + его модель — два контрола, не больше
     default_prov = cfg.default_provider()

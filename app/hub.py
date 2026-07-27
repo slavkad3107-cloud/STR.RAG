@@ -1210,6 +1210,32 @@ def main() -> None:
                 st.toast(_note)
         except Exception:  # noqa: BLE001 — уборка не должна мешать запуску
             pass
+        # 1) ключи: если в папке переноса .env свежее — подхватываем (второй
+        #    компьютер получает исправленные ключи без переноса всей базы)
+        try:
+            from pmoos.core.keysync import sync_keys_from_transfer
+            _kch = sync_keys_from_transfer()
+            if _kch:
+                st.toast(f"🔑 Ключи обновлены из папки переноса: {len(_kch)}")
+        except Exception:  # noqa: BLE001
+            pass
+        # 2) проверка провайдеров и АВТОВЫБОР лучшего (локальные → бесплатные →
+        #    DeepSeek). Не тратит токены: спрашивается только список моделей.
+        try:
+            _c0 = _cfg()
+            if bool(_c0.get("ai.auto_select", True)):
+                from pmoos.core.health import probe_all, auto_select, rank_working
+                with st.spinner("Проверяю доступные модели ИИ…"):
+                    _h = probe_all(_c0)
+                _ok = rank_working(_h)
+                _p0, _m0 = auto_select(_c0, _h) if _ok else ("", "")
+                if _p0:
+                    st.toast(f"🤖 Выбран лучший доступный ИИ: {_p0} · {_m0}")
+                else:
+                    st.toast("⚠ Ни один провайдер ИИ не отвечает — проверьте ключи "
+                             "в «Настройки ИИ»")
+        except Exception:  # noqa: BLE001
+            pass
     project, object_type = sidebar()
     if not project:
         st.info("Создайте или выберите проект слева, чтобы начать.")
