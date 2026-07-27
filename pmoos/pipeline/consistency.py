@@ -106,6 +106,14 @@ def compare(source_text: str, answer_text: str) -> dict[str, Any]:
                 f"В ответе есть {human}, которых нет в найденных источниках: "
                 f"{', '.join(sorted(only_in_answer)[:8])}"
             )
+        # ЧИСЛА С ЕДИНИЦАМИ (г/с, т/год, мг/м³, дБА, га) — самое опасное место
+        # для ООС: выдуманная величина выглядит как факт. Раньше числа
+        # извлекались, но НЕ сверялись с источниками (находка аудита).
+        if only_in_answer and attr == "quantities":
+            issues.append(
+                f"В ответе есть {human}, которых нет в найденных источниках "
+                f"(проверьте расчёт вручную): {', '.join(sorted(only_in_answer)[:8])}"
+            )
     return {
         "source": src.to_dict(),
         "answer": ans.to_dict(),

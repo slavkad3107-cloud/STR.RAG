@@ -43,6 +43,22 @@ def _answers(project: str) -> dict[str, Any]:
 
 
 # ─────────────────────────────── DOCX ───────────────────────────────
+def unreviewed_stats(project: str) -> dict[str, int]:
+    """Сколько ответов уходит в сдаточный файл БЕЗ проверки человеком.
+
+    Находка аудита: в документ для экспертизы попадали и «предложен» (ИИ
+    написал, человек не читал), и «отклонён», причём без единой пометки —
+    формально можно отправить в госорган, не прочитав ни одного ответа."""
+    rows = _answers(project).get("answers", [])
+    st = [str(a.get("status") or "proposed") for a in rows]
+    flags = sum(1 for a in rows if a.get("low_support") or a.get("unsupported_refs")
+                or a.get("sources_unverified"))
+    return {"всего": len(rows),
+            "не проверено (предложен)": st.count("proposed"),
+            "отклонено": st.count("rejected"),
+            "с предупреждениями": flags}
+
+
 def build_answers_table_docx(project: str, *, out_path: str | Path | None = None) -> Path:
     data = _answers(project)
     rows = data.get("answers", [])
@@ -75,7 +91,16 @@ def build_answers_table_docx(project: str, *, out_path: str | Path | None = None
 
     for a in rows:
         cells = table.add_row().cells
-        cell_text(cells[0], str(a.get("number", "")), size=10)
+        # ПОМЕТКИ ДЛЯ ЧЕЛОВЕКА (аудит): непроверенные/отклонённые и ответы со
+        # слабой опорой на источники должны быть видны в самом документе
+        _mark = ""
+        if str(a.get("status") or "proposed") == "proposed":
+            _mark = " ⚠НЕ ПРОВЕРЕН"
+        elif a.get("status") == "rejected":
+            _mark = " ✗ОТКЛОНЁН"
+        if a.get("low_support") or a.get("unsupported_refs"):
+            _mark += " ⚠БЕЗ ОПОРЫ"
+        cell_text(cells[0], str(a.get("number", "")) + _mark, size=10)
         cell_text(cells[1], a.get("category", "") or "—", size=8)
         cell_text(cells[2], a.get("oos_volume", "") or "—", size=8)
         cell_text(cells[3], a.get("remark", "") or "—", size=9)

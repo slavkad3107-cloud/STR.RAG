@@ -55,14 +55,35 @@ _USER_TMPL = (
 )
 
 
-def _format_context(hits: list[dict], limit: int = 8) -> tuple[str, list[dict]]:
+def _center_snippet(text: str, max_chars: int, anchor: str = "") -> str:
+    """Обрезка вокруг НАЙДЕННОГО места, а не «первые N символов».
+
+    Находка аудита: обрезка до 900 символов применялась ПОСЛЕ склейки соседних
+    чанков и таблиц — в запрос уходило начало соседнего фрагмента, а сама
+    находка (например строка «ИТОГО: 12,345 т/год») в контекст не попадала."""
+    text = text or ""
+    if len(text) <= max_chars:
+        return text
+    pos = text.find(anchor) if anchor else -1
+    if pos < 0:
+        pos = 0
+    start = max(0, pos - max_chars // 3)
+    out = text[start:start + max_chars]
+    return ("…" if start else "") + out + ("…" if start + max_chars < len(text) else "")
+
+
+def _format_context(hits: list[dict], limit: int = 8,
+                    max_chars: int = 3000) -> tuple[str, list[dict]]:
     lines, srcs = [], []
     for i, h in enumerate(hits[:limit], 1):
         pl = h.get("payload", {})
         loc = pl.get("loc", "")
         file = pl.get("file", "")
         sec = pl.get("section", "")
-        snippet = (h.get("text", "") or "")[:900]
+        # 3000 символов вместо 900: окно моделей — десятки тысяч токенов, а
+        # таблица выбросов со склеенным заголовком в 900 символов не влезала
+        snippet = _center_snippet(h.get("text", "") or "", max_chars,
+                                  (pl.get("match") or ""))
         lines.append(f"[{i}] (раздел: {sec}; файл: {file}; место: {loc})\n{snippet}")
         srcs.append({"n": i, "file": file, "loc": loc, "section": sec,
                      "score": round(float(h.get("rerank_score", h.get("rrf_score", h.get("score", 0.0)))), 4),
@@ -339,7 +360,8 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
     mem_k = int(cfg.get("memory.k", 2))
     jobs, ctx_sources = [], []
     for r, hits in zip(remarks, hits_per):
-        ctx, srcs = _format_context(hits, limit=int(cfg.get("retrieval.top_k", 8)))
+        ctx, srcs = _format_context(hits, limit=int(cfg.get("retrieval.top_k", 8)),
+                                    max_chars=int(cfg.get("retrieval.snippet_chars", 3000)))
         ctx_sources.append((srcs, hits))
         user_msg = _USER_TMPL.format(num=r.number, remark=r.text, context=ctx or "(не найдено)")
         if use_mem:

@@ -1048,11 +1048,23 @@ def tab_m5(project: str, object_type: str) -> None:
 
     if g2.button("📄 Ответы на замечания для экспертизы (.docx/.xlsx)",
                  width='stretch', key="m5_make_table"):
-        from pmoos.output.answers_table import build_answers_table_docx, build_answers_table_xlsx
+        from pmoos.output.answers_table import (build_answers_table_docx,
+                                                build_answers_table_xlsx,
+                                                unreviewed_stats)
         with st.spinner("Формирование таблицы ответов…"):
             p2 = build_answers_table_docx(project)
             p3 = build_answers_table_xlsx(project)
+        _st = unreviewed_stats(project)
         st.success("Сформировано.")
+        # ЧЕСТНОЕ ПРЕДУПРЕЖДЕНИЕ (аудит): документ уходит в госорган — видно,
+        # сколько ответов человек не читал и сколько без опоры на источники
+        if _st["не проверено (предложен)"] or _st["отклонено"] or _st["с предупреждениями"]:
+            st.warning(
+                f"⚠ В файле есть непроверенное: не прочитано человеком — "
+                f"{_st['не проверено (предложен)']}, отклонено — {_st['отклонено']}, "
+                f"со слабой опорой на источники — {_st['с предупреждениями']} "
+                f"(из {_st['всего']}). В документе они помечены «⚠НЕ ПРОВЕРЕН» / "
+                f"«✗ОТКЛОНЁН» / «⚠БЕЗ ОПОРЫ» — просмотрите их в М4 перед отправкой.")
         for p in (p2, p3):
             _download(p)
 

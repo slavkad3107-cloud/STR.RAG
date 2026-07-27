@@ -204,6 +204,63 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_consistency_flags_invented_numbers():
+    # АУДИТ (critical): выдуманные величины (г/с, т/год) проходили без единого
+    # предупреждения — для ООС это самый дорогой класс ошибок.
+    from pmoos.pipeline.consistency import compare
+    src = "Валовый выброс азота диоксида составляет 0,0125 г/с."
+    ans = "Выполнен перерасчёт: выброс 0,8412 г/с, что соответствует 3,55 т/год."
+    res = compare(src, ans)
+    assert res["issues"], "выдуманные числа должны попадать в замечания"
+    assert any("числов" in i.lower() for i in res["issues"])
+    # честный ответ по источнику предупреждений не даёт
+    assert not compare(src, "Выброс составляет 0,0125 г/с.")["issues"]
+
+
+def test_normative_edition_mismatch_flagged():
+    # АУДИТ (critical): несуществующая редакция молча подменялась реестровой,
+    # и Блок 2 рапортовал «проблем не найдено».
+    from pmoos.normatives.engine import check_text
+    res = check_text("Расчёт выполнен по СанПиН 2.1.3684-19.")
+    txt = " ".join(p.get("recommendation", "") for p in res["problems"])
+    assert res["problems"], "несовпадение редакции должно попадать в проблемы"
+    assert "редакц" in txt.lower()
+
+
+def test_context_snippet_keeps_found_fragment():
+    # АУДИТ (critical): обрезка «первые 900 символов» выбрасывала саму находку
+    # (строку ИТОГО в конце склеенной таблицы) — модель отвечала вслепую.
+    from pmoos.pipeline.block1_answers import _center_snippet, _format_context
+    long_text = "Шапка таблицы. " + ("данные строки таблицы. " * 200) + "ИТОГО: 12,345 т/год"
+    out = _center_snippet(long_text, 900, "ИТОГО: 12,345 т/год")
+    assert "ИТОГО: 12,345 т/год" in out
+    ctx, srcs = _format_context([{"text": long_text, "payload": {"file": "т.pdf"}}])
+    assert len(ctx) > 2000                      # бюджет контекста поднят с 900
+    assert "ИТОГО" in ctx or len(ctx) >= 3000
+
+
+def test_export_marks_unreviewed(tmp_path, monkeypatch):
+    # АУДИТ (critical): в файл для экспертизы уходили непроверенные и
+    # отклонённые ответы без единой пометки.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json
+    from pmoos.projects import register_project
+    from pmoos.paths import project_paths
+    from pmoos.output.answers_table import unreviewed_stats
+    register_project("ЭКСП")
+    p = project_paths("ЭКСП")["answers"]
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"answers": [
+        {"number": "1", "status": "accepted", "answer": "ок"},
+        {"number": "2", "status": "proposed", "answer": "не читал"},
+        {"number": "3", "status": "rejected", "answer": "плохой"},
+        {"number": "4", "status": "accepted", "answer": "ок", "low_support": True},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    s = unreviewed_stats("ЭКСП")
+    assert s["всего"] == 4 and s["не проверено (предложен)"] == 1
+    assert s["отклонено"] == 1 and s["с предупреждениями"] == 1
+
+
 def test_save_merged_keeps_fresh_answer_for_rejected(tmp_path, monkeypatch):
     # АУДИТ (critical): слияние решений возвращало с диска и «отклонённые»
     # ответы, затирая только что сгенерированный новый — отклонение означает

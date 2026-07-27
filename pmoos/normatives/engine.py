@@ -79,11 +79,29 @@ def check_text(text: str) -> dict[str, Any]:
         k = _key(ref)
         # пытаемся найти точное или частичное совпадение по началу номера
         item = reg.get(k)
+        edition_mismatch = ""
         if item is None:
             for rk, rv in reg.items():
                 if k.startswith(rk[: max(6, len(rk) - 4)]) or rk.startswith(k[: max(6, len(k) - 4)]):
                     item = rv
+                    # СОВПАЛ ТОЛЬКО НОМЕР, а редакция другая: раньше это молча
+                    # подменялось реестровой записью и Блок 2 рапортовал «всё в
+                    # порядке» на несуществующую редакцию (находка аудита) —
+                    # ровно то замечание, которое экспертиза снимает первым.
+                    if k != rk:
+                        edition_mismatch = rk
                     break
+        if item is not None and edition_mismatch:
+            problems.append({
+                "ref": ref,
+                "status": "edition_mismatch",
+                "replaced_by": "",
+                "recommendation": (
+                    f"Проверьте редакцию: в реестре значится «{edition_mismatch}», "
+                    f"а в тексте указано «{ref}». Такой редакции может не "
+                    f"существовать — сверьте по официальному источнику."),
+            })
+            continue
         if item is None:
             unknown.append(ref)
             continue
