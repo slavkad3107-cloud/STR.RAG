@@ -96,6 +96,30 @@ def _ocr_page(pix_bytes: bytes, lang: str) -> str:
     return txt
 
 
+def is_garbled(text: str, *, min_len: int = 80) -> bool:
+    """Текстовый слой PDF ИСПОРЧЕН (нужен OCR, хотя текст формально есть).
+
+    Реальный случай (тома ООС проекта ОПОЧКА): PDF отдаёт «(cid:20)(cid:25)» и
+    «717/14/15-ɉ-1/ɈɈɋ Ʌɢɫɬ» вместо «Лист» — шрифт без нормальной кодировки.
+    Такой «текст» проходил порог min_text_chars, OCR не включался, и в индекс
+    попадал мусор: ни поиск, ни извлечение показателей по этим томам не
+    работали. Признаки: CID-глифы или заметная доля латиницы-расширенной
+    (ɉ ɈɈɋ Ʌɢɫɬ) при малой доле обычной кириллицы.
+    """
+    import re as _re
+    t = (text or "").strip()
+    if len(t) < min_len:
+        return False
+    if t.count("(cid:") >= 3:
+        return True
+    ext = len(_re.findall(r"[ƀ-ɏʰ-˿]", t))   # latin extended
+    cyr = len(_re.findall(r"[а-яА-ЯёЁ]", t))
+    letters = len(_re.findall(r"[^\W\d_]", t, _re.UNICODE)) or 1
+    if ext / letters > 0.08 and ext > cyr * 0.5:
+        return True
+    return False
+
+
 def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
                 lang: str = "rus+eng", max_pages: int = 0) -> list[Page]:
     pages: list[Page] = []
@@ -126,7 +150,7 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
             if not text.strip():
                 empty_text_pages.add(i)
             page_text[i] = text
-            if ocr and len(text.strip()) < min_text_chars:
+            if ocr and (len(text.strip()) < min_text_chars or is_garbled(text)):
                 try:
                     pix = page.get_pixmap(dpi=200)
                     ocr_jobs.append((i, pix.tobytes("png")))

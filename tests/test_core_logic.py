@@ -204,6 +204,56 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_garbled_text_triggers_ocr():
+    # НАЙДЕНО НА ЖИВОМ ПРОЕКТЕ: тома ООС отдавали «(cid:20)» и «Ʌɢɫɬ» вместо
+    # текста — OCR не включался (текста «много»), в индекс шёл мусор.
+    from pmoos.ingest.loaders import is_garbled
+    cid = "(cid:20)(cid:25)(cid:25) " * 12
+    moji = "717/14/15-ɉ-1/ɈɈɋ Ʌɢɫɬ 142 ɂɡɦ Ʉɨɥ.ɭɱ Ʌɢɫɬ ʋ ɞɨɤ. ɉɨɞɩ. Ⱦɚɬɚ 142 " * 3
+    good = ("Валовый выброс загрязняющих веществ составляет 3,55 т/год согласно "
+            "расчёту рассеивания, выполненному в УПРЗА «Эколог». " * 2)
+    assert is_garbled(cid) is True
+    assert is_garbled(moji) is True
+    assert is_garbled(good) is False
+    assert is_garbled("Короткий текст") is False      # мало текста — не судим
+
+
+def test_data_registry(tmp_path, monkeypatch):
+    # ФАЗА 1 (ТЗ): реестр показателей — извлечение с провенансом, ручной ввод,
+    # выбор значения при расхождении между разделами.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.projects import register_project
+    from pmoos.data import registry as R
+    register_project("ДАН")
+    # 1) извлечение с границей предложения (число из соседней фразы не берём)
+    t = ("Площадь застройки 12 345,6 м2. Валовый выброс 3,55 т/год. "
+         "Количество отходов 1 250,4 т/год.")
+    assert R._scan_text(t, R._BY_KEY["area_build"]) == ["12345.6"]
+    assert R._scan_text(t, R._BY_KEY["emission_year"]) == ["3.55"]
+    assert R._scan_text(t, R._BY_KEY["waste_year"]) == ["1250.4"]
+    # 2) ручной ввод
+    R.set_value("ДАН", "workers", "  120 ")
+    reg = R.load_registry("ДАН")
+    assert reg["indicators"]["workers"]["value"] == "120"
+    assert reg["indicators"]["workers"]["source"] == "manual"
+    # 3) расхождение и выбор значения
+    reg["indicators"]["szz"] = {"label": "СЗЗ", "unit": "м", "conflict": True,
+                                "variants": [
+                                    {"value": "300", "unit": "м", "count": 3,
+                                     "sources": [{"file": "том 6.1.pdf", "loc": "стр. 5"}]},
+                                    {"value": "500", "unit": "м", "count": 1,
+                                     "sources": [{"file": "ТКР.pdf", "loc": "стр. 9"}]}]}
+    R.save_registry("ДАН", reg)
+    assert [c["key"] for c in R.conflicts("ДАН")] == ["szz"]
+    R.choose_variant("ДАН", "szz", "500")
+    rec = R.load_registry("ДАН")["indicators"]["szz"]
+    assert rec["value"] == "500" and rec["conflict"] is False
+    assert rec["provenance"]["file"] == "ТКР.pdf"
+    assert R.conflicts("ДАН") == []
+    s = R.summary("ДАН")
+    assert s["заполнено"] >= 2 and s["расхождений"] == 0
+
+
 def test_target_sections_multi(monkeypatch, tmp_path):
     # ТЗ 30.07: приложение работает не только по ООС, но и по ИЭИ и ОЦЕНКЕ —
     # у каждого целевого раздела свой набор разделов-источников.

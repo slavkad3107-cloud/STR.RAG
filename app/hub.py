@@ -470,6 +470,84 @@ def tab_m2(project: str, object_type: str) -> None:
     C.transfer_panel(_cfg())
 
 
+def tab_data(project: str, object_type: str) -> None:
+    """ДАННЫЕ (ТЗ 27-30.07): упор на данные, а не на документы.
+
+    Показатели проекта с провенансом «файл + страница», ручной ввод и выбор
+    значения при расхождениях между разделами (кросс-сверка)."""
+    from pmoos.data import registry as R
+    st.header("ДАННЫЕ · показатели проекта")
+    st.caption("Значения вытаскиваются из ПРОИНДЕКСИРОВАННЫХ томов "
+               "детерминированно (без ИИ — цифра в экспертизе не место для "
+               "догадок) и хранятся в базе проекта, а не в файлах.")
+
+    c1, c2 = st.columns([1, 2])
+    if c1.button("🔍 Собрать показатели из базы", width='stretch', key="dt_scan",
+                 help="Проходит по всем чанкам проекта и собирает значения "
+                      "с указанием файла и страницы."):
+        with st.spinner("Читаю проиндексированные тома…"):
+            try:
+                R.extract_from_index(project, _cfg())
+                st.success("Готово.")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Не удалось собрать: {e}")
+        st.rerun()
+    s = R.summary(project)
+    c2.caption(" · ".join(f"{k}: **{v}**" for k, v in s.items()))
+
+    reg = R.load_registry(project)
+    inds = reg.get("indicators") or {}
+    if not inds:
+        st.info("Показатели ещё не собраны — нажмите «Собрать показатели из базы» "
+                "(нужен проиндексированный проект в М2).")
+        return
+
+    conf = R.conflicts(project)
+    if conf:
+        st.warning(f"⚠ Расхождения между разделами: {len(conf)} показателей — "
+                   f"это то, что экспертиза замечает первым. Выберите верное "
+                   f"значение ниже.")
+
+    rows = []
+    for meta in R.INDICATORS:
+        rec = inds.get(meta["key"], {})
+        prov = rec.get("provenance") or {}
+        rows.append({
+            "Показатель": meta["label"],
+            "Значение": rec.get("value", "") or "—",
+            "Ед.": rec.get("unit", meta["unit"]),
+            "Откуда": prov.get("file", "") or "—",
+            "Место": prov.get("loc", "") or "",
+            "Способ": {"manual": "вручную", "chosen": "выбрано",
+                       "auto": "из документа"}.get(rec.get("source", ""), "нет"),
+            "Расхождение": "⚠ да" if rec.get("conflict") else "",
+        })
+    st.dataframe(rows, width='stretch', hide_index=True)
+
+    with st.expander("✏️ Ввести или исправить значение вручную", expanded=bool(conf)):
+        keys = [m["key"] for m in R.INDICATORS]
+        k = st.selectbox("Показатель", keys, key=f"dt_key_{project}",
+                         format_func=lambda x: R._BY_KEY[x]["label"])
+        rec = inds.get(k, {})
+        if rec.get("variants") and len(rec["variants"]) > 1:
+            st.caption("Найдены РАЗНЫЕ значения — выберите верное:")
+            for v in rec["variants"][:6]:
+                srcs = "; ".join(f"{s.get('file','')} {s.get('loc','')}"
+                                 for s in v.get("sources", [])[:2])
+                cc1, cc2 = st.columns([1, 4])
+                if cc1.button(f"{v['value']} {v['unit']}",
+                              key=f"dt_pick_{k}_{v['value']}", width='stretch'):
+                    R.choose_variant(project, k, v["value"])
+                    st.rerun()
+                cc2.caption(f"встречается {v['count']}× · {srcs or '—'}")
+        val = st.text_input("Своё значение", value=str(rec.get("value", "")),
+                            key=f"dt_val_{project}_{k}")
+        if st.button("💾 Сохранить значение", key=f"dt_save_{k}"):
+            R.set_value(project, k, val)
+            st.success("Сохранено (помечено «вручную»).")
+            st.rerun()
+
+
 def tab_m3(project: str, object_type: str) -> None:
     st.header("МОДУЛЬ 3 · Граф связей разделов и каскад изменений")
     C.module_ai_selector(_cfg(), "module3")
@@ -1384,17 +1462,19 @@ def main() -> None:
     )
     st.caption(ws["next"] + (f"    ·    {detail}" if detail else ""))
 
+    # Названия вкладок по ТЗ 27.07 (ЗАГРУЗКА/БАЗА/ДАННЫЕ/ОТВЕТЫ/…), прежние
+    # номера модулей оставлены в скобках, чтобы не терять привычную навигацию
     tabs = st.tabs([
-        f"{ws['m1']} М1 · Систематизация", f"{ws['m2']} М2 · Индексация",
-        "М3 · Граф связей", f"{ws['m4']} М4 · Ответы",
-        "М5 · Корректировка", "М6 · УПРЗА", "М7 · Качество",
+        f"{ws['m1']} ЗАГРУЗКА (М1)", f"{ws['m2']} БАЗА (М2)",
+        "📊 ДАННЫЕ", f"{ws['m4']} ОТВЕТЫ (М4)",
+        "ВЫГРУЗКА (М5)", "УПРЗА (М6)", "Качество (М7)", "Граф связей",
     ])
     with tabs[0]:
         tab_m1(project, object_type)
     with tabs[1]:
         tab_m2(project, object_type)
     with tabs[2]:
-        tab_m3(project, object_type)
+        tab_data(project, object_type)
     with tabs[3]:
         tab_m4(project, object_type)
     with tabs[4]:
@@ -1403,6 +1483,8 @@ def main() -> None:
         tab_m6(project, object_type)
     with tabs[6]:
         tab_m7(project, object_type)
+    with tabs[7]:
+        tab_m3(project, object_type)
 
 
 if __name__ == "__main__":
