@@ -44,8 +44,23 @@ def build() -> Path:
     # Структура с v0.34: ИСХОДНЫЙ КОД живёт отдельно (папка разработки), а
     # витрина STR.RAG содержит только релизы и резюме — как просил пользователь.
     # Собираем из папки с кодом → в <...>/STR.RAG/releases/STR.RAG-vX.Y.Z/.
-    showcase = APP.parent / "STR.RAG"
-    rel_dir = (showcase / "releases") if showcase.is_dir() else (APP / "releases")
+    # Витрину ищем по СОДЕРЖИМОМУ, а не по точному имени: папку переименовывали
+    # (STR.RAG → STRRAG), и сборка молча уходила внутрь папки разработки.
+    def _find_showcase() -> Path | None:
+        import os
+        env = os.environ.get("STRRAG_RELEASES_DIR", "").strip()
+        if env:
+            return Path(env).parent if Path(env).name == "releases" else Path(env)
+        cands = []
+        for d in sorted(APP.parent.iterdir()):
+            if not d.is_dir() or d.resolve() == APP.resolve() or d.name.startswith("_"):
+                continue
+            if (d / "releases").is_dir() or any(d.glob("РЕЗЮМЕ_*.md")):
+                cands.append(d)
+        return cands[0] if cands else None
+
+    showcase = _find_showcase()
+    rel_dir = ((showcase / "releases") if showcase else (APP / "releases"))
     rel_dir.mkdir(parents=True, exist_ok=True)
     top = f"STR.RAG-v{__version__}"
     folder = rel_dir / top                 # РАСПАКОВАННАЯ папка релиза (запускать из неё)
