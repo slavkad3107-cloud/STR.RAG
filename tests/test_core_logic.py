@@ -204,6 +204,26 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_target_sections_multi(monkeypatch, tmp_path):
+    # ТЗ 30.07: приложение работает не только по ООС, но и по ИЭИ и ОЦЕНКЕ —
+    # у каждого целевого раздела свой набор разделов-источников.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.ingest.sections import (source_section_codes, target_sections,
+                                       target_name, target_short)
+    codes = {t["code"] for t in target_sections()}
+    assert {"OOS", "IEI", "OCENKA"} <= codes
+    oos = set(source_section_codes("линейный", "OOS"))
+    iei = set(source_section_codes("линейный", "IEI"))
+    assert "OOS" in oos and "IEI" in oos          # ООС опирается на изыскания
+    assert "IEI" in iei and "OOS" in iei          # ИЭИ — на ООС и др. изыскания
+    assert oos != iei                              # наборы РАЗНЫЕ
+    assert "ТКР" not in target_name("OOS") and target_short("IEI") == "ИЭИ"
+    # системный промпт называет ЦЕЛЕВОЙ раздел, а не всегда ПМООС
+    from pmoos.pipeline.block1_answers import _sys_for
+    assert "Инженерно-экологические изыскания" in _sys_for("IEI")
+    assert "охране окружающей среды" in _sys_for("OOS")
+
+
 def test_structured_edit_fields_normalized():
     # Жалоба: «не понятно, что на что менять» → структурная правка
     from pmoos.pipeline.block1_answers import _normalize_answer

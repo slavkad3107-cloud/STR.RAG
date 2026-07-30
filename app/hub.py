@@ -1354,8 +1354,27 @@ def main() -> None:
     except Exception:  # noqa: BLE001
         _org = ""
     st.title(f"Объект: {project}")
-    st.caption(f"🏢 Организация: **{_org or '— не указана (задайте в М1)'}** · "
-               f"📐 Тип объекта (ПП-87): **{object_type}** (зафиксирован)")
+    # ЦЕЛЕВОЙ РАЗДЕЛ (ТЗ 30.07): ООС / ИЭИ / ОЦЕНКА — для него готовятся ответы
+    # и выгрузка; от него зависят разделы-источники и формулировки промптов
+    from pmoos.ingest.sections import target_sections as _ts, target_short as _tsh
+    _cfg_h = _cfg()
+    _tcodes = [t["code"] for t in _ts()]
+    _tcur = str(_cfg_h.get("target_section", "OOS") or "OOS")
+    hc1, hc2 = st.columns([3, 2])
+    with hc1:
+        st.caption(f"🏢 Организация: **{_org or '— не указана (задайте в М1)'}** · "
+                   f"📐 Тип объекта (ПП-87): **{object_type}** (зафиксирован)")
+    with hc2:
+        _tnew = st.selectbox(
+            "Раздел, по которому работаем", _tcodes,
+            index=_tcodes.index(_tcur) if _tcur in _tcodes else 0,
+            format_func=lambda c: next((f"{t['short']} — {t['name']}"
+                                        for t in _ts() if t["code"] == c), c),
+            key="hdr_target_section",
+            help="Ответы на замечания и выгрузка готовятся для ЭТОГО раздела. "
+                 "От выбора зависят разделы-источники поиска.")
+        if _tnew != _tcur:
+            _cfg_h.set("target_section", _tnew); _cfg_h.save(); st.rerun()
 
     # Индикатор прохождения workflow: ✅ готово · ◑ частично · ⏳ идёт ·
     # ⚠ ошибка · ○ не начато. Виден прямо на вкладках + подсказка «что дальше».

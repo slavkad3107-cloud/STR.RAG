@@ -31,14 +31,21 @@ from ..core.json_utils import extract_json_safe
 from .consistency import compare
 from ..graph.cascade import explain_cascade, downstream
 
-_SYS = (
-    "Ты — главный инженер-эколог, готовишь ответы на замечания государственной "
-    "экспертизы к разделу ПМООС/ООС проектной документации (Постановление "
-    "Правительства РФ №87). Отвечай профессионально, по существу, со ссылками на "
-    "конкретные данные проекта и действующие нормативы. Не выдумывай данные, "
-    "которых нет в предоставленных фрагментах: если данных не хватает — прямо "
-    "укажи, какой раздел/расчёт нужно дополнить."
+_SYS_TMPL = (
+    "Ты — главный инженер профильного раздела, готовишь ответы на замечания "
+    "государственной экспертизы к разделу «{target}» проектной документации "
+    "(Постановление Правительства РФ №87). Отвечай профессионально, по существу, "
+    "со ссылками на конкретные данные проекта и действующие нормативы. Не "
+    "выдумывай данные, которых нет в предоставленных фрагментах: если данных не "
+    "хватает — прямо укажи, какой раздел/расчёт нужно дополнить."
 )
+# обратная совместимость: прежнее имя используется в тестах и внешних вызовах
+_SYS = _SYS_TMPL.format(target="Перечень мероприятий по охране окружающей среды (ПМООС)")
+
+
+def _sys_for(target: str) -> str:
+    from ..ingest.sections import target_name
+    return _SYS_TMPL.format(target=target_name(target))
 
 _USER_TMPL = (
     "ЗАМЕЧАНИЕ ЭКСПЕРТА №{num}:\n«{remark}»\n\n"
@@ -321,7 +328,10 @@ def run_block1(project: str, cfg: Config | None = None, *,
     # 2) обработка ПАКЕТАМИ (v0.33): между пакетами — сохранение на диск,
     #    прогресс и проверка «Стоп». Обрыв/стоп теряет максимум один пакет.
     pack_size = max(1, int(cfg.get("answers.batch_size", 10)))
-    src_codes = source_section_codes(object_type)
+    # ЦЕЛЕВОЙ РАЗДЕЛ (ТЗ 30.07): ООС / ИЭИ / ОЦЕНКА — от него зависят и набор
+    # разделов-источников, и формулировки промпта, и «том раздела» у ответа
+    target = str(cfg.get("target_section", "OOS") or "OOS")
+    src_codes = source_section_codes(object_type, target)
     for p0 in range(0, len(pending), pack_size):
         if _ans_stop_requested(project):
             _save_merged(project, remarks, by_num, cfg, object_type, partial=True)
@@ -362,8 +372,9 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
         # (payload.file) для top-1, полный пул тратил ~половину rerank-бюджета
         # всего прогона на второстепенное поле.
         try:
+            _target = str(cfg.get("target_section", "OOS") or "OOS")
             oos_per = retr.batch_search(
-                project, queries, sections=["OOS"], top=1, use_expansion=False,
+                project, queries, sections=[_target], top=1, use_expansion=False,
                 candidates=int(cfg.get("retrieval.oos_candidates", 16)))
         except Exception:  # noqa: BLE001
             oos_per = []
@@ -395,7 +406,8 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
             if fs:
                 user_msg = fs + "\n\n" + user_msg
         jobs.append([
-            {"role": "system", "content": _SYS},
+            {"role": "system",
+             "content": _sys_for(str(cfg.get("target_section", "OOS") or "OOS"))},
             {"role": "user", "content": user_msg},
         ])
 

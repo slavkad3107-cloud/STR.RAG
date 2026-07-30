@@ -141,11 +141,56 @@ def section_short(code: str) -> str:
     return s.get("short", code) if s else code
 
 
-def source_section_codes(object_type: str) -> list[str]:
-    """Коды разделов-источников для ответов по ООС (ТКР/ПОС/ИЭИ/КР/ТХ и сам ООС)."""
+# ЦЕЛЕВЫЕ РАЗДЕЛЫ (ТЗ 30.07.2026): приложение готовит ответы и генерацию не
+# только по ООС, но и по ИЭИ, ОЦЕНКЕ (ОВОС) и другим разделам строительной ПД.
+# Для каждого целевого раздела — свой набор источников: ответ по ИЭИ опирается
+# на другие тома, чем ответ по ПМООС.
+TARGET_SECTIONS: dict[str, dict] = {
+    "OOS": {
+        "short": "ООС", "name": "Перечень мероприятий по охране окружающей среды (ПМООС)",
+        "extra_sources": ["IEI", "IGMI", "IGI", "IGEI"],
+    },
+    "IEI": {
+        "short": "ИЭИ", "name": "Инженерно-экологические изыскания",
+        "extra_sources": ["IGMI", "IGI", "IGEI", "IGDI", "OOS"],
+    },
+    "OCENKA": {
+        "short": "ОЦЕНКА", "name": "Оценка воздействия на окружающую среду (ОВОС)",
+        "extra_sources": ["IEI", "IGMI", "OOS"],
+    },
+}
+
+DEFAULT_TARGET = "OOS"
+
+
+def target_sections() -> list[dict]:
+    """Список целевых разделов для выбора в интерфейсе."""
+    return [{"code": c, **v} for c, v in TARGET_SECTIONS.items()]
+
+
+def target_name(code: str) -> str:
+    t = TARGET_SECTIONS.get(code or DEFAULT_TARGET) or TARGET_SECTIONS[DEFAULT_TARGET]
+    return t["name"]
+
+
+def target_short(code: str) -> str:
+    t = TARGET_SECTIONS.get(code or DEFAULT_TARGET) or TARGET_SECTIONS[DEFAULT_TARGET]
+    return t["short"]
+
+
+def source_section_codes(object_type: str, target: str = DEFAULT_TARGET) -> list[str]:
+    """Коды разделов-ИСТОЧНИКОВ для ответов по ЦЕЛЕВОМУ разделу.
+
+    Базовый набор (ТКР/ПОС/КР/ТХ…) задаётся флагом is_source в составе ПД,
+    к нему добавляются изыскания и специфичные для целевого раздела источники."""
     codes = [s["code"] for s in required_sections(object_type) if s.get("is_source")]
     codes += [s["code"] for s in SURVEYS if s.get("is_source")]
-    return sorted(set(codes))
+    t = TARGET_SECTIONS.get(target or DEFAULT_TARGET) or TARGET_SECTIONS[DEFAULT_TARGET]
+    codes += list(t.get("extra_sources") or [])
+    codes.append(target or DEFAULT_TARGET)      # сам целевой раздел тоже источник
+    return sorted({c for c in codes if c in
+                   {s["code"] for s in required_sections(object_type)}
+                   | {s["code"] for s in SURVEYS}})
 
 
 def detect_version_hint(filename: str) -> str | None:
