@@ -1,0 +1,19 @@
+# Запуск Qdrant в режиме сервера (рекомендуется для больших баз: 200 проектов,
+# сотни тысяч чанков — embedded-режим тогда становится узким местом, см. ревью).
+#
+# Использование:
+#   1) docker compose up -d
+#   2) в config.yaml:  qdrant: { mode: server, url: "http://localhost:6333" }
+#      (или задайте в интерфейсе/конфиге), затем запустите индексацию.
+#
+# Данные Qdrant хранятся в томе ./qdrant_storage (вне приложения).
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: pmoos_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST/gRPC API
+      - "6334:6334"   # gRPC
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
