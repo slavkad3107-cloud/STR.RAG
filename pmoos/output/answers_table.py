@@ -37,6 +37,26 @@ _WIDTHS_IN = [0.45, 1.0, 1.15, 2.9, 3.55, 1.95, 0.8]  # сумма ≈ 11.8" (а
 _HEAD_FILL = "1F3B5B"
 
 
+def _edit_block(a: dict) -> str:
+    """Блок «что на что менять» для колонки ОТВЕТ (v0.36).
+
+    Жалоба пользователя: из текста ответа не видно, ЧТО НА ЧТО заменить в томе.
+    Теперь в документ идут адрес правки, текущая формулировка, новая
+    формулировка и перечень документов к приложению."""
+    parts = []
+    if a.get("edit_location"):
+        parts.append(f"ГДЕ ПРАВИТЬ: {a['edit_location']}")
+    if a.get("edit_was"):
+        parts.append(f"БЫЛО: «{a['edit_was']}»")
+    if a.get("edit_shall"):
+        parts.append(f"СТАЛО: «{a['edit_shall']}»")
+    if a.get("attachments"):
+        parts.append("ПРИЛОЖИТЬ: " + "; ".join(a["attachments"]))
+    if a.get("missing_data"):
+        parts.append(f"НЕ ХВАТАЕТ ДАННЫХ: {a['missing_data']}")
+    return ("\n\n" + "\n".join(parts)) if parts else ""
+
+
 def _answers(project: str) -> dict[str, Any]:
     from ..pipeline.block1_answers import load_answers
     return load_answers(project)
@@ -109,6 +129,7 @@ def build_answers_table_docx(project: str, *, out_path: str | Path | None = None
         body = ans if ans else "—"
         if corr and corr not in body:
             body = f"{body}\n\nПравка в ПМООС: {corr}" if ans else f"Правка в ПМООС: {corr}"
+        body += _edit_block(a)   # ГДЕ / БЫЛО / СТАЛО / ПРИЛОЖИТЬ
         cell_text(cells[4], body, size=9)
         cell_text(cells[5], "\n".join(source_ref_lines(a)), size=8, color=(0x44, 0x44, 0x44))
         cell_text(cells[6], _STATUS_RU.get(a.get("status", ""), a.get("status", "")), size=9)
@@ -154,6 +175,7 @@ def build_answers_table_xlsx(project: str, *, out_path: str | Path | None = None
         body = ans if ans else ""
         if corr and corr not in body:
             body = f"{body}\n\nПравка в ПМООС: {corr}" if ans else f"Правка в ПМООС: {corr}"
+        body += _edit_block(a)   # ГДЕ / БЫЛО / СТАЛО / ПРИЛОЖИТЬ
         values = [
             str(a.get("number", "")),
             a.get("category", "") or "",

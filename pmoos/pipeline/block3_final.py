@@ -106,6 +106,16 @@ def run_block3(project: str, cfg: Config | None = None, *, object_type: str | No
     # полнота состава ПД (по инвентаризации) — какие обязательные разделы отсутствуют
     missing = _missing_sections(project, object_type)
 
+    # КОНКРЕТНЫЙ реестр пробелов вместо общей фразы «не хватает исходных данных»
+    # (жалоба пользователя: «надо точнее — чего не хватает, в каких разделах и
+    # что необходимо дать»). Считается детерминированно из ответов, не из ИИ.
+    try:
+        from ..output.gaps import collect_gaps, summary_text
+        gaps = collect_gaps(project)
+        gaps_summary = summary_text(project, gaps)
+    except Exception as e:  # noqa: BLE001
+        gaps, gaps_summary = {"rows": [], "by_kind": {}}, f"(ведомость не собрана: {e})"
+
     out = {
         "project": project, "block": 3, "object_type": object_type,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -119,6 +129,12 @@ def run_block3(project: str, cfg: Config | None = None, *, object_type: str | No
         "normatives": norm,
         "entity_contradictions": contra,
         "missing_required_sections": missing,
+        # ведомость пробелов: по типам, с номерами замечаний и томами
+        "gaps_summary": gaps_summary,
+        "gaps_by_kind": {k: sorted({i["number"] for i in v},
+                                   key=lambda s: (len(s), s))
+                         for k, v in (gaps.get("by_kind") or {}).items()},
+        "gaps_rows": gaps.get("rows", []),
     }
     _save(project, out)
     return out

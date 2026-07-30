@@ -418,8 +418,24 @@ def auto_select(cfg, health: dict | None = None, *, force: bool = False) -> tupl
     cur_ok = bool((health.get(cur) or {}).get("ok"))
     provider, res = ranked[0]
     model = res.get("best_model", "")
+
+    # ВСЕГДА снимаем переопределения модулей, чей провайдер НЕ РАБОТАЕТ: иначе
+    # М4 молча упирался в мёртвого провайдера (реальный случай: default=ollama
+    # жив, а module4=cerebras отдаёт 404 — все ответы падали, хотя приложение
+    # считало, что всё в порядке).
+    _cleaned = []
+    for mod in ("module1", "module3", "module4"):
+        ov = cfg.get(f"ai.modules.{mod}.provider")
+        if ov and not (health.get(ov) or {}).get("ok"):
+            cfg.set(f"ai.modules.{mod}", {})
+            _cleaned.append(f"{mod}:{ov}")
+    if _cleaned:
+        cfg.save()
+        print(f"[health] сняты нерабочие настройки модулей: {', '.join(_cleaned)}",
+              flush=True)
+
     if cur_ok and not force:
-        # текущий жив — оставляем как есть (уважаем выбор пользователя)
+        # текущий жив — остальное не трогаем (уважаем выбор пользователя)
         return cur, cfg.model_for(cur, "answer") or model
     cfg.set("ai.default_provider", provider)
     for role in ("answer", "review"):
@@ -431,11 +447,6 @@ def auto_select(cfg, health: dict | None = None, *, force: bool = False) -> tupl
         host = res.get("host")
         if host:
             cfg.set("ai.providers.ollama.base_url", host)
-    # переопределения модулей: снимаем только НЕРАБОЧИЕ
-    for mod in ("module1", "module3", "module4"):
-        ov = cfg.get(f"ai.modules.{mod}.provider")
-        if ov and not (health.get(ov) or {}).get("ok"):
-            cfg.set(f"ai.modules.{mod}", {})
     cfg.save()
     return provider, model
 

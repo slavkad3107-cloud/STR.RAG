@@ -720,6 +720,24 @@ def tab_m4(project: str, object_type: str) -> None:
                 st.success(f"Готовность к экспертизе: {out.get('ready', '?')}")
                 if out.get("summary"):
                     st.write(out["summary"])
+                # КОНКРЕТНО чего не хватает: типы, номера замечаний, тома
+                if out.get("gaps_summary"):
+                    st.markdown("#### Чего именно не хватает")
+                    st.text(out["gaps_summary"])
+                    _gr = out.get("gaps_rows") or []
+                    if _gr:
+                        st.dataframe(
+                            [{"№": r["number"], "Тип": r["kind_human"],
+                              "Что предоставить": r["need"],
+                              "Том": r["volume"], "Место": r["location"]}
+                             for r in _gr],
+                            width='stretch', hide_index=True)
+                        from pmoos.output.gaps import build_gaps_xlsx
+                        _download(build_gaps_xlsx(project))
+                if out.get("missing_required_sections"):
+                    st.warning("Отсутствуют обязательные разделы ПД: " + ", ".join(
+                        f"{s['code']} — {s['name']}"
+                        for s in out["missing_required_sections"][:12]))
             except Exception as e:  # noqa: BLE001
                 st.error(f"Ошибка блока 3: {e}")
 
@@ -920,6 +938,23 @@ def _render_answers(project: str) -> None:
                        key=f"ans_{project}_{num}", height=140)
     if a.get("correction"):
         st.caption(f"Правка в ПМООС: {a['correction']}")
+    # СТРУКТУРНАЯ ПРАВКА «где / было / стало / приложить» — чтобы было видно,
+    # ЧТО НА ЧТО менять (жалоба: «не понятно, что на что предлагается поменять»)
+    if any(a.get(k) for k in ("edit_location", "edit_was", "edit_shall", "attachments")):
+        with st.container(border=True):
+            st.markdown("**✏️ Что именно править**")
+            if a.get("edit_location"):
+                st.markdown(f"**Где:** {a['edit_location']}")
+            if a.get("edit_was"):
+                st.markdown("**Было (заменить этот текст):**")
+                st.code(a["edit_was"], language=None, wrap_lines=True)
+            if a.get("edit_shall"):
+                st.markdown("**Стало (вставить в том):**")
+                st.code(a["edit_shall"], language=None, wrap_lines=True)
+            if a.get("attachments"):
+                st.markdown("**Приложить / получить:** " + "; ".join(a["attachments"]))
+            if a.get("missing_data"):
+                st.markdown(f"**Не хватает данных:** {a['missing_data']}")
     if a.get("unsupported_refs") and not a.get("low_support"):
         st.warning("⚠ В ответе есть нормативы/вещества/техника, которых нет в найденных "
                    "источниках — достоверность снижена, проверьте ссылки вручную.")

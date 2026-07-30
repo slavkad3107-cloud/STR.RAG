@@ -46,11 +46,25 @@ _USER_TMPL = (
     "Сформируй ответ строго в формате JSON:\n"
     "{{\n"
     '  "answer": "текст ответа эксперту (что сделано/уточнено в ПМООС)",\n'
-    '  "correction": "какую правку внести в раздел ПМООС (конкретно)",\n'
+    '  "correction": "краткая суть правки одной фразой",\n'
+    '  "edit_location": "ТОЧНЫЙ адрес правки: том, раздел, пункт, таблица/рисунок '
+    '(например: Том 6.1, п. 2.1.4, Таблица 2.3). Если адрес не следует из '
+    'источников — пустая строка",\n'
+    '  "edit_was": "как написано СЕЙЧАС — дословная цитата или близкий пересказ '
+    'фрагмента, который надо заменить (пусто, если текста ещё нет и его надо '
+    'ДОБАВИТЬ)",\n'
+    '  "edit_shall": "как должно быть — ГОТОВЫЙ текст для вставки в том, с '
+    'конкретными значениями/ссылками, а не описание задачи",\n'
+    '  "attachments": ["какие документы приложить/получить: точное название и '
+    'кто выдаёт, напр. «Справка Псковского ЦГМС о фоновых концентрациях»"],\n'
     '  "used_sources": [номера фрагментов, реально использованных, напр. [1,3]],\n'
     '  "confidence": "high|medium|low",\n'
-    '  "missing_data": "чего не хватает в документации (или пусто)"\n'
+    '  "missing_data": "какие ИСХОДНЫЕ ДАННЫЕ отсутствуют в документации '
+    '(конкретно: что за данные и в каком томе/разделе их не хватает); пусто, '
+    'если всё есть"\n'
     "}}\n"
+    "ВАЖНО: edit_was/edit_shall — это то, что инженер скопирует в том, поэтому "
+    "пиши формулировками документа, а не «необходимо уточнить». "
     "Верни ТОЛЬКО JSON."
 )
 
@@ -139,9 +153,17 @@ def _normalize_answer(data: dict) -> dict:
         return {"answer": "", "correction": "", "missing_data": "",
                 "confidence": "low", "used_sources": []}
     out = dict(data)
-    for key in ("answer", "correction", "missing_data"):
+    # edit_location/was/shall — структурированная правка «где / было / стало»
+    # (жалоба пользователя: «не понятно, что на что менять»)
+    for key in ("answer", "correction", "missing_data",
+                "edit_location", "edit_was", "edit_shall"):
         v = out.get(key)
         out[key] = v.strip() if isinstance(v, str) else ("" if v is None else str(v))
+    att = out.get("attachments")
+    if isinstance(att, str):
+        att = [x.strip() for x in att.split(";") if x.strip()]
+    out["attachments"] = [str(x).strip() for x in att if str(x).strip()] \
+        if isinstance(att, list) else []
     c = str(out.get("confidence", "") or "").strip().lower()
     c = _CONF_MAP.get(c, c)
     out["confidence"] = c if c in _CONF_VALUES else ("low" if not out.get("answer") else "medium")
@@ -456,6 +478,11 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
             "category": (getattr(r, "category", "") or _classify_remark(r.text)),
             "answer": answer_text,
             "correction": data.get("correction", ""),
+            # структурированная правка: где / было / стало / что приложить
+            "edit_location": data.get("edit_location", ""),
+            "edit_was": data.get("edit_was", ""),
+            "edit_shall": data.get("edit_shall", ""),
+            "attachments": data.get("attachments", []),
             "confidence": confidence,
             "missing_data": data.get("missing_data", ""),
             "sources": used_sources,

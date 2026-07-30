@@ -204,6 +204,52 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_structured_edit_fields_normalized():
+    # Жалоба: «не понятно, что на что менять» → структурная правка
+    from pmoos.pipeline.block1_answers import _normalize_answer
+    r = _normalize_answer({"answer": "текст", "edit_location": " Том 6.1, п. 2.1.4 ",
+                           "edit_was": "земли лесного фонда отсутствуют",
+                           "edit_shall": "участок пересекает кварталы 178, 560",
+                           "attachments": "письмо Минсельхоза; справка ЦГМС"})
+    assert r["edit_location"] == "Том 6.1, п. 2.1.4"
+    assert r["attachments"] == ["письмо Минсельхоза", "справка ЦГМС"]
+    r2 = _normalize_answer({"answer": "x"})
+    assert r2["edit_location"] == "" and r2["attachments"] == []
+
+
+def test_gaps_register(tmp_path, monkeypatch):
+    # «Надо точнее: чего не хватает, в каких разделах, что дать» → ведомость
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json
+    from pmoos.projects import register_project
+    from pmoos.paths import project_paths
+    from pmoos.output.gaps import collect_gaps, summary_text, build_gaps_xlsx
+    register_project("ПРОБЕЛ")
+    p = project_paths("ПРОБЕЛ")["answers"]
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"answers": [
+        {"number": "1", "remark": "р1", "answer": "о1", "oos_volume": "том 6.1",
+         "edit_location": "Том 6.1, п. 2.1.4", "status": "proposed",
+         "missing_data": "нет ответа Минсельхоза Псковской области",
+         "attachments": ["Справка Псковского ЦГМС о фоновых концентрациях"]},
+        {"number": "2", "remark": "р2", "answer": "о2", "oos_volume": "том 6.2",
+         "status": "accepted",
+         "attachments": ["Договор с полигоном ТБО на размещение отходов"]},
+        {"number": "3", "remark": "р3", "answer": "о3", "status": "accepted",
+         "low_support": True},          # нет опоры → тоже пробел
+        {"number": "4", "remark": "р4", "answer": "о4", "status": "accepted"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    g = collect_gaps("ПРОБЕЛ")
+    assert g["remarks_with_gaps"] == ["1", "2", "3"]      # №4 без пробелов
+    kinds = set(g["by_kind"])
+    assert "Справки и согласования уполномоченных органов" in kinds
+    assert "Договоры и лицензии" in kinds
+    txt = summary_text("ПРОБЕЛ", g)
+    assert "замечания №" in txt and "том 6.1" in txt.lower()
+    out = build_gaps_xlsx("ПРОБЕЛ")
+    assert out.exists() and out.stat().st_size > 3000
+
+
 def test_consistency_flags_invented_numbers():
     # АУДИТ (critical): выдуманные величины (г/с, т/год) проходили без единого
     # предупреждения — для ООС это самый дорогой класс ошибок.
