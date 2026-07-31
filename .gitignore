@@ -1,3 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ОКРУЖЕНИЕ / КЛЮЧИ. Репозиторий публичный (github.com/slavkad3107-cloud/STR.RAG),
+# поэтому .env с настоящими ключами провайдеров сюда попасть не должен —
+# в репозитории лежит только шаблон .env.example (его чистоту стережёт тест).
+.env
+
+# локальные данные/индексы/модели (живут в %USERPROFILE%\.pmoos-rag)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+qdrant/
+models/
+
+# ОС / редакторы
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
 
 # нумерованные релизы собираются в витрину, в репозитории им не место
 releases/
