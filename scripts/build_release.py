@@ -102,7 +102,8 @@ def build() -> Path:
                 pass                    # занято — не критично, перезапишется
 
     # 3) ПРОВЕРКА ЦЕЛОСТНОСТИ: релиз без этих файлов не запустится
-    must = ["app/hub.py", "app/components.py", "pmoos/__init__.py", "run.bat"]
+    must = ["app/hub.py", "app/components.py", "app/native.py", "pmoos/__init__.py",
+            "run.bat", "СТРОЙРАГ.bat"]
     missing = [m for m in must if not (folder / m).exists()]
     if missing or failed:
         print("ОШИБКА СБОРКИ: релиз НЕПОЛНЫЙ.")
@@ -120,7 +121,8 @@ def build() -> Path:
 
     size_mb = zip_out.stat().st_size / 2**20
     print(f"Собран релиз v{__version__} «{__codename__}» ({len(files)} файлов):")
-    print(f"  папка (запускать отсюда): {folder}\\run.bat")
+    print(f"  папка (запускать отсюда): {folder}\\СТРОЙРАГ.bat  (нативная оболочка)")
+    print(f"  запасной вход (браузер):  {folder}\\run.bat")
     print(f"  архив (перенос):          {zip_out.name}  ({size_mb:.1f} МБ)")
     return folder
 

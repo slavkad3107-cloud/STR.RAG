@@ -308,10 +308,61 @@ def test_section_draft(tmp_path, monkeypatch):
     assert out.exists() and out.stat().st_size > 20000
     from docx import Document
     txt = "\n".join(par.text for par in Document(str(out)).paragraphs)
-    assert "Мероприятия по охране атмосферного воздуха" in txt
+    # структура ООС — по ЭТАЛОНУ пользователя: начинается с «Введение»,
+    # воздух отдельной главой (а не «Мероприятия по охране…» из общих схем)
+    assert "1. Введение" in txt
+    assert "Охрана атмосферного воздуха" in txt
     assert "◈ ВНЕСТИ" in txt                              # недостающее помечено
     assert txt.count("по замечанию №7") == 1              # ровно одна глава
     assert set(CHAPTERS) == {"OOS", "IEI", "OCENKA"}
+    # каждый показатель приписан к существующей главе ООС (защита от съезда
+    # индексов при правке структуры эталона)
+    from pmoos.output.section_draft import _IND_CHAPTER_OOS
+    assert all(0 <= i < len(CHAPTERS["OOS"]) for i in _IND_CHAPTER_OOS.values())
+    # выброс т/год «прописан» в главу воздуха, а не в соседнюю
+    air = CHAPTERS["OOS"].index("Охрана атмосферного воздуха (оценка на периоды "
+                                "строительства и эксплуатации, мероприятия, "
+                                "предложения по нормативам ПДВ)")
+    assert _IND_CHAPTER_OOS["emission_year"] == air
+    # структуры взяты из ЭТАЛОНОВ пользователя (OneDrive\Формы\Разработка)
+    assert "Акустическое воздействие" in " ".join(CHAPTERS["OOS"])
+    assert "Анализ фондовых данных" in " ".join(CHAPTERS["IEI"])
+    assert "водным биологическим ресурсам" in " ".join(CHAPTERS["OCENKA"])
+
+
+def test_single_model_mode(tmp_path, monkeypatch):
+    # ТЗ 31.07: «1 модель во всех местах, а то путаница и зависалово»
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.config import load_config
+    cfg = load_config()
+    cfg.set("ai.default_provider", "mistral")
+    cfg.set("ai.modules.module4.provider", "deepseek")   # старое переопределение
+    cfg.save()
+    cfg2 = load_config()
+    assert cfg2.resolve_provider("module4") == "mistral"   # единый режим
+    assert cfg2.resolve_provider("module1") == "mistral"
+    cfg2.set("ai.single_model", False)
+    cfg2.save()
+    assert load_config().resolve_provider("module4") == "deepseek"  # режим выключен
+
+
+def test_native_shell_wiring():
+    # нативная оболочка (ТЗ 31.07: «переделываем со стримлита, как в ЭКОДОК»)
+    import ast
+    from pathlib import Path as _P
+    src = _P(__file__).resolve().parent.parent / "app" / "native.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    methods = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    # все шесть вкладок ТЗ реализованы
+    for m in ("_tab_upload", "_tab_index", "_tab_data", "_tab_answers",
+              "_tab_export", "_tab_uprza"):
+        assert m in methods, f"нет вкладки {m}"
+    text = src.read_text(encoding="utf-8")
+    # опирается на те же модули, что и веб-версия (без дублирования логики)
+    for mod in ("pmoos.index.indexer", "pmoos.data.registry",
+                "pmoos.pipeline.block1_answers", "pmoos.output.section_draft",
+                "pmoos.output.uprza_import", "pmoos.output.changes_table"):
+        assert mod.split(".")[-1] in text
 
 
 def test_garbled_text_triggers_ocr():

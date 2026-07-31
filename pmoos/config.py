@@ -318,7 +318,10 @@ class Config:
         return self.get("ai.default_provider", "deepseek")
 
     def resolve_provider(self, module: str | None = None) -> str:
-        if module:
+        # ТЗ 31.07: «использовать 1 модель во всех местах, а то путаница и
+        # зависалово» — по умолчанию модульные переопределения игнорируются.
+        # Отключить единый режим: ai.single_model: false в config.yaml.
+        if module and not bool(self.get("ai.single_model", True)):
             p = self.get(f"ai.modules.{module}.provider")
             if p:
                 return p

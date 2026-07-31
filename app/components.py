@@ -122,6 +122,27 @@ def module_ai_selector(cfg, module: str, *, title: str | None = None) -> None:
     from pmoos.core.ollama_utils import ollama_available, list_installed_models
 
     cur = cfg.resolve_provider(module)
+
+    # ЕДИНАЯ МОДЕЛЬ (ТЗ 31.07: «1 модель во всех местах, а то путаница и
+    # зависалово»): выбор провайдера по модулям скрыт, остаётся только окно
+    # доп. задания ИИ. Сменить модель — в сайдбаре (или ai.single_model: false).
+    if bool(cfg.get("ai.single_model", True)):
+        _mdl = cfg.model_for(cur, "answer") or "модель не задана"
+        st.caption(f"🤖 ИИ (единый для всех модулей): "
+                   f"{PROVIDER_LABEL.get(cur, cur)} · {_mdl} — настройка в сайдбаре")
+        _ikey = f"ai.modules.{module}.instruction"
+        _cur_instr = str(cfg.get(_ikey, "") or "")
+        _new_instr = st.text_area(
+            "📝 Доп. задание ИИ для этого модуля (необязательно)",
+            value=_cur_instr, key=f"instr_{module}", height=80,
+            placeholder="Например: «всегда указывай пункт норматива», "
+                        "«таблицы выводи как в томе 6.1»")
+        if _new_instr.strip() != _cur_instr.strip():
+            cfg.set(_ikey, _new_instr.strip())
+            cfg.save()
+            st.caption("✅ Задание сохранено.")
+        return
+
     if title is None:
         _mdl = cfg.model_for(cur, "answer") or "модель не задана"
         _key = "" if (cfg.has_key(cur) or cur == "ollama") else " · ⚠ нет ключа"
