@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from ..paths import project_paths
@@ -206,17 +207,85 @@ def extract_from_index(project: str, cfg=None, *, progress=None,
             return (pri, -v["count"])
 
         rec["variants"] = sorted(agg.values(), key=_rank)
-        rec["conflict"] = len(rec["variants"]) > 1
-        # автоматически принимаем самый частый вариант, если пользователь не выбрал
-        if rec.get("source") != "manual" and rec["variants"]:
-            top = rec["variants"][0]
-            rec["value"] = top["value"]
-            rec["source"] = "auto"
-            rec["provenance"] = top["sources"][0] if top["sources"] else {}
+        # ручной ввод и осознанный выбор варианта переживают пересбор, их
+        # РАЗРЕШЁННЫЙ конфликт не «воскресает» (ревью: авто-сбор после каждой
+        # индексации молча откатывал решение пользователя и снова ставил ⚠)
+        if rec.get("source") in ("manual", "chosen"):
+            rec["conflict"] = False
+        else:
+            rec["conflict"] = len(rec["variants"]) > 1
+            if rec["variants"]:
+                top = rec["variants"][0]
+                rec["value"] = top["value"]
+                rec["source"] = "auto"
+                rec["provenance"] = top["sources"][0] if top["sources"] else {}
         rec.pop("candidates", None)             # в файле держим только сводку
+
+    # СНИМКИ ЛИСТОВ-ИСТОЧНИКОВ сохраняем СЕЙЧАС: индексатор вызывает сбор до
+    # удаления исходников, а без этого кнопка «Показать лист-источник» была
+    # мертва в дефолтной конфигурации (ревью). ~13 PNG на проект — копейки.
+    scans_dir = project_paths(project)["root"] / "scans"
+    for key, rec in inds.items():
+        prov = rec.get("provenance") or {}
+        if not str(rec.get("value", "")).strip() or not prov.get("file"):
+            continue
+        try:
+            png = render_source_page(project, prov.get("file", ""), prov.get("loc", ""))
+            if png:
+                scans_dir.mkdir(parents=True, exist_ok=True)
+                (scans_dir / f"{key}.png").write_bytes(png)
+                rec["scan"] = f"scans/{key}.png"
+        except Exception:  # noqa: BLE001 — снимок вторичен, сбор важнее
+            continue
+
     reg["scanned_chunks"] = seen
     save_registry(project, reg)
     return reg
+
+
+def render_source_page(project: str, file: str, loc: str) -> bytes | None:
+    """PNG-снимок ЛИСТА-ИСТОЧНИКА (ТЗ: «файл и скан/фото листа откуда данные»).
+
+    Работает, пока исходник лежит в tmp_uploads проекта; после «Очистить
+    временные файлы» вернёт None — тогда UI честно говорит, что скан недоступен."""
+    import re as _re
+    if not file:
+        return None
+    # provenance.file приходит из данных — берём только базовое имя (без ../)
+    src = project_paths(project)["uploads"] / Path(str(file).replace("\\", "/")).name
+    if not src.exists() or src.suffix.lower() != ".pdf":
+        if src.exists() and src.suffix.lower() in (".jpg", ".jpeg", ".png"):
+            try:
+                return src.read_bytes()
+            except OSError:
+                return None
+        if src.exists() and src.suffix.lower() in (".tif", ".tiff", ".bmp"):
+            # браузер не показывает tiff/bmp — конвертируем в PNG (ревью)
+            try:
+                import io
+                from PIL import Image
+                buf = io.BytesIO()
+                Image.open(str(src)).convert("RGB").save(buf, format="PNG")
+                return buf.getvalue()
+            except Exception:  # noqa: BLE001
+                return None
+        return None
+    m = _re.search(r"стр\.\s*(\d+)", loc or "")
+    if not m:
+        return None
+    page_no = int(m.group(1))
+    try:
+        import fitz
+        doc = fitz.open(str(src))
+        try:
+            if not (1 <= page_no <= doc.page_count):
+                return None
+            pix = doc[page_no - 1].get_pixmap(dpi=120)
+            return pix.tobytes("png")
+        finally:
+            doc.close()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def set_value(project: str, key: str, value: str, *, unit: str = "",

@@ -22,6 +22,16 @@ def gdrive_direct(url: str):
 
 def download_remarks_url(project: str, url: str) -> Path:
     """Скачивает файл замечаний по ссылке в постоянную папку remarks/ проекта."""
+    rdir = project_paths(project)["remarks_dir"]
+    return fetch_to(url, rdir, default_stem="замечания_по_ссылке")
+
+
+def fetch_to(url: str, dest_dir: Path, *, default_stem: str = "файл_по_ссылке") -> Path:
+    """Скачать ЛЮБОЙ файл по ссылке (https / Google Drive) в указанную папку.
+
+    ТЗ 27.07: загрузка исходников ПД «по ссылке» — та же логика, что для файла
+    замечаний (подтверждение больших файлов Drive, имя из Content-Disposition,
+    защита от ../ и запрещённых символов Windows)."""
     import requests
     from urllib.parse import urlparse, unquote
     direct, fid = gdrive_direct(url.strip())
@@ -43,7 +53,7 @@ def download_remarks_url(project: str, url: str) -> Path:
     if m:
         name = unquote(m.group(1)).strip()
     if not name:
-        name = Path(urlparse(direct).path).name or "замечания_по_ссылке"
+        name = Path(urlparse(direct).path).name or default_stem
         if "." not in Path(name).name:
             name += (".pdf" if "pdf" in ctype else
                      ".docx" if "wordprocessingml" in ctype else
@@ -53,12 +63,13 @@ def download_remarks_url(project: str, url: str) -> Path:
     # (без ../../ — защита от выхода за папку проекта, аудит) и вычищаем
     # запрещённые для Windows символы (иначе write_bytes падал бы OSError)
     name = Path(str(name).replace("\\", "/")).name
-    name = re.sub(r'[<>:"|?*]', "_", name).strip() or "замечания_по_ссылке.bin"
-    rdir = project_paths(project)["remarks_dir"]
-    rdir.mkdir(parents=True, exist_ok=True)
-    out = rdir / name
+    name = re.sub(r'[<>:"|?*]', "_", name).strip() or f"{default_stem}.bin"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    out = dest_dir / name
     out.write_bytes(r.content)
     if out.stat().st_size < 64:
-        raise RuntimeError(f"скачан подозрительно маленький файл ({out.stat().st_size} байт) — "
+        size = out.stat().st_size
+        out.unlink(missing_ok=True)   # огрызок не оставляем в проекте (ревью)
+        raise RuntimeError(f"скачан подозрительно маленький файл ({size} байт) — "
                            f"проверьте доступ по ссылке.")
     return out

@@ -81,6 +81,41 @@ def _save_uploads(project: str, files) -> int:
     overwritten: list[str] = []
     for f in files or []:
         try:
+            # zip (ТЗ 27.07: «zip/папка») — распаковываем поддерживаемые файлы,
+            # вложенные папки сплющиваются в имя «папка__файл.pdf»
+            if f.name.lower().endswith(".zip"):
+                import io
+                import zipfile
+                from pmoos.ingest.loaders import SUPPORTED_EXT as _SE
+                with zipfile.ZipFile(io.BytesIO(f.getbuffer())) as zf:
+                    for zi in zf.infolist():
+                        if zi.is_dir() or Path(zi.filename).suffix.lower() not in _SE:
+                            continue
+                        if zi.file_size > 1_500_000_000:      # защита от zip-бомбы
+                            st.warning(f"Пропущен слишком большой файл в архиве: "
+                                       f"{zi.filename} ({zi.file_size // 2**20} МБ)")
+                            continue
+                        try:
+                            raw_name = zi.filename.encode("cp437").decode("cp866")
+                        except Exception:  # noqa: BLE001 — не-русский zip
+                            raw_name = zi.filename
+                        _parts = raw_name.replace("\\", "/").strip("/").split("/")
+                        # мусор macOS-архивов: __MACOSX/ и файлы ._*.pdf (ревью)
+                        if any(p == "__MACOSX" for p in _parts) or \
+                                _parts[-1].startswith("._"):
+                            continue
+                        flat = re.sub(r'[<>:"|?*]', "_", "__".join(_parts))
+                        if not flat:
+                            continue
+                        dest = up / flat
+                        if dest.exists():
+                            overwritten.append(flat)
+                        # потоково, не в память: том ПД бывает >1 ГБ (ревью)
+                        import shutil as _shz
+                        with zf.open(zi) as _src, open(dest, "wb") as _dst:
+                            _shz.copyfileobj(_src, _dst, 1 << 20)
+                        n += 1
+                continue
             dest = up / f.name
             if dest.exists():
                 overwritten.append(f.name)
@@ -343,10 +378,64 @@ def tab_m1(project: str, object_type: str) -> None:
             st.error(f"Не удалось сохранить организацию: {_e}")
 
     files = st.file_uploader(
-        "Загрузите файлы ПД (pdf / docx / xlsx). Можно перетащить много файлов.",
-        type=["pdf", "docx", "xlsx", "xlsm", "txt", "md", "csv"],
+        "Загрузите файлы ПД. Папку можно упаковать в zip — распакуется сама.",
+        type=["pdf", "docx", "xlsx", "xlsm", "txt", "md", "csv",
+              "jpg", "jpeg", "png", "tif", "tiff", "bmp", "xml", "zip"],
         accept_multiple_files=True,
+        help="jpg/png/tif — фото и сканы листов (распознаются OCR), xml — данные, "
+             "zip — архив с файлами/папками (ТЗ 27.07).",
     )
+
+    # ── ЗАГРУЗКА ПО ССЫЛКЕ И ИЗ ПАПКИ (ТЗ 27.07: «zip/папка/по ссылке») ──
+    with st.expander("🌐 Загрузить по ссылке или из папки на диске"):
+        from pmoos.ingest.remarks_fetch import fetch_to as _fetch_to
+        _url_pd = st.text_input(
+            "Ссылка на файл ПД (https, в т.ч. Google Drive «по ссылке»)",
+            key=f"m1_url_{project}",
+            placeholder="https://drive.google.com/file/d/…")
+        if st.button("⬇ Скачать в проект", key="m1_url_dl", disabled=not _url_pd):
+            try:
+                from pmoos.ingest.loaders import SUPPORTED_EXT as _SE2
+                up = project_paths(project)["uploads"]
+                up.mkdir(parents=True, exist_ok=True)
+                p = _fetch_to(_url_pd.strip(), up)
+                if p.suffix.lower() == ".zip":
+                    st.info(f"Скачан архив {p.name} — загрузите его через поле "
+                            f"выше, чтобы распаковать в проект.")
+                elif p.suffix.lower() not in _SE2:
+                    st.warning(f"Скачан {p.name}, но формат "
+                               f"«{p.suffix}» не индексируется — файл будет "
+                               f"пропущен. Поддержка: pdf/docx/xlsx/jpg/xml и др.")
+                else:
+                    st.success(f"Скачан: {p.name} ({p.stat().st_size // 1024} КБ). "
+                               f"Дальше — индексация в БАЗЕ.")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Не удалось скачать: {e}")
+        _dir_pd = st.text_input(
+            "…или путь к ПАПКЕ на этом компьютере (файлы скопируются в проект)",
+            key=f"m1_dir_{project}", placeholder=r"D:\Проекты\ОПОЧКА\ПД")
+        if st.button("📂 Забрать файлы из папки", key="m1_dir_go", disabled=not _dir_pd):
+            src = Path(_dir_pd.strip().strip('"'))
+            if not src.is_dir():
+                st.error("Папка не найдена — проверьте путь.")
+            else:
+                import shutil as _sh
+                from pmoos.ingest.loaders import SUPPORTED_EXT as _SE
+                up = project_paths(project)["uploads"]
+                up.mkdir(parents=True, exist_ok=True)
+                _n = 0
+                for f in sorted(src.rglob("*")):
+                    if f.is_file() and f.suffix.lower() in _SE:
+                        # имя = сплющенный относительный путь: одноимённые файлы
+                        # из разных подпапок больше не затирают друг друга (ревью)
+                        _flat = re.sub(r'[<>:"|?*]', "_", "__".join(
+                            f.relative_to(src).parts))
+                        try:
+                            _sh.copy2(f, up / _flat)
+                            _n += 1
+                        except OSError:
+                            continue
+                st.success(f"Скопировано файлов: {_n} (вложенные папки просмотрены).")
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("📥 Загрузить и систематизировать", disabled=not files, width='stretch'):
@@ -467,6 +556,28 @@ def tab_m2(project: str, object_type: str) -> None:
                "стабильные ID чанков). Работает на обычном компьютере (CPU); "
                "видеокарта NVIDIA ускоряет, но не обязательна.")
     C.indexing_panel(project, object_type)
+
+    # ── НАЙДЕННЫЕ ДАННЫЕ (ТЗ 27.07: «в процессе загрузки документов должны
+    # появляться найденные данные и источник») — показатели собираются
+    # автоматически по завершении индексации и видны здесь сразу
+    from pmoos.data import registry as _R
+    _reg = _R.load_registry(project)
+    _inds = _reg.get("indicators") or {}
+    _found = [(m, _inds[m["key"]]) for m in _R.INDICATORS
+              if str((_inds.get(m["key"]) or {}).get("value", "")).strip()]
+    if _found:
+        with st.expander(f"📊 Найденные данные: {len(_found)} показателей "
+                         f"(подробно и правка — во вкладке ДАННЫЕ)",
+                         expanded=False):
+            st.dataframe(
+                [{"Показатель": m["label"],
+                  "Значение": f"{r.get('value','')} {r.get('unit','')}",
+                  "Источник": f"{(r.get('provenance') or {}).get('file','')} "
+                              f"{(r.get('provenance') or {}).get('loc','')}",
+                  "⚠": "расхождение" if r.get("conflict") else ""}
+                 for m, r in _found],
+                width='stretch', hide_index=True)
+
     C.transfer_panel(_cfg())
 
 
@@ -546,6 +657,27 @@ def tab_data(project: str, object_type: str) -> None:
             R.set_value(project, k, val)
             st.success("Сохранено (помечено «вручную»).")
             st.rerun()
+        # СКАН ЛИСТА-ИСТОЧНИКА (ТЗ: «файл и скан/фото листа откуда данные взяты»)
+        _prov = rec.get("provenance") or {}
+        if _prov.get("file") and _prov.get("file") != "введено вручную":
+            if st.button("🖼 Показать лист-источник", key=f"dt_scan_{k}"):
+                # сначала сохранённый при сборе снимок (живёт и после чистки
+                # исходников), затем живой рендер, затем честное объяснение
+                png = None
+                if rec.get("scan"):
+                    _sp = project_paths(project)["root"] / rec["scan"]
+                    if _sp.exists():
+                        png = _sp.read_bytes()
+                if png is None:
+                    png = R.render_source_page(project, _prov.get("file", ""),
+                                               _prov.get("loc", ""))
+                if png:
+                    st.image(png, caption=f"{_prov.get('file')} · {_prov.get('loc')}")
+                else:
+                    st.info("Скан недоступен: исходный файл удалён из проекта "
+                            "после индексации (или страница не определена). "
+                            "Загрузите том заново в ЗАГРУЗКЕ и нажмите "
+                            "«Собрать показатели» — снимок сохранится.")
 
 
 def tab_m3(project: str, object_type: str) -> None:
@@ -1226,6 +1358,44 @@ def tab_m5(project: str, object_type: str) -> None:
         for p in (p2, p3):
             _download(p)
 
+    # ── СВОДНАЯ ТАБЛИЦА ИЗМЕНЕНИЙ (ТЗ 27.07: «что на что меняется — в виде
+    # таблицы, чёткие видимые изменения») ──
+    st.subheader("📋 Таблица изменений: что на что меняется")
+    from pmoos.output.changes_table import build_changes_xlsx, changes_rows
+    _chg = changes_rows(project)
+    if not _chg:
+        st.caption("Правок пока нет — они появляются после генерации ответов в "
+                   "ОТВЕТАХ (поля «где/было/стало»).")
+    else:
+        _st_ru = {"proposed": "⚠ не проверен", "accepted": "принят",
+                  "edited": "правка"}
+        st.dataframe(
+            [{"№": r["number"], "ГДЕ": r["location"], "БЫЛО": r["was"],
+              "СТАЛО": r["shall"], "Приложить": r["attachments"],
+              "Статус": _st_ru.get(r["status"], r["status"])}
+             for r in _chg],
+            width='stretch', hide_index=True)
+        if st.button("📥 Скачать таблицу изменений (xlsx)", key="m5_changes"):
+            _download(build_changes_xlsx(project))
+
+    # ── СОЗДАНИЕ РАЗДЕЛА ИЗ БАЗЫ (ТЗ 27.07: «создание по БАЗЕ проекта с
+    # довнесением/редактированием необходимых дополнительных данных») ──
+    st.subheader("🏗 Создать каркас раздела из базы")
+    _tgt_cur = str(_cfg().get("target_section", "OOS") or "OOS")
+    st.caption(f"Целевой раздел: **{_tgt_cur}** (меняется в шапке). Каркас = "
+               f"структура глав + показатели из ДАННЫХ с источниками + "
+               f"результаты УПРЗА + принятые правки из ОТВЕТОВ; недостающее "
+               f"помечено «◈ ВНЕСТИ». Текст глав пишет инженер.")
+    if st.button("🏗 Сформировать каркас (docx)", key="m5_draft", width='stretch'):
+        from pmoos.output.section_draft import build_section_draft
+        with st.spinner("Сборка каркаса раздела из базы…"):
+            try:
+                _dp = build_section_draft(project, _tgt_cur)
+                st.success("Каркас сформирован.")
+                _download(_dp)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Не удалось собрать каркас: {e}")
+
     with st.expander("🔬 Дополнительно"):
         if st.button("🧪 Выгрузить обучающие тройки (anchor/positive/negative)",
                      key="m5_triples",
@@ -1239,10 +1409,43 @@ def tab_m5(project: str, object_type: str) -> None:
 
 
 def tab_m6(project: str, object_type: str) -> None:
-    st.header("МОДУЛЬ 6 · Выгрузка для УПРЗА «Эколог» / ИНТЕГРАЛ")
-    st.caption("Модуль формирует ТОЛЬКО файлы для УПРЗА: источники выбросов + "
-               "перечень ЗВ (коды) + задание на ввод. Геометрию источников и "
-               "привязку значений заполняет инженер.")
+    st.header("МОДУЛЬ 6 · УПРЗА «Эколог» / ИНТЕГРАЛ: выгрузка и загрузка")
+    st.caption("Выгрузка: источники выбросов + перечень ЗВ (коды) + задание на "
+               "ввод (геометрию и привязку заполняет инженер). Загрузка: импорт "
+               "результатов расчёта рассеивания обратно в проект.")
+
+    # ── ЗАГРУЗКА ИЗ УПРЗА (ТЗ 27.07: «выгрузка/загрузка в/из данных УПРЗА») ──
+    with st.expander("📥 Загрузить результаты расчёта ИЗ УПРЗА", expanded=False):
+        st.caption("Подойдёт выгрузка результатов рассеивания из «Эколога» "
+                   "(txt / csv / xlsx). Парсер ищет строки «код ЗВ + числа» и "
+                   "берёт максимум в долях ПДК по каждому веществу.")
+        _uf = st.file_uploader("Файл результатов УПРЗА",
+                               type=["txt", "csv", "xlsx", "xlsm"],
+                               key=f"uprza_in_{project}")
+        if _uf is not None and st.button("Импортировать", key="uprza_imp"):
+            from pmoos.output.uprza_import import import_uprza_results
+            _tmp = project_paths(project)["out"] / f"уприза_вход_{_uf.name}"
+            _tmp.parent.mkdir(parents=True, exist_ok=True)
+            _tmp.write_bytes(_uf.getbuffer())
+            try:
+                _res = import_uprza_results(project, _tmp)
+                st.success(f"Импортировано веществ: {len(_res['rows'])}, "
+                           f"превышений >1 ПДК: {len(_res['exceedances'])}.")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Не удалось разобрать файл: {e}")
+        from pmoos.output.uprza_import import load_uprza_results
+        _r0 = load_uprza_results(project)
+        if _r0:
+            st.caption(f"Загружено: {_r0['file']} · {_r0['imported_at']}")
+            if _r0.get("exceedances"):
+                st.warning("⚠ ПРЕВЫШЕНИЯ (>1 ПДК): " + ", ".join(
+                    f"{r['code']} {r['name'] or ''} — {r['max_pdk']:.2f} ПДК"
+                    for r in _r0["exceedances"][:8]))
+            st.dataframe(
+                [{"Код ЗВ": r["code"], "Вещество": r["name"] or "—",
+                  "Макс, доли ПДК": r["max_pdk"]}
+                 for r in _r0["rows"][:40]],
+                width='stretch', hide_index=True)
     if st.button("📤 Сформировать выгрузку", width='stretch'):
         from pmoos.output.uprza_export import build_uprza_export, collect_emissions
         rows, extra = collect_emissions(project)

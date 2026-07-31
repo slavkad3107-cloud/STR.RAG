@@ -306,6 +306,50 @@ def extract_file(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
             return [{"loc": "файл", "text": txt, "is_table": ext == ".csv"}]
         except Exception:
             return []
+    if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"):
+        # фото/скан листа (ТЗ 27.07: «данные из исходников в формате jpg») — OCR.
+        # TIFF бывает МНОГОСТРАНИЧНЫМ (сканер так сохраняет том целиком) —
+        # распознаём каждый кадр, а не только первый (ревью)
+        if not ocr:
+            return []
+        try:
+            import io as _io
+            from PIL import Image, ImageSequence
+            pages_out: list[Page] = []
+            with Image.open(str(path)) as im:
+                frames = list(ImageSequence.Iterator(im))
+                for fi, frame in enumerate(frames, start=1):
+                    buf = _io.BytesIO()
+                    frame.convert("RGB").save(buf, format="PNG")
+                    txt = _ocr_page(buf.getvalue(), lang)
+                    if txt.strip():
+                        loc = (f"стр. {fi}" if len(frames) > 1 else "изображение")
+                        pages_out.append({"loc": loc, "text": txt, "is_table": False})
+            return pages_out
+        except Exception as e:  # noqa: BLE001
+            print(f"[loaders] OCR изображения {path.name}: {e}", flush=True)
+            return []
+    if ext == ".xml":
+        # XML (ТЗ 27.07): вытаскиваем текст и атрибуты, теги отбрасываем —
+        # для поиска важно содержимое, а не разметка
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(path.read_bytes())
+            parts: list[str] = []
+            for el in root.iter():
+                for v in el.attrib.values():
+                    if v and str(v).strip():
+                        parts.append(str(v).strip())
+                if el.text and el.text.strip():
+                    parts.append(el.text.strip())
+                if el.tail and el.tail.strip():   # текст ПОСЛЕ вложенного тега (ревью)
+                    parts.append(el.tail.strip())
+            txt = "\n".join(parts)
+            return ([{"loc": "xml", "text": txt, "is_table": False}]
+                    if txt.strip() else [])
+        except Exception as e:  # noqa: BLE001
+            print(f"[loaders] XML {path.name}: {e}", flush=True)
+            return []
     if ext in (".doc", ".xls"):
         # старые форматы требуют конвертации (LibreOffice/textract) — вне MVP
         raise RuntimeError(
@@ -315,4 +359,5 @@ def extract_file(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
     raise RuntimeError(f"Неизвестный тип файла: {ext}")
 
 
-SUPPORTED_EXT = {".pdf", ".docx", ".xlsx", ".xlsm", ".txt", ".md", ".csv"}
+SUPPORTED_EXT = {".pdf", ".docx", ".xlsx", ".xlsm", ".txt", ".md", ".csv",
+                 ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".xml"}

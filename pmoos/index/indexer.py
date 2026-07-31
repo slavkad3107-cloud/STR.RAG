@@ -654,6 +654,19 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
         state["current_file"] = ""
         state["message"] = (f"Индексация завершена: файлов {state.get('done_files', 0)}/"
                             f"{state.get('total_files', 0)}, чанков {state.get('total_chunks', 0)}.")
+        # АВТО-СБОР ПОКАЗАТЕЛЕЙ (ТЗ: «в процессе загрузки должны появляться
+        # найденные данные») — сразу по завершении индексации, пока store наш;
+        # результат виден в БАЗЕ и ДАННЫХ без отдельной кнопки.
+        try:
+            store.close()
+            from ..data.registry import extract_from_index, summary
+            extract_from_index(project, cfg)
+            s = summary(project)
+            state["message"] += (f" Данные собраны: {s['заполнено']} показателей"
+                                 + (f", расхождений {s['расхождений']}" if s.get("расхождений") else "")
+                                 + " (вкладка ДАННЫЕ).")
+        except Exception as e:  # noqa: BLE001
+            print(f"[indexer] сбор показателей: {e}", flush=True)
         cleaned = _cleanup_sources(files, state, cfg)
         if cleaned:
             state["message"] += f" Исходники удалены ({cleaned})."

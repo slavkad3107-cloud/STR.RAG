@@ -204,6 +204,116 @@ def test_object_type_pinned_per_project(tmp_path, monkeypatch):
     assert I.read_state("ОТ1").get("object_type") == "площадной"
 
 
+def test_new_upload_formats(tmp_path):
+    # ТЗ 27.07: «исходники в формате doc/pdf/jpg/XML/zip/папка/по ссылке»
+    from pmoos.ingest.loaders import SUPPORTED_EXT, extract_file
+    assert {".jpg", ".png", ".tif", ".xml"} <= SUPPORTED_EXT
+    x = tmp_path / "данные.xml"
+    x.write_text('<обмен><объект наименование="Реконструкция моста">'
+                 "<показатель>Площадь участка 1500 м2</показатель>"
+                 "</объект></обмен>", encoding="utf-8")
+    pages = extract_file(x)
+    assert pages and "Площадь участка 1500 м2" in pages[0]["text"]
+    assert "Реконструкция моста" in pages[0]["text"]      # атрибуты тоже
+
+
+def test_changes_table(tmp_path, monkeypatch):
+    # ТЗ 27.07: «что на что меняется — в виде таблицы»
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json
+    from pmoos.projects import register_project
+    from pmoos.paths import project_paths
+    from pmoos.output.changes_table import build_changes_xlsx, changes_rows
+    register_project("ТАБ")
+    p = project_paths("ТАБ")["answers"]
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"answers": [
+        {"number": "1", "answer": "о", "edit_location": "Том 6.1, п. 2.1.4",
+         "edit_was": "земли отсутствуют", "edit_shall": "земли присутствуют",
+         "attachments": ["выписка"], "status": "accepted"},
+        {"number": "2", "answer": "только ответ, правки нет", "status": "accepted"},
+        {"number": "10", "answer": "о", "correction": "дополнить таблицу 3",
+         "status": "proposed"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    rows = changes_rows("ТАБ")
+    assert [r["number"] for r in rows] == ["1", "10"]     # №2 без правки — вне таблицы
+    assert rows[0]["was"] == "земли отсутствуют"
+    assert rows[1]["shall"] == "дополнить таблицу 3"      # fallback на correction
+    out = build_changes_xlsx("ТАБ")
+    assert out.exists() and out.stat().st_size > 3000
+
+
+def test_uprza_import(tmp_path, monkeypatch):
+    # ТЗ 27.07: «выгрузка/загрузка в/из данных УПРЗА» — импорт результатов
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.projects import register_project
+    from pmoos.output.uprza_import import import_uprza_results, load_uprza_results
+    register_project("УПР")
+    f = tmp_path / "результаты.csv"
+    f.write_text("Код;Вещество;Cm, доли ПДК\n"
+                 "0301;Азота диоксид;0,85\n"
+                 "0330;Сера диоксид;0,12\n"
+                 "2902;Взвешенные вещества;1,45\n"
+                 "0301;Азота диоксид (точка 2);0,60\n", encoding="cp1251")
+    res = import_uprza_results("УПР", f)
+    by_code = {r["code"]: r for r in res["rows"]}
+    assert by_code["0301"]["max_pdk"] == 0.85             # максимум из двух точек
+    assert [r["code"] for r in res["exceedances"]] == ["2902"]  # >1 ПДК
+    assert load_uprza_results("УПР")["file"] == "результаты.csv"
+    # (ревью) txt с ПРОБЕЛЬНЫМИ колонками + целые числа (номер точки 5, высота 2)
+    # не должны давать ложных «превышений»
+    f2 = tmp_path / "рез.txt"
+    f2.write_text("0301  Азота диоксид      5   2   0,85\n"
+                  "0330  Сера диоксид       12  2   0,12\n", encoding="cp1251")
+    from pmoos.output.uprza_import import parse_uprza_file
+    rows2 = {r["code"]: r for r in parse_uprza_file(f2)}
+    assert rows2["0301"]["max_pdk"] == 0.85               # не 5 и не 2
+    assert rows2["0330"]["max_pdk"] == 0.12
+    # (ревью) процент вклада ПОСЛЕ концентрации не должен стать «96.5 ПДК»,
+    # а год в строке — не код вещества
+    f4 = tmp_path / "вклад.csv"
+    f4.write_text("0301;Азота диоксид;0,85;25;96,5\n"
+                  "Составлено 2026 отчёт 0,5\n", encoding="cp1251")
+    rows4 = parse_uprza_file(f4)
+    assert len(rows4) == 1 and rows4[0]["max_pdk"] == 0.85
+    # (ревью) пустой результат НЕ затирает прежний импорт
+    f3 = tmp_path / "мусор.txt"
+    f3.write_text("ничего похожего на результаты", encoding="cp1251")
+    import pytest as _pt
+    with _pt.raises(RuntimeError):
+        import_uprza_results("УПР", f3)
+    assert load_uprza_results("УПР")["file"] == "результаты.csv"  # старый цел
+
+
+def test_section_draft(tmp_path, monkeypatch):
+    # ТЗ 27.07: «создание по БАЗЕ проекта…» — каркас раздела из базы
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.projects import register_project
+    from pmoos.data import registry as R
+    from pmoos.output.section_draft import build_section_draft, CHAPTERS
+    register_project("КАРК")
+    R.set_value("КАРК", "emission_year", "3.55")
+    # принятая правка про отходы должна попасть РОВНО в одну главу (ревью:
+    # раньше дублировалась во все главы со словом «мероприятия»)
+    import json
+    from pmoos.paths import project_paths
+    pa = project_paths("КАРК")["answers"]
+    pa.parent.mkdir(parents=True, exist_ok=True)
+    pa.write_text(json.dumps({"answers": [
+        {"number": "7", "status": "accepted", "answer": "о",
+         "remark": "уточнить объёмы размещения отходов строительства",
+         "edit_shall": "Объём отходов принят 1250,4 т/год по расчёту"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    out = build_section_draft("КАРК", "OOS")
+    assert out.exists() and out.stat().st_size > 20000
+    from docx import Document
+    txt = "\n".join(par.text for par in Document(str(out)).paragraphs)
+    assert "Мероприятия по охране атмосферного воздуха" in txt
+    assert "◈ ВНЕСТИ" in txt                              # недостающее помечено
+    assert txt.count("по замечанию №7") == 1              # ровно одна глава
+    assert set(CHAPTERS) == {"OOS", "IEI", "OCENKA"}
+
+
 def test_garbled_text_triggers_ocr():
     # НАЙДЕНО НА ЖИВОМ ПРОЕКТЕ: тома ООС отдавали «(cid:20)» и «Ʌɢɫɬ» вместо
     # текста — OCR не включался (текста «много»), в индекс шёл мусор.
