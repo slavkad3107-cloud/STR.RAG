@@ -365,6 +365,38 @@ def test_native_shell_wiring():
         assert mod.split(".")[-1] in text
 
 
+def test_bat_files_not_escape_corrupted():
+    """НАЙДЕНО НА ЖИВОМ РЕЛИЗЕ v0.42.0: в СТРОЙРАГ.bat пути «\\venv» и
+    «app\\native.py» записались как РЕАЛЬНЫЕ управляющие символы — 0x0B вместо
+    «\\v» и перевод строки вместо «\\n». Из-за этого запуск всегда падал в
+    «Environment not found», а битый .bat уехал в релиз (папку и zip).
+    Ловим любой .bat с посторонними control-символами.
+    """
+    from pathlib import Path as _P
+    root = _P(__file__).resolve().parent.parent
+    for bat in sorted(root.glob("*.bat")):
+        data = bat.read_bytes()
+        stray = [f"0x{b:02X}" for b in data if b < 32 and b not in (9, 13, 10)]
+        assert not stray, f"{bat.name}: посторонние символы {sorted(set(stray))}"
+        lone_cr = data.count(b"\r") - data.count(b"\r\n")
+        assert lone_cr == 0, f"{bat.name}: одиночный CR ({lone_cr} шт.)"
+
+
+def test_native_launcher_points_at_venv_and_app():
+    # запуск нативной оболочки должен находить ОБЩИЙ venv (%USERPROFILE%\
+    # .pmoos-rag\venv, как в run.bat) и передавать pythonw именно app\native.py
+    from pathlib import Path as _P
+    bat = _P(__file__).resolve().parent.parent / "СТРОЙРАГ.bat"
+    assert bat.exists(), "нет СТРОЙРАГ.bat — сборка релиза его требует"
+    txt = bat.read_bytes().decode("cp866")
+    bs = chr(92)
+    assert bs + "venv" + bs + "Scripts" + bs + "pythonw.exe" in txt
+    assert "app" + bs + "native.py" in txt
+    assert ".pmoos-rag" in txt          # тот же путь к данным, что и в run.bat
+    # обе ветки (общий venv и локальный .venv) реально запускают приложение
+    assert txt.count("app" + bs + "native.py") == 2
+
+
 def test_garbled_text_triggers_ocr():
     # НАЙДЕНО НА ЖИВОМ ПРОЕКТЕ: тома ООС отдавали «(cid:20)» и «Ʌɢɫɬ» вместо
     # текста — OCR не включался (текста «много»), в индекс шёл мусор.
