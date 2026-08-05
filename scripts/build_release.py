@@ -102,7 +102,7 @@ def build() -> Path:
                 pass                    # занято — не критично, перезапишется
 
     # 3) ПРОВЕРКА ЦЕЛОСТНОСТИ: релиз без этих файлов не запустится
-    must = ["app/hub.py", "app/components.py", "app/native.py", "pmoos/__init__.py",
+    must = ["app/gui/server.py", "app/gui/index.html", "pmoos/__init__.py",
             "run.bat", "СТРОЙРАГ.bat"]
     missing = [m for m in must if not (folder / m).exists()]
     if missing or failed:

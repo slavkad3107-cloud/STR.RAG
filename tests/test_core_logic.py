@@ -346,23 +346,80 @@ def test_single_model_mode(tmp_path, monkeypatch):
     assert load_config().resolve_provider("module4") == "deepseek"  # режим выключен
 
 
-def test_native_shell_wiring():
-    # нативная оболочка (ТЗ 31.07: «переделываем со стримлита, как в ЭКОДОК»)
-    import ast
+def test_gui_server_api(tmp_path, monkeypatch):
+    # оболочка КАК В ЭКО.DOC (ТЗ 31.07): stdlib-сервер + один index.html,
+    # без Streamlit/Flask вообще. Поднимаем сервер на свободном порту и
+    # дёргаем настоящие HTTP-эндпоинты.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json as _json
+    import threading
+    import urllib.parse
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    import importlib
+    import app.gui.server as S
+    importlib.reload(S)                      # чистый роутинг под новый data-dir
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), S.Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        def get(path):
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
+                return r.headers.get_content_type(), r.read()
+        def post(path, obj):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}{path}",
+                data=_json.dumps(obj).encode(), method="POST")
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return _json.loads(r.read())
+        # страница — ванильный HTML без CDN и фреймворков
+        ct, html = get("/")
+        assert ct == "text/html"
+        txt = html.decode("utf-8")
+        assert "СТРОЙ.RAG" in txt
+        for banned in ("cdn.", "react", "vue", "bootstrap", "streamlit"):
+            assert banned not in txt.lower(), f"в index.html затесался {banned}"
+        # meta
+        ct, raw = get("/api/meta")
+        meta = _json.loads(raw)
+        assert "version" in meta and isinstance(meta["projects"], list)
+        assert {t["code"] for t in meta["targets"]} >= {"OOS", "IEI", "OCENKA"}
+        # проект → организация → info
+        assert post("/api/project_new", {"name": "ГУИ"})["ok"]
+        assert post("/api/org", {"project": "ГУИ", "organization": "ООО Тест"})["ok"]
+        ct, raw = get("/api/info?project=" + urllib.parse.quote("ГУИ"))
+        info = _json.loads(raw)
+        assert info["organization"] == "ООО Тест"
+        # реестр показателей: ручной ввод через API и чтение
+        assert post("/api/reg_set", {"project": "ГУИ", "key": "workers",
+                                     "value": "120"})["ok"]
+        ct, raw = get("/api/registry?project=" + urllib.parse.quote("ГУИ"))
+        rows = {r["key"]: r for r in _json.loads(raw)["rows"]}
+        assert rows["workers"]["value"] == "120" and rows["workers"]["how"] == "вручную"
+        # решение по несуществующему ответу не роняет сервер, ошибки — JSON
+        r = post("/api/decide", {"project": "ГУИ", "numbers": [], "status": "accepted"})
+        assert r["ok"] and r["count"] == 0
+    finally:
+        srv.shutdown()
+
+
+def test_no_streamlit_anywhere():
+    # ТЗ 31.07: «бэкенд без использования стримлита вообще»
     from pathlib import Path as _P
-    src = _P(__file__).resolve().parent.parent / "app" / "native.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"))
-    methods = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
-    # все шесть вкладок ТЗ реализованы
-    for m in ("_tab_upload", "_tab_index", "_tab_data", "_tab_answers",
-              "_tab_export", "_tab_uprza"):
-        assert m in methods, f"нет вкладки {m}"
-    text = src.read_text(encoding="utf-8")
-    # опирается на те же модули, что и веб-версия (без дублирования логики)
-    for mod in ("pmoos.index.indexer", "pmoos.data.registry",
-                "pmoos.pipeline.block1_answers", "pmoos.output.section_draft",
-                "pmoos.output.uprza_import", "pmoos.output.changes_table"):
-        assert mod.split(".")[-1] in text
+    root = _P(__file__).resolve().parent.parent
+    bad = []
+    for p in root.rglob("*.py"):
+        if "releases" in p.parts or "__pycache__" in p.parts:
+            continue
+        t = p.read_text(encoding="utf-8", errors="ignore")
+        needle = "import " + "streamlit"
+        needle2 = "from " + "streamlit"
+        if needle in t or needle2 in t:
+            bad.append(str(p.relative_to(root)))
+    assert not bad, f"streamlit ещё используется: {bad}"
+    req = (root / "requirements.txt").read_text(encoding="utf-8")
+    pkgs = [l.split("#")[0].strip().lower() for l in req.splitlines()]
+    assert not any(l.startswith("streamlit") for l in pkgs if l)
 
 
 def test_bat_files_not_escape_corrupted():
@@ -383,18 +440,20 @@ def test_bat_files_not_escape_corrupted():
 
 
 def test_native_launcher_points_at_venv_and_app():
-    # запуск нативной оболочки должен находить ОБЩИЙ venv (%USERPROFILE%\
-    # .pmoos-rag\venv, как в run.bat) и передавать pythonw именно app\native.py
+    # запуск GUI (сервер как в ЭКО.DOC) должен находить ОБЩИЙ venv
+    # (%USERPROFILE%\.pmoos-ragenv, как раньше) и запускать именно
+    # app\gui\server.py в ОБЕИХ ветках (общий venv и локальный .venv)
     from pathlib import Path as _P
-    bat = _P(__file__).resolve().parent.parent / "СТРОЙРАГ.bat"
-    assert bat.exists(), "нет СТРОЙРАГ.bat — сборка релиза его требует"
-    txt = bat.read_bytes().decode("cp866")
     bs = chr(92)
-    assert bs + "venv" + bs + "Scripts" + bs + "pythonw.exe" in txt
-    assert "app" + bs + "native.py" in txt
-    assert ".pmoos-rag" in txt          # тот же путь к данным, что и в run.bat
-    # обе ветки (общий venv и локальный .venv) реально запускают приложение
-    assert txt.count("app" + bs + "native.py") == 2
+    root = _P(__file__).resolve().parent.parent
+    for name in ("СТРОЙРАГ.bat", "run.bat"):
+        bat = root / name
+        assert bat.exists(), f"нет {name} — сборка релиза его требует"
+        txt = bat.read_bytes().decode("cp866")
+        assert bs + "venv" + bs + "Scripts" + bs + "python.exe" in txt
+        assert ".pmoos-rag" in txt
+        srv = "app" + bs + "gui" + bs + "server.py"
+        assert txt.count(srv) == 2, f"{name}: обе ветки должны запускать {srv}"
 
 
 def test_garbled_text_triggers_ocr():

@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>СТРОЙ.RAG</title>
+<style>
+/* ванильный CSS, полностью оффлайн — без CDN и фреймворков (как в ЭКО.DOC) */
+:root{--b:#1f4e79;--bg:#f4f6f9;--card:#fff;--line:#d9dee7;--warn:#b03000;
+      --ok:#1d7a3d;--mut:#667}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.45 "Segoe UI",Arial,sans-serif;background:var(--bg);color:#222}
+header{background:var(--b);color:#fff;padding:10px 16px;display:flex;flex-wrap:wrap;
+       gap:10px;align-items:center}
+header b{font-size:17px;margin-right:8px}
+header select,header input,header button{font:inherit;padding:4px 8px;border:0;border-radius:4px}
+header .mut{color:#cfe0f2;font-size:13px;width:100%}
+nav{display:flex;background:#fff;border-bottom:2px solid var(--line);position:sticky;top:0;z-index:5}
+nav button{flex:1;padding:11px 4px;border:0;background:none;font:inherit;font-weight:600;
+           cursor:pointer;color:#456;border-bottom:3px solid transparent}
+nav button.on{color:var(--b);border-bottom-color:var(--b);background:#eef3fa}
+main{padding:14px;max-width:1280px;margin:0 auto}
+section{display:none}section.on{display:block}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;
+      padding:12px 14px;margin-bottom:12px}
+h3{margin:2px 0 10px;font-size:16px;color:var(--b)}
+button.act{background:var(--b);color:#fff;border:0;border-radius:5px;padding:7px 14px;
+           font:inherit;cursor:pointer;margin:2px 4px 2px 0}
+button.act:disabled{background:#9ab}
+button.sec{background:#e7ecf3;color:#234;border:1px solid var(--line);border-radius:5px;
+           padding:6px 12px;font:inherit;cursor:pointer;margin:2px 4px 2px 0}
+input[type=text],textarea,select.inp{font:inherit;padding:6px 8px;border:1px solid var(--line);
+           border-radius:5px;width:100%}
+table{border-collapse:collapse;width:100%;font-size:13.5px;background:#fff}
+th,td{border:1px solid var(--line);padding:5px 7px;text-align:left;vertical-align:top}
+th{background:#eef2f7;position:sticky;top:46px}
+tr:hover td{background:#f7fafd}
+.bar{height:16px;background:#e7ecf3;border-radius:8px;overflow:hidden;margin:6px 0}
+.bar i{display:block;height:100%;background:var(--ok);width:0;transition:width .5s}
+.msg{font-size:13.5px;color:var(--mut);white-space:pre-wrap}
+.warn{color:var(--warn);font-weight:600}
+.ok{color:var(--ok)}
+.badge{display:inline-block;font-size:12px;border-radius:9px;padding:1px 8px;background:#e7ecf3}
+.badge.w{background:#fde3d6;color:var(--warn)}
+.badge.g{background:#dcf2e3;color:var(--ok)}
+.split{display:flex;gap:12px;align-items:flex-start}
+.split>.l{flex:1;min-width:340px}.split>.r{flex:1.4}
+#ansDetail{white-space:pre-wrap;background:#fff;border:1px solid var(--line);
+           border-radius:8px;padding:12px;font-size:14px;max-height:70vh;overflow:auto}
+#toast{position:fixed;right:16px;bottom:16px;background:#223;color:#fff;padding:10px 16px;
+       border-radius:8px;opacity:0;transition:opacity .3s;max-width:460px;z-index:99}
+tr.sel td{background:#e2ecfa!important}
+.drop{border:2px dashed var(--line);border-radius:8px;padding:18px;text-align:center;
+      color:var(--mut);margin:8px 0}
+.drop.hov{border-color:var(--b);color:var(--b);background:#eef3fa}
+img.scan{max-width:100%;border:1px solid var(--line);border-radius:6px;margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <b>СТРОЙ.RAG</b>
+  <label>Объект: <select id="prj" onchange="switchProject()"></select></label>
+  <button class="sec" onclick="newProject()">+ Новый</button>
+  <label>Раздел: <select id="tgt" onchange="setTarget()"></select></label>
+  <span class="mut" id="hdrInfo">—</span>
+</header>
+<nav id="nav"></nav>
+<main id="main"></main>
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* ── каркас: состояние, api, вкладки ── */
+let P = "";                       // текущий проект
+let META = {};
+let remarksPath = "";             // выбранный файл замечаний
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function api(name, body, q) {
+  const qs = new URLSearchParams(Object.assign({}, q, name.match(/^(info|index_state|registry|answers|answers_state|uprza)$/) ? {project: P} : {})).toString();
+  const r = await fetch(`/api/${name}${qs ? "?" + qs : ""}`,
+    body === undefined ? {} : {method: "POST", body: JSON.stringify(body)});
+  const d = await r.json();
+  if (d && d.error) throw new Error(d.error);
+  return d;
+}
+async function apiRaw(name, q, blob) {   // загрузка файлов сырым телом
+  if (!P) throw new Error("сначала создайте объект («+ Новый»)");
+  const qs = new URLSearchParams(Object.assign({project: P}, q)).toString();
+  const r = await fetch(`/api/${name}?${qs}`, {method: "POST", body: blob});
+  const d = await r.json();
+  if (d && d.error) throw new Error(d.error);
+  return d;
+}
+function toast(t, isErr) {
+  const el = $("toast");
+  el.textContent = t;
+  el.style.background = isErr ? "#8c2f00" : "#223";
+  el.style.opacity = 1;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.style.opacity = 0, isErr ? 7000 : 3500);
+}
+const err = e => toast("Ошибка: " + e.message, true);
+
+const TABS = ["ЗАГРУЗКА","БАЗА","ДАННЫЕ","ОТВЕТЫ","ВЫГРУЗКА","УПРЗА"];
+function buildTabs() {
+  $("nav").innerHTML = TABS.map((t,i) =>
+    `<button id="nb${i}" onclick="showTab(${i})">${t}</button>`).join("");
+  $("main").innerHTML = TABS.map((t,i) => `<section id="tab${i}"></section>`).join("");
+}
+function showTab(i) {
+  TABS.forEach((_,k) => {
+    $("nb"+k).classList.toggle("on", k===i);
+    $("tab"+k).classList.toggle("on", k===i);
+  });
+  [renderUpload,renderIndex,renderData,renderAnswers,renderExport,renderUprza][i]();
+}
+
+/* ── шапка ── */
+async function boot() {
+  META = await api("meta");
+  $("prj").innerHTML = META.projects.map(p => `<option>${esc(p)}</option>`).join("");
+  P = localStorage.getItem("strrag_prj") || META.projects[0] || "";
+  if (META.projects.includes(P)) $("prj").value = P; else P = META.projects[0] || "";
+  $("tgt").innerHTML = META.targets.map(t =>
+    `<option value="${t.code}"${t.code===META.target?" selected":""}>${esc(t.label)}</option>`).join("");
+  buildTabs();
+  await refreshHeader();
+  showTab(0);
+  setInterval(pollStates, 2500);
+}
+async function refreshHeader() {
+  if (!P) { $("hdrInfo").textContent = "создайте объект («+ Новый»)"; return; }
+  try {
+    const i = await api("info");
+    $("hdrInfo").innerHTML =
+      `🏢 ${esc(i.organization || "организация не указана")} · ` +
+      `📐 тип: <b>${esc(i.object_type)}</b> (зафиксирован) · ` +
+      `🤖 единая модель: ${esc(META.model)} · ${esc(META.version)}`;
+    window._info = i;
+  } catch (e) { err(e); }
+}
+async function switchProject() {
+  const next = $("prj").value;
+  if (next === P) return;
+  if (!confirm(`Перейти к объекту «${next}»?\nДанные во всех вкладках сменятся.`)) {
+    $("prj").value = P; return;
+  }
+  P = next; localStorage.setItem("strrag_prj", P);
+  remarksPath = "";
+  await refreshHeader();
+  showTab(0);
+}
+async function newProject() {
+  const name = prompt("Название объекта/проекта:");
+  if (!name) return;
+  try {
+    await api("project_new", {name});
+    META = await api("meta");
+    $("prj").innerHTML = META.projects.map(p => `<option>${esc(p)}</option>`).join("");
+    $("prj").value = name.trim(); P = name.trim();
+    localStorage.setItem("strrag_prj", P);
+    await refreshHeader(); showTab(0);
+  } catch (e) { err(e); }
+}
+async function setTarget() {
+  try { await api("target", {code: $("tgt").value}); toast("Раздел переключён."); }
+  catch (e) { err(e); }
+}
+
+/* ── ЗАГРУЗКА ── */
+function renderUpload() {
+  const i = window._info || {uploads: [], remarks: []};
+  $("tab0").innerHTML = `
+  <div class="card"><h3>Файлы проектной документации</h3>
+    <div class="drop" id="drop">Перетащите файлы сюда (pdf / docx / xlsx / jpg / png /
+      tif / xml / zip — папку можно архивом) или
+      <button class="sec" onclick="$('fileInp').click()">выбрать…</button>
+      <input type="file" id="fileInp" multiple hidden onchange="upFiles(this.files)">
+    </div>
+    <div style="margin:6px 0">
+      <input type="text" id="urlInp" placeholder="…или ссылка https / Google Drive" style="width:60%">
+      <button class="act" onclick="upUrl()">⬇ Скачать</button>
+      <input type="text" id="dirInp" placeholder="…или путь к папке на диске" style="width:40%;margin-top:6px">
+      <button class="act" onclick="upDir()">📂 Забрать из папки</button>
+    </div>
+    <table><thead><tr><th>Файл</th><th style="width:90px">Размер</th></tr></thead>
+    <tbody>${i.uploads.map(f =>
+      `<tr><td>${esc(f.name)}</td><td>${f.kb} КБ</td></tr>`).join("") ||
+      "<tr><td colspan=2>файлов пока нет</td></tr>"}</tbody></table>
+  </div>
+  <div class="card"><h3>Организация (видна в шапке)</h3>
+    <input type="text" id="orgInp" value="${esc((window._info||{}).organization||"")}"
+           placeholder="ООО «…» — заказчик / проектировщик" style="width:70%">
+    <button class="act" onclick="saveOrg()">💾 Сохранить</button>
+  </div>`;
+  const dz = $("drop");
+  dz.ondragover = e => { e.preventDefault(); dz.classList.add("hov"); };
+  dz.ondragleave = () => dz.classList.remove("hov");
+  dz.ondrop = e => { e.preventDefault(); dz.classList.remove("hov"); upFiles(e.dataTransfer.files); };
+}
+async function upFiles(files) {
+  let n = 0;
+  for (const f of files) {
+    try {
+      const r = await apiRaw("upload", {name: encodeURIComponent(f.name)}, f);
+      n += r.saved.length;
+    } catch (e) { err(e); }
+  }
+  toast(`Добавлено файлов: ${n}. Дальше — вкладка БАЗА.`);
+  await refreshHeader(); renderUpload();
+}
+async function upUrl() {
+  try {
+    const r = await api("fetch_url", {project: P, url: $("urlInp").value});
+    toast("Скачано: " + r.saved.join(", "));
+    await refreshHeader(); renderUpload();
+  } catch (e) { err(e); }
+}
+async function upDir() {
+  try {
+    const r = await api("copy_folder", {project: P, path: $("dirInp").value});
+    toast(`Скопировано файлов: ${r.copied}`);
+    await refreshHeader(); renderUpload();
+  } catch (e) { err(e); }
+}
+async function saveOrg() {
+  try {
+    await api("org", {project: P, organization: $("orgInp").value});
+    toast("Сохранено."); await refreshHeader();
+  } catch (e) { err(e); }
+}
+
+/* ── БАЗА (индексация) ── */
+function renderIndex() {
+  $("tab1").innerHTML = `
+  <div class="card"><h3>RAG-база: индексация документов</h3>
+    <button class="act" onclick="idx('start')">▶ Индексировать</button>
+    <button class="sec" onclick="idxReindex()">♻ Переиндексировать заново</button>
+    <button class="sec" onclick="idx('pause')">⏸ Пауза</button>
+    <button class="sec" onclick="idx('stop')">⏹ Стоп</button>
+    <div class="bar"><i id="idxBar"></i></div>
+    <div class="msg" id="idxMsg">—</div>
+  </div>
+  <div class="card"><h3>Найденные данные (после индексации — подробно в ДАННЫХ)</h3>
+    <div id="foundBox">—</div>
+  </div>`;
+  pollStates();
+}
+async function idx(action) {
+  try { await api("index", {project: P, action}); toast("Команда отправлена."); }
+  catch (e) { err(e); }
+}
+function idxReindex() {
+  if (confirm("Стереть базу проекта и переиндексировать заново?\n" +
+      "Нужно после обновлений с починкой распознавания (битые тома ООС)."))
+    idx("reindex");
+}
+
+/* ── ДАННЫЕ ── */
+async function renderData() {
+  let d;
+  try { d = await api("registry"); } catch (e) { err(e); return; }
+  const conf = d.rows.filter(r => r.conflict).length;
+  $("tab2").innerHTML = `
+  <div class="card"><h3>Показатели проекта (из документов, с источником)</h3>
+    <button class="act" id="collBtn" onclick="collect()">🔍 Собрать показатели из базы</button>
+    ${conf ? `<span class="warn">⚠ Расхождения между разделами: ${conf} — выберите верное значение (кнопка «варианты»)</span>` : ""}
+    <div class="msg" id="collMsg">${d.job && d.job.running ? "Идёт сбор…" :
+      (d.scanned_chunks ? `Просмотрено фрагментов: ${d.scanned_chunks}` : "")}</div>
+    <table><thead><tr><th>Показатель</th><th>Значение</th><th>Ед.</th>
+      <th>Откуда</th><th>Способ</th><th style="width:210px">Действия</th></tr></thead>
+    <tbody>${d.rows.map(r => `
+      <tr${r.conflict ? ' style="background:#fff7f2"' : ""}>
+        <td>${esc(r.label)}${r.conflict ? ' <span class="badge w">⚠ расхождение</span>' : ""}</td>
+        <td><b>${esc(r.value) || "—"}</b></td><td>${esc(r.unit)}</td>
+        <td class="msg">${esc(r.source) || "—"}</td><td>${esc(r.how) || "—"}</td>
+        <td>
+          <button class="sec" onclick="editVal('${r.key}')">✏️</button>
+          ${r.variants.length > 1 ? `<button class="sec" onclick="showVars('${r.key}')">варианты (${r.variants.length})</button>` : ""}
+          ${(r.source || r.has_scan) ? `<button class="sec" onclick="showScan('${r.key}')">🖼 лист</button>` : ""}
+        </td></tr>`).join("")}</tbody></table>
+    <div id="varsBox"></div><div id="scanBox"></div>
+  </div>`;
+  window._reg = d;
+}
+async function collect() {
+  try {
+    await api("collect", {project: P});
+    $("collBtn").disabled = true;
+    if (window._reg) window._reg.job = {running: true};
+    toast("Сбор запущен (десятки секунд)…");
+  } catch (e) { err(e); }
+}
+async function editVal(key) {
+  const row = (window._reg.rows || []).find(r => r.key === key);
+  const v = prompt(`${row.label} (${row.unit}):`, row.value || "");
+  if (v === null) return;
+  try { await api("reg_set", {project: P, key, value: v.trim()}); renderData(); }
+  catch (e) { err(e); }
+}
+function showVars(key) {
+  const row = (window._reg.rows || []).find(r => r.key === key);
+  $("varsBox").innerHTML = `<h3>Варианты — ${esc(row.label)}</h3>` +
+    row.variants.map((v,i) =>
+      `<button class="act" data-vkey="${esc(key)}" data-vi="${i}">${esc(v.value)} ${esc(v.unit)}</button>
+       <span class="msg">${v.count}× · ${esc(v.src)}</span><br>`).join("");
+  $("varsBox").querySelectorAll("[data-vkey]").forEach(b =>
+    b.onclick = () => chooseVar(b.dataset.vkey,
+      (window._reg.rows.find(r => r.key === b.dataset.vkey).variants[+b.dataset.vi]||{}).value));
+}
+async function chooseVar(key, value) {
+  try { await api("reg_choose", {project: P, key, value}); renderData(); }
+  catch (e) { err(e); }
+}
+function showScan(key) {
+  $("scanBox").innerHTML =
+    `<h3>Лист-источник</h3><img class="scan" src="/api/scan?project=${encodeURIComponent(P)}&key=${key}&t=${Date.now()}"
+     onerror="this.outerHTML='<div class=warn>Скан недоступен: исходник удалён после индексации. Загрузите том и соберите показатели заново.</div>'">`;
+}
+
+/* ── ОТВЕТЫ ── */
+async function renderAnswers() {
+  let d;
+  try { d = await api("answers"); } catch (e) { err(e); return; }
+  const stRu = {proposed:"⚠ новый", accepted:"принят", edited:"правка", rejected:"отклонён"};
+  const task = await api("ai_task").catch(() => ({value: ""}));
+  $("tab3").innerHTML = `
+  <div class="card"><h3>Ответы на замечания экспертизы</h3>
+    <button class="sec" onclick="$('remInp').click()">📄 Файл замечаний…</button>
+    <input type="file" id="remInp" hidden onchange="upRemarks(this.files[0])">
+    <span class="msg" id="remName">${remarksPath ? "файл: " + esc(remarksPath.split(/[\\/]/).pop()) :
+      ((window._info||{}).remarks||[]).length ? "ранее загружено: " + esc((window._info.remarks||[]).join(", ")) : "файл не выбран"}</span><br>
+    <button class="act" onclick="ansCtl('start')">① Найти ответы (фоном)</button>
+    <button class="sec" onclick="ansCtl('stop')">⏹ Стоп</button>
+    <button class="sec" onclick="decideAll('accepted')">Принять все непустые</button>
+    <div class="bar"><i id="ansBar"></i></div>
+    <div class="msg" id="ansMsg">—</div>
+    <details style="margin-top:6px"><summary>📝 Доп. задание ИИ (необязательно)</summary>
+      <textarea id="aiTask" rows="2" placeholder="Например: «всегда указывай пункт норматива»">${esc(task.value)}</textarea>
+      <button class="sec" onclick="saveTask()">Сохранить задание</button>
+    </details>
+  </div>
+  <div class="split">
+    <div class="l card" style="max-height:72vh;overflow:auto">
+      <table><thead><tr><th>№</th><th>Замечание</th><th style="width:90px">Статус</th></tr></thead>
+      <tbody>${d.answers.map((a,i) => `
+        <tr id="ansRow${i}" onclick="showAns(${i})" style="cursor:pointer">
+          <td>${esc(a.number)}</td><td>${esc((a.remark||"").slice(0,90))}</td>
+          <td><span class="badge ${a.status==="accepted"?"g":a.status==="proposed"?"w":""}">${stRu[a.status]||"?"}</span></td>
+        </tr>`).join("") || "<tr><td colspan=3>ответов пока нет — загрузите файл замечаний и нажмите «① Найти ответы»</td></tr>"}
+      </tbody></table>
+    </div>
+    <div class="r">
+      <div id="ansDetail">выберите замечание слева</div>
+      <div style="margin-top:6px">
+        <button class="act" onclick="decideSel('accepted')">✅ Принять</button>
+        <button class="sec" onclick="decideSel('rejected')">✖ Отклонить</button>
+      </div>
+    </div>
+  </div>`;
+  window._ans = d.answers; window._ansSel = -1;
+  pollStates();
+}
+async function upRemarks(f) {
+  if (!f) return;
+  try {
+    const r = await apiRaw("remarks_upload", {name: encodeURIComponent(f.name)}, f);
+    remarksPath = r.path;
+    $("remName").textContent = "файл: " + r.name;
+    toast("Файл замечаний загружен.");
+  } catch (e) { err(e); }
+}
+async function ansCtl(action) {
+  try {
+    const r = await api("answers_ctl", {project: P, action, remarks_path: remarksPath});
+    toast(action === "start" ? (r.pid ? "Поиск ответов запущен." : "Уже идёт.") : "Останавливаю…");
+  } catch (e) { err(e); }
+}
+async function saveTask() {
+  try { await api("ai_task", {value: $("aiTask").value}); toast("Задание сохранено."); }
+  catch (e) { err(e); }
+}
+function showAns(i) {
+  const a = window._ans[i];
+  window._ansSel = i;
+  document.querySelectorAll("[id^=ansRow]").forEach(r => r.classList.remove("sel"));
+  $("ansRow"+i).classList.add("sel");
+  const L = [];
+  L.push(`ЗАМЕЧАНИЕ №${a.number}${a.oos_volume ? "  ·  том: " + a.oos_volume : ""}`);
+  L.push(a.remark, "", "ОТВЕТ:", a.answer || "(пусто)");
+  if (a.edit_location) L.push("", "ГДЕ ПРАВИТЬ: " + a.edit_location);
+  if (a.edit_was)   L.push("БЫЛО: «" + a.edit_was + "»");
+  if (a.edit_shall) L.push("СТАЛО: «" + a.edit_shall + "»");
+  if ((a.attachments||[]).length) L.push("ПРИЛОЖИТЬ: " + a.attachments.join("; "));
+  if (a.missing_data) L.push("НЕ ХВАТАЕТ ДАННЫХ: " + a.missing_data);
+  if ((a.sources||[]).length)
+    L.push("", "ИСТОЧНИКИ:", ...a.sources.map(s => `  ${s.file} ${s.loc}`));
+  $("ansDetail").textContent = L.join("\n");
+}
+async function decideSel(status) {
+  if (window._ansSel < 0) return toast("Сначала выберите замечание.", true);
+  const a = window._ans[window._ansSel];
+  try {
+    await api("decide", {project: P, numbers: [a.number], status});
+    renderAnswers();
+  } catch (e) { err(e); }
+}
+async function decideAll(status) {
+  const nums = (window._ans||[]).filter(a => (a.answer||"").trim() && a.status === "proposed")
+                                .map(a => a.number);
+  if (!nums.length) return toast("Непустых непринятых ответов нет.");
+  if (!confirm(`Принять ${nums.length} ответов?`)) return;
+  try { await api("decide", {project: P, numbers: nums, status}); renderAnswers(); }
+  catch (e) { err(e); }
+}
+
+/* ── ВЫГРУЗКА ── */
+function renderExport() {
+  $("tab4").innerHTML = `
+  <div class="card"><h3>Документы для экспертизы (папка out проекта)</h3>
+    <button class="act" onclick="doExport('answers_docx')">📋 Таблица ответов (docx)</button>
+    <button class="act" onclick="doExport('answers_xlsx')">📋 Таблица ответов (xlsx)</button>
+    <button class="act" onclick="doExport('changes')">📋 Таблица изменений «что на что» (xlsx)</button>
+    <button class="act" onclick="doExport('gaps')">📋 Ведомость недостающих данных (xlsx)</button>
+    <button class="act" onclick="doExport('draft')">🏗 Каркас раздела из базы (docx)</button>
+    <div class="msg" id="expMsg"></div>
+  </div>`;
+}
+async function doExport(kind) {
+  $("expMsg").textContent = "Формирование…";
+  try {
+    const r = await api("export", {project: P, kind});
+    const p1 = r.path || Object.values(r.paths || {})[0] || "";
+    $("expMsg").innerHTML = `<span class="ok">Готово:</span> ${esc(r.path || JSON.stringify(r.paths))}
+      <button class="sec" id="expOpen">Открыть</button>`;
+    $("expOpen").onclick = () => openPath(p1);
+  } catch (e) { $("expMsg").textContent = ""; err(e); }
+}
+async function openPath(p) {
+  try { await api("open", {path: p}); } catch (e) { err(e); }
+}
+
+/* ── УПРЗА ── */
+async function renderUprza() {
+  let d;
+  try { d = await api("uprza"); } catch (e) { d = {rows: []}; }
+  const exc = (d.exceedances || []).length;
+  $("tab5").innerHTML = `
+  <div class="card"><h3>УПРЗА «Эколог» / ИНТЕГРАЛ</h3>
+    <button class="act" onclick="doExport2()">📤 Сформировать выгрузку для УПРЗА</button>
+    <button class="sec" onclick="$('uprInp').click()">📥 Импортировать результаты…</button>
+    <input type="file" id="uprInp" hidden accept=".txt,.csv,.xlsx" onchange="upUprza(this.files[0])">
+    <div class="msg" id="uprMsg">${d.file ? `загружено: ${esc(d.file)} · ${esc(d.imported_at||"")}` : ""}</div>
+    ${exc ? `<div class="warn">⚠ ПРЕВЫШЕНИЯ (&gt;1 ПДК): ${d.exceedances.map(r =>
+        `${esc(r.code)} ${esc(r.name||"")} — ${r.max_pdk.toFixed(2)}`).join(", ")}</div>` : ""}
+    <table><thead><tr><th>Код ЗВ</th><th>Вещество</th><th>Макс, доли ПДК</th></tr></thead>
+    <tbody>${(d.rows||[]).slice(0,60).map(r =>
+      `<tr><td>${esc(r.code)}</td><td>${esc(r.name)||"—"}</td><td>${r.max_pdk}</td></tr>`).join("") ||
+      "<tr><td colspan=3>результаты не импортированы</td></tr>"}</tbody></table>
+  </div>`;
+}
+async function doExport2() {
+  try {
+    const r = await api("export", {project: P, kind: "uprza_out"});
+    toast("Выгрузка для УПРЗА готова.");
+    openPath(Object.values(r.paths)[0]);
+  } catch (e) { err(e); }
+}
+async function upUprza(f) {
+  if (!f) return;
+  try {
+    const r = await apiRaw("uprza_import", {name: encodeURIComponent(f.name)}, f);
+    toast(`Импортировано веществ: ${r.rows}` +
+      (r.exceedances.length ? ` · превышений: ${r.exceedances.length}` : ""));
+    renderUprza();
+  } catch (e) { err(e); }
+}
+
+/* ── опрос фоновых процессов ── */
+async function pollStates() {
+  if (!P) return;
+  try {
+    const s = await api("index_state");
+    if ($("idxBar")) {
+      const t = s.total_files || 0, dn = s.done_files || 0;
+      $("idxBar").style.width = (t ? Math.round(dn/t*100) : 0) + "%";
+      $("idxMsg").textContent = `[${s.status||"—"}] файлов ${dn}/${t}` +
+        (s.current_file ? ` · сейчас: ${s.current_file}` : "") +
+        (s.message ? `\n${s.message}` : "");
+    }
+    const a = await api("answers_state");
+    if ($("ansBar")) {
+      const t = a.total || 0, dn = a.done || 0;
+      $("ansBar").style.width = (t ? Math.round(dn/t*100) : 0) + "%";
+      const m = `[${a.status||"—"}] ${dn}/${t}` + (a.message ? ` · ${a.message}` : "");
+      $("ansMsg").textContent = m;
+      // перерисовать список ОДИН раз на переходе running→done (иначе цикл)
+      if (a.status === "done" && window._ansWasRunning &&
+          $("tab3").classList.contains("on")) { window._ansWasRunning = false; renderAnswers(); }
+      if (a.status === "running") window._ansWasRunning = true;
+    }
+    if ($("foundBox")) {
+      const d = await api("registry");
+      const found = d.rows.filter(r => String(r.value||"").trim());
+      $("foundBox").innerHTML = found.length ?
+        `<table><thead><tr><th>Показатель</th><th>Значение</th><th>Источник</th><th></th></tr></thead><tbody>` +
+        found.map(r => `<tr><td>${esc(r.label)}</td><td><b>${esc(r.value)} ${esc(r.unit)}</b></td>
+          <td class="msg">${esc(r.source)}</td>
+          <td>${r.conflict ? '<span class="badge w">⚠ расхождение</span>' : ""}</td></tr>`).join("") +
+        "</tbody></table>" : "— (запустите индексацию или «Собрать показатели» в ДАННЫХ)";
+    }
+    if ($("collMsg") && window._reg && window._reg.job && window._reg.job.running) {
+      const d = await api("registry");
+      if (!d.job.running) {
+        toast(d.job.error ? "Сбор не удался: " + d.job.error : "Показатели собраны.", !!d.job.error);
+        renderData();
+      }
+    }
+  } catch (e) { /* тихо: сервер мог быть занят */ }
+}
+
+boot();
+</script>
+</body>
+</html>

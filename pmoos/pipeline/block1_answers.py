@@ -238,11 +238,14 @@ def run_block1(project: str, cfg: Config | None = None, *,
         rd = paths.get("remarks_dir")
         if rd and rd.exists():
             allf = [fp for fp in sorted(rd.rglob("*")) if fp.is_file()]
-            kw = [fp for fp in allf
-                  if any(k in fp.name.lower() for k in ("замечан", "remark"))]
-            cand = kw or (allf if len(allf) == 1 else
-                          sorted(allf, key=lambda f: f.stat().st_mtime,
-                                 reverse=True)[:1])
+            # среди нескольких файлов «замечаний» берём СВЕЖАЙШИЙ, а не первый
+            # по алфавиту (ревью: после F5 стартовал старый раунд замечаний)
+            kw = sorted((fp for fp in allf
+                         if any(k in fp.name.lower() for k in ("замечан", "remark"))),
+                        key=lambda f: f.stat().st_mtime, reverse=True)
+            cand = kw[:1] or (allf if len(allf) == 1 else
+                              sorted(allf, key=lambda f: f.stat().st_mtime,
+                                     reverse=True)[:1])
         if not cand and paths["uploads"].exists():
             cand = [fp for fp in sorted(paths["uploads"].rglob("*"))
                     if fp.is_file() and any(k in fp.name.lower()

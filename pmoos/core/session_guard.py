@@ -52,10 +52,14 @@ def _cmdline(pid: int) -> str:
 def _looks_like_ours(cmd: str) -> bool:
     """УЗКОЕ опознание прошлого экземпляра ПРИЛОЖЕНИЯ (ревью: «python+pmoos»
     матчил и наши фоновые ВОРКЕРЫ — при переиспользовании pid убили бы живую
-    индексацию/генерацию; а одиночного «streamlit» хватало для чужого приложения)."""
-    low = cmd.lower()
+    индексацию/генерацию). С v0.43 главный процесс — stdlib-сервер
+    app/gui/server.py; «streamlit …hub.py» оставлен для добивания сеансов,
+    запущенных СТАРЫМИ версиями до обновления."""
+    low = cmd.lower().replace("\\", "/")
     if "block1_answers" in low or "pmoos.index.indexer" in low:
         return False  # фоновые воркеры — не главный процесс, не трогаем
+    if "app/gui/server.py" in low:
+        return True
     return "streamlit" in low and ("hub.py" in low or "pmoos" in low
                                    or "str.rag" in low)
 

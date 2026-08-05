@@ -165,28 +165,33 @@ def extract_from_index(project: str, cfg=None, *, progress=None,
 
     seen = 0
     offset = None
-    while True:
-        pts, offset = client.scroll(collection_name=coll, with_payload=True,
-                                    with_vectors=False, limit=512, offset=offset)
-        for p in pts:
-            pl = p.payload or {}
-            text = pl.get("text", "") or ""
-            if not text:
-                continue
-            for ind in INDICATORS:
-                for val in _scan_text(text, ind):
-                    inds[ind["key"]]["candidates"].append({
-                        "value": val, "unit": ind["unit"],
-                        "file": pl.get("file", ""), "section": pl.get("section", ""),
-                        "loc": pl.get("loc", ""), "chunk_id": str(p.id),
-                        "snippet": text[:400],
-                    })
-            seen += 1
-            if progress and seen % 500 == 0:
-                progress(seen, f"Просмотрено фрагментов: {seen}")
-        if offset is None or (limit_chunks and seen >= limit_chunks):
-            break
-    store.close()
+    # try/finally ОБЯЗАТЕЛЕН (ревью): ошибка в scroll (например, коллекции ещё
+    # нет) оставляла клиент открытым — embedded-Qdrant однопроцессный, и
+    # индексация из другого процесса навсегда получала «база занята»
+    try:
+        while True:
+            pts, offset = client.scroll(collection_name=coll, with_payload=True,
+                                        with_vectors=False, limit=512, offset=offset)
+            for p in pts:
+                pl = p.payload or {}
+                text = pl.get("text", "") or ""
+                if not text:
+                    continue
+                for ind in INDICATORS:
+                    for val in _scan_text(text, ind):
+                        inds[ind["key"]]["candidates"].append({
+                            "value": val, "unit": ind["unit"],
+                            "file": pl.get("file", ""), "section": pl.get("section", ""),
+                            "loc": pl.get("loc", ""), "chunk_id": str(p.id),
+                            "snippet": text[:400],
+                        })
+                seen += 1
+                if progress and seen % 500 == 0:
+                    progress(seen, f"Просмотрено фрагментов: {seen}")
+            if offset is None or (limit_chunks and seen >= limit_chunks):
+                break
+    finally:
+        store.close()
 
     # схлопываем одинаковые значения, считаем встречаемость и расхождения
     for key, rec in inds.items():

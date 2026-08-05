@@ -11,7 +11,8 @@
 # torch>=2.6 is required (fixes CVE-2025-32434, safetensors weight loading).
 
 # --- UI / launch ---
-streamlit>=1.49
+# GUI is stdlib-only (http.server + vanilla HTML/JS, see app/gui/).
+# No streamlit/flask/react - zero extra dependencies, fully offline.
 
 # --- scientific core (needed by PyTorch/pandas; installed early) ---
 numpy>=1.26,<2.3
