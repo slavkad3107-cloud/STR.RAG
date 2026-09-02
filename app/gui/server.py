@@ -669,12 +669,34 @@ def main(open_browser: bool = True):
                         break
                 except Exception:  # noqa: BLE001
                     time.sleep(0.4)
+            url = f"http://{HOST}:{PORT}/"
+            opened = False
+            # 1) os.startfile — тот же механизм, что `start URL`, надёжнее
+            #    webbrowser под свёрнутым/фоновым процессом (у пользователя
+            #    webbrowser молчал — в логе не было «браузер открыт»)
             try:
-                webbrowser.open(f"http://{HOST}:{PORT}/")
-                _log("браузер открыт")
-            except Exception as e:  # noqa: BLE001
-                _log(f"не удалось открыть браузер: {e!r} — откройте вручную "
-                     f"http://{HOST}:{PORT}/")
+                import os
+                os.startfile(url)  # type: ignore[attr-defined]
+                opened = True
+            except Exception:  # noqa: BLE001
+                pass
+            if not opened:
+                try:
+                    webbrowser.open(url)
+                    opened = True
+                except Exception:  # noqa: BLE001
+                    pass
+            if not opened:
+                # крайний случай: cmd /c start
+                try:
+                    import subprocess
+                    subprocess.run(["cmd", "/c", "start", "", url], timeout=10,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    opened = True
+                except Exception:  # noqa: BLE001
+                    pass
+            _log(f"браузер открыт: {url}" if opened else
+                 f"НЕ удалось открыть браузер — откройте вручную: {url}")
         threading.Thread(target=_open_when_ready, daemon=True).start()
     _log(f"СТРОЙ.RAG готов: http://{HOST}:{PORT}/")
     try:
