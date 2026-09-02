@@ -331,6 +331,61 @@ def api_export(q, body):
     return {"path": str(f(p))}
 
 
+def _corr_dir(project: str) -> Path:
+    """Исходные тома для корректировки живут ОТДЕЛЬНО от tmp_uploads: их не
+    трогают ни индексация, ни «Очистить временные файлы»."""
+    from pmoos.paths import project_paths
+    d = project_paths(project)["root"] / "corr_sources"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def api_corr_upload(q, body_bytes):
+    """Загрузка ИСХОДНОГО тома раздела (.docx) для внесения правок."""
+    name = Path(urllib.parse.unquote(q.get("name", "том.docx"))).name
+    if not name.lower().endswith(".docx"):
+        raise ValueError("нужен .docx (старый .doc пересохраните в Word как .docx)")
+    dest = _corr_dir(q["project"]) / re.sub(_BAD_RX, "_", name)
+    dest.write_bytes(body_bytes)
+    return {"saved": dest.name}
+
+
+def api_corr_list(q, body):
+    d = _corr_dir(q["project"])
+    return {"volumes": [{"name": f.name, "kb": f.stat().st_size // 1024}
+                        for f in sorted(d.glob("*.docx"))]}
+
+
+def api_corr_preview(q, body):
+    """DRY-RUN: что и куда встанет — замены по месту / по якорю / в конец."""
+    from pmoos.output.docx_writer import preview_corrections
+    srcs = sorted(_corr_dir(body["project"]).glob("*.docx"))
+    if not srcs:
+        raise FileNotFoundError("сначала загрузите исходные тома (.docx)")
+    return preview_corrections(body["project"], [str(s) for s in srcs])
+
+
+def api_corr_write(q, body):
+    """СФОРМИРОВАТЬ откорректированный раздел: *_КОРР.docx с правками
+    («было»→«стало» по месту с жёлтой заливкой; остальное — по якорям)."""
+    from pmoos.output.docx_writer import write_corrected_volumes
+    p = body["project"]
+    srcs = sorted(_corr_dir(p).glob("*.docx"))
+    if not srcs:
+        raise FileNotFoundError("сначала загрузите исходные тома (.docx)")
+    outs, failed = write_corrected_volumes(p, [str(s) for s in srcs])
+    return {"outputs": [str(o) for o in outs],
+            "names": [o.name for o in outs], "failed": failed}
+
+
+def api_corr_delete(q, body):
+    d = _corr_dir(body["project"])
+    t = d / Path(str(body.get("name", ""))).name
+    if t.exists():
+        t.unlink()
+    return {"ok": True}
+
+
 def api_uprza_import(q, body_bytes):
     from pmoos.output.uprza_import import import_uprza_results
     from pmoos.paths import project_paths
@@ -381,9 +436,11 @@ ROUTES_JSON = {
     "answers_ctl": api_answers_ctl, "answers_state": api_answers_state,
     "answers": api_answers, "decide": api_decide, "export": api_export,
     "uprza": api_uprza, "open": api_open, "health": api_health,
+    "corr_list": api_corr_list, "corr_preview": api_corr_preview,
+    "corr_write": api_corr_write, "corr_delete": api_corr_delete,
 }
 ROUTES_RAW = {"upload": api_upload, "remarks_upload": api_remarks_upload,
-              "uprza_import": api_uprza_import}
+              "uprza_import": api_uprza_import, "corr_upload": api_corr_upload}
 ROUTES_BIN = {"scan": api_scan}
 
 
@@ -425,7 +482,8 @@ class Handler(BaseHTTPRequestHandler):
             # а не молчаливый «фантомный» проект (найдено ревью)
             if name in ("info", "index_state", "registry", "answers",
                         "answers_state", "uprza", "scan", "upload",
-                        "remarks_upload", "uprza_import"):
+                        "remarks_upload", "uprza_import", "corr_upload",
+                        "corr_list"):
                 if not q.get("project", "").strip():
                     raise ValueError("не выбран объект/проект — создайте его "
                                      "кнопкой «+ Новый»")

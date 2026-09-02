@@ -346,6 +346,54 @@ def test_single_model_mode(tmp_path, monkeypatch):
     assert load_config().resolve_provider("module4") == "deepseek"  # режим выключен
 
 
+def test_corrected_volume_replace_in_place(tmp_path, monkeypatch):
+    # ЗАПРОС ЮЗЕРА 05.08: «должен быть сформирован новый раздел ООС с учётом
+    # исправлений» — правка «БЫЛО→СТАЛО» вносится ПРЯМО В ТЕКСТ тома
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json
+    from docx import Document
+    from pmoos.projects import register_project
+    from pmoos.paths import project_paths
+    from pmoos.output.docx_writer import write_corrected_volumes, preview_corrections
+    register_project("КОР")
+    # исходный «том»
+    src = tmp_path / "том 6.1.docx"
+    d = Document()
+    d.add_paragraph("Общие сведения об объекте реконструкции автодороги.")
+    d.add_paragraph("В границах реконструкции объекта земли лесного фонда "
+                    "и земли сельскохозяйственного назначения отсутствуют.")
+    d.add_paragraph("Прочий текст раздела без изменений.")
+    d.save(str(src))
+    # принятые ответы: №1 — замена по месту, №2 — только примечание (без was)
+    pa = project_paths("КОР")["answers"]
+    pa.parent.mkdir(parents=True, exist_ok=True)
+    pa.write_text(json.dumps({"answers": [
+        {"number": "1", "status": "accepted", "answer": "о1",
+         "remark": "уточнить земли",
+         "edit_was": "земли лесного фонда и земли сельскохозяйственного "
+                     "назначения отсутствуют",
+         "edit_shall": "земли сельскохозяйственного назначения отсутствуют; "
+                       "земли лесного фонда представлены кварталами 178, 560"},
+        {"number": "2", "status": "accepted", "answer": "о2",
+         "remark": "дополнить таблицу 5",
+         "correction": "дополнить таблицу 5 данными о фоне"},
+        {"number": "3", "status": "rejected", "answer": "о3",
+         "edit_was": "Прочий текст раздела", "edit_shall": "НЕ ДОЛЖНО ПОПАСТЬ"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    prev = preview_corrections("КОР", [str(src)])
+    assert prev["accepted"] == 2                      # rejected не считается
+    assert any("ЗАМЕНА" in c["placed"] for c in prev["volumes"][0]["changes"])
+    outs, failed = write_corrected_volumes("КОР", [str(src)])
+    assert outs and not failed
+    txt = chr(10).join(par.text for par in Document(str(outs[0])).paragraphs)
+    assert "кварталами 178, 560" in txt               # «стало» вошло
+    assert "изм. по замечанию №1" in txt              # пометка на месте замены
+    assert "и земли сельскохозяйственного назначения отсутствуют." not in txt
+    assert "НЕ ДОЛЖНО ПОПАСТЬ" not in txt             # отклонённое — вне тома
+    assert "Прочий текст раздела без изменений." in txt   # чужой текст цел
+    assert "№2" in txt or "замечанию №2" in txt       # примечание для №2 есть
+
+
 def test_gui_server_api(tmp_path, monkeypatch):
     # оболочка КАК В ЭКО.DOC (ТЗ 31.07): stdlib-сервер + один index.html,
     # без Streamlit/Flask вообще. Поднимаем сервер на свободном порту и

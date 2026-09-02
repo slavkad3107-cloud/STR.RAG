@@ -78,7 +78,7 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 async function api(name, body, q) {
-  const qs = new URLSearchParams(Object.assign({}, q, name.match(/^(info|index_state|registry|answers|answers_state|uprza)$/) ? {project: P} : {})).toString();
+  const qs = new URLSearchParams(Object.assign({}, q, name.match(/^(info|index_state|registry|answers|answers_state|uprza|corr_list)$/) ? {project: P} : {})).toString();
   const r = await fetch(`/api/${name}${qs ? "?" + qs : ""}`,
     body === undefined ? {} : {method: "POST", body: JSON.stringify(body)});
   const d = await r.json();
@@ -417,8 +417,25 @@ async function decideAll(status) {
 }
 
 /* ── ВЫГРУЗКА ── */
-function renderExport() {
+async function renderExport() {
+  let cv = {volumes: []};
+  try { cv = await api("corr_list"); } catch (e) {}
   $("tab4").innerHTML = `
+  <div class="card"><h3>📝 ОТКОРРЕКТИРОВАННЫЙ РАЗДЕЛ (том с внесёнными правками)</h3>
+    <div class="msg">Загрузите исходные тома раздела (.docx) — правки из ПРИНЯТЫХ
+      ответов будут внесены прямо в текст: найденное «БЫЛО» заменяется на «СТАЛО»
+      (жёлтая заливка + № замечания), остальное встаёт по якорям «п./табл./раздел».
+      Результат — файлы <b>*_КОРР.docx</b>.</div>
+    <button class="sec" onclick="$('corrInp').click()">📄 Загрузить исходные тома (.docx)…</button>
+    <input type="file" id="corrInp" hidden multiple accept=".docx" onchange="corrUpload(this.files)">
+    <table style="margin:6px 0"><tbody>${cv.volumes.map(v =>
+      `<tr><td>${esc(v.name)}</td><td style="width:80px">${v.kb} КБ</td>
+       <td style="width:60px"><button class="sec" data-cdel="${esc(v.name)}">✖</button></td></tr>`).join("") ||
+      "<tr><td class='msg'>исходные тома не загружены</td></tr>"}</tbody></table>
+    <button class="sec" onclick="corrPreview()" ${cv.volumes.length ? "" : "disabled"}>👀 Предпросмотр правок</button>
+    <button class="act" onclick="corrWrite()" ${cv.volumes.length ? "" : "disabled"}>📝 Сформировать откорректированный раздел</button>
+    <div id="corrBox" class="msg"></div>
+  </div>
   <div class="card"><h3>Документы для экспертизы (папка out проекта)</h3>
     <button class="act" onclick="doExport('answers_docx')">📋 Таблица ответов (docx)</button>
     <button class="act" onclick="doExport('answers_xlsx')">📋 Таблица ответов (xlsx)</button>
@@ -427,6 +444,52 @@ function renderExport() {
     <button class="act" onclick="doExport('draft')">🏗 Каркас раздела из базы (docx)</button>
     <div class="msg" id="expMsg"></div>
   </div>`;
+  document.querySelectorAll("[data-cdel]").forEach(b =>
+    b.onclick = async () => {
+      try { await api("corr_delete", {project: P, name: b.dataset.cdel}); renderExport(); }
+      catch (e) { err(e); }
+    });
+}
+async function corrUpload(files) {
+  let n = 0;
+  for (const f of files) {
+    try { await apiRaw("corr_upload", {name: encodeURIComponent(f.name)}, f); n++; }
+    catch (e) { err(e); }
+  }
+  toast(`Загружено томов: ${n}`); renderExport();
+}
+async function corrPreview() {
+  $("corrBox").textContent = "Анализ томов…";
+  try {
+    const r = await api("corr_preview", {project: P});
+    const L = [`Принятых ответов: ${r.accepted}. Правок к внесению: ${r.total}.`];
+    for (const v of r.volumes) {
+      L.push(`
+▼ ${v.volume}${v.error ? "  ⚠ " + v.error : ""}`);
+      for (const c of v.changes.slice(0, 40))
+        L.push(`  №${c.number}: ${c.placed}`);
+      if (v.changes.length > 40) L.push(`  … и ещё ${v.changes.length - 40}`);
+    }
+    $("corrBox").textContent = L.join("
+");
+  } catch (e) { $("corrBox").textContent = ""; err(e); }
+}
+async function corrWrite() {
+  $("corrBox").textContent = "Внесение правок в тома…";
+  try {
+    const r = await api("corr_write", {project: P});
+    let t = "✅ Готово: " + r.names.join(", ");
+    if ((r.failed || []).length) t += "
+⚠ НЕ обработаны: " + r.failed.join("; ");
+    $("corrBox").textContent = t;
+    if (r.outputs[0]) {
+      const b = document.createElement("button");
+      b.className = "sec"; b.textContent = "Открыть папку результатов";
+      b.onclick = () => openPath(r.outputs[0]);
+      $("corrBox").appendChild(document.createElement("br"));
+      $("corrBox").appendChild(b);
+    }
+  } catch (e) { $("corrBox").textContent = ""; err(e); }
 }
 async function doExport(kind) {
   $("expMsg").textContent = "Формирование…";

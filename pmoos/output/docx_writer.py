@@ -297,6 +297,16 @@ def preview_corrections(project: str, sources: list) -> dict:
         changes = []
         for a in mine:
             corr = (a.get("correction") or "").strip()
+            # приоритет — ЗАМЕНА ПО МЕСТУ (найден фрагмент «как написано сейчас»)
+            rx = _was_regex((a.get("edit_was") or "").strip())
+            if rx and (a.get("edit_shall") or "").strip() and \
+                    any(rx.search(lt) for _p, lt in ptexts):
+                changes.append({
+                    "number": a.get("number", "?"),
+                    "placed": "ЗАМЕНА текста по месту («было» найдено в томе)",
+                    "correction": a.get("edit_shall", ""),
+                })
+                continue
             tok = _anchor_token(corr) or _anchor_token(a.get("remark", ""))
             found = bool(tok) and any(_anchor_re(tok).search(lt) for _p, lt in ptexts)
             changes.append({
@@ -312,6 +322,52 @@ def preview_corrections(project: str, sources: list) -> dict:
         result["volumes"].append(vol)
         result["total"] += len(changes)
     return result
+
+
+def _was_regex(edit_was: str):
+    """Регэксп для поиска фрагмента «как написано сейчас» в абзаце тома:
+    пробелы/переносы в docx гуляют, поэтому токены сшиваем через \\s+."""
+    import re
+    toks = [re.escape(t) for t in (edit_was or "").split() if t]
+    if len(toks) < 3:            # слишком короткое «было» — велик риск ложной замены
+        return None
+    return re.compile(r"\s+".join(toks), re.I | re.S)
+
+
+def _try_replace_in_place(ptexts, a: dict, anchor_last: dict) -> bool:
+    """ЗАМЕНА ТЕКСТА ПО МЕСТУ (v0.44): если «edit_was» найден в абзаце тома —
+    старый фрагмент заменяется на «edit_shall» (жёлтая заливка + пометка
+    №замечания). Это и есть «новый раздел с учётом исправлений», а не
+    примечание рядом. Форматирование остальной части абзаца сохраняется:
+    правится только последний run, накрывающий фрагмент, либо абзац
+    пересобирается тремя run'ами (до/СТАЛО/после)."""
+    from docx.enum.text import WD_COLOR_INDEX
+    was, shall = (a.get("edit_was") or "").strip(), (a.get("edit_shall") or "").strip()
+    rx = _was_regex(was)
+    if not (rx and shall):
+        return False
+    for par, low in ptexts:
+        if par is None:
+            continue
+        m = rx.search(par.text or "")
+        if not m:
+            continue
+        before, after = par.text[:m.start()], par.text[m.end():]
+        for r in list(par.runs):          # пересборка абзаца: до | СТАЛО | после
+            r.text = ""
+        runs_src = par.runs or [par.add_run("")]
+        base = runs_src[0]
+        base.text = before
+        num = a.get("number", "?")
+        r2 = par.add_run(f"{shall} ")
+        r2.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        r3 = par.add_run(f"[изм. по замечанию №{num}]")
+        r3.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        r3.italic = True
+        if after:
+            par.add_run(after)
+        return True
+    return False
 
 
 def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], list[str]]:
@@ -355,8 +411,14 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
         ptexts = [(p, (p.text or "").lower()) for p in _iter_all_paragraphs(doc)]
         tail = []
         anchor_last: dict[int, object] = {}  # якорь → последний вставленный абзац
+        replaced = 0
         for a in mine:
             num = a.get("number", "?")
+            # СНАЧАЛА пробуем заменить текст ПО МЕСТУ («было»→«стало», v0.44) —
+            # только если не вышло, вставляем правку-примечание рядом с якорем
+            if _try_replace_in_place(ptexts, a, anchor_last={}):
+                replaced += 1
+                continue
             ans = (a.get("user_answer") or a.get("answer") or "").strip()
             corr = (a.get("correction") or "").strip()
             runs = [(f"[Изменение по замечанию №{num}] ", True, True)]
@@ -388,7 +450,8 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
         out = out_dir / f"{src.stem}_КОРР.docx"
         doc.save(str(out))
         outs.append(out)
-        print(f"[m5] {src.name}: правок {len(mine)} → {out.name}", flush=True)
+        print(f"[m5] {src.name}: правок {len(mine)} (замен по месту {replaced}) "
+              f"→ {out.name}", flush=True)
     if failed and not outs:
         raise RuntimeError("Ни один том не удалось открыть: " + "; ".join(failed)
                            + ". Откройте файлы в Word и пересохраните как .docx.")
