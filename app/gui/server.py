@@ -25,6 +25,23 @@ if str(APP_ROOT) not in sys.path:
 HOST, PORT = "127.0.0.1", 8747
 _HTML = Path(__file__).with_name("index.html")
 
+
+def _log(msg: str) -> None:
+    """Диагностика старта: в консоль (если есть) И в файл gui_server.log в
+    каталоге данных — чтобы под pythonw/при «чёрном окне» была видна причина."""
+    line = f"[gui] {msg}"
+    try:
+        print(line, flush=True)
+    except Exception:  # noqa: BLE001 — pythonw без консоли
+        pass
+    try:
+        from pmoos.paths import data_root
+        with open(data_root() / "gui_server.log", "a", encoding="utf-8") as f:
+            import datetime
+            f.write(f"{datetime.datetime.now():%H:%M:%S} {msg}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
 # фоновые задачи в процессе сервера (сбор показателей): project → {running, error}
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
@@ -619,7 +636,7 @@ def main(open_browser: bool = True):
                 # (embedded-Qdrant однопроцессный), просто открываем браузер
                 if open_browser:
                     webbrowser.open(f"http://{HOST}:{port}/")
-                print(f"[gui] сервер уже работает: http://{HOST}:{port}/", flush=True)
+                _log(f"сервер уже работает: http://{HOST}:{port}/")
                 return
             # порт занят, но /api/meta не ответил: либо наш ЗАЛИПШИЙ экземпляр
             # (его добиваем — из-за него и был «зависший запуск»), либо чужой
@@ -627,8 +644,7 @@ def main(open_browser: bool = True):
             # по exe владельца порта (python), pid точный из netstat -ano.
             owner = _pid_on_port(port)
             if owner and owner != me and _is_python_pid(owner):
-                print(f"[gui] добиваю залипший сервер (pid {owner}) на порту {port}",
-                      flush=True)
+                _log(f"добиваю залипший сервер (pid {owner}) на порту {port}")
                 _kill_pid(owner)
                 time.sleep(1.2)
                 PORT = port
@@ -637,18 +653,43 @@ def main(open_browser: bool = True):
         PORT = port
         break
     else:
-        print("[gui] нет свободного порта 8747-8756", flush=True)
+        _log("нет свободного порта 8747-8756")
         return
     threading.Thread(target=startup_background, daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     if open_browser:
-        threading.Timer(0.6, lambda: webbrowser.open(f"http://{HOST}:{PORT}/")).start()
-    print(f"[gui] СТРОЙ.RAG: http://{HOST}:{PORT}/  (Ctrl+C — выход)", flush=True)
+        # открываем браузер ТОЛЬКО когда сервер реально отвечает (не по таймеру:
+        # на медленной машине 0.6 с не хватало и открывалась пустая страница)
+        def _open_when_ready():
+            import urllib.request
+            for _ in range(40):
+                try:
+                    with urllib.request.urlopen(f"http://{HOST}:{PORT}/api/meta",
+                                                timeout=1):
+                        break
+                except Exception:  # noqa: BLE001
+                    time.sleep(0.4)
+            try:
+                webbrowser.open(f"http://{HOST}:{PORT}/")
+                _log("браузер открыт")
+            except Exception as e:  # noqa: BLE001
+                _log(f"не удалось открыть браузер: {e!r} — откройте вручную "
+                     f"http://{HOST}:{PORT}/")
+        threading.Thread(target=_open_when_ready, daemon=True).start()
+    _log(f"СТРОЙ.RAG готов: http://{HOST}:{PORT}/")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    except Exception as e:  # noqa: BLE001
+        _log(f'СБОЙ serve_forever: {e!r}')
 
 
 if __name__ == "__main__":
-    main(open_browser="--no-browser" not in sys.argv)
+    _log(f"старт процесса pid={__import__('os').getpid()} argv={sys.argv}")
+    try:
+        main(open_browser="--no-browser" not in sys.argv)
+    except Exception as e:  # noqa: BLE001 — под pythonw иначе «тихо падает»
+        import traceback
+        _log("КРИТИЧЕСКИЙ СБОЙ ЗАПУСКА: " + traceback.format_exc())
+        raise

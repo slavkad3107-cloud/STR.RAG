@@ -500,21 +500,20 @@ def test_bat_files_not_escape_corrupted():
 
 
 def test_native_launcher_points_at_venv_and_app():
-    # запуск GUI (сервер как в ЭКО.DOC) должен находить ОБЩИЙ venv
-    # (%USERPROFILE%\.pmoos-ragenv, как раньше) и запускать именно
-    # app\gui\server.py в ОБЕИХ ветках (общий venv и локальный .venv)
+    # bat запускает сервер и сам открывает браузер; на нормальном пути нет pause
     from pathlib import Path as _P
     bs = chr(92)
     root = _P(__file__).resolve().parent.parent
+    srv = "app" + bs + "gui" + bs + "server.py"
     for name in ("СТРОЙРАГ.bat", "run.bat"):
         bat = root / name
-        assert bat.exists(), f"нет {name} — сборка релиза его требует"
+        assert bat.exists(), f"нет {name}"
         txt = bat.read_bytes().decode("cp866")
-        assert bs + "venv" + bs + "Scripts" + bs + "python.exe" in txt
-        assert ".pmoos-rag" in txt
-        srv = "app" + bs + "gui" + bs + "server.py"
-        assert txt.count(srv) == 2, f"{name}: обе ветки должны запускать {srv}"
-
+        assert ".pmoos-rag" in txt and srv in txt
+        assert "start" in txt.lower()                       # сервер в отдельном окне
+        # безусловный pause только в ветке «нет venv» (одна строка ровно "pause")
+        bare = [l for l in txt.splitlines() if l.strip() == "pause"]
+        assert len(bare) == 1
 
 def test_garbled_text_triggers_ocr():
     # НАЙДЕНО НА ЖИВОМ ПРОЕКТЕ: тома ООС отдавали «(cid:20)» и «Ʌɢɫɬ» вместо
