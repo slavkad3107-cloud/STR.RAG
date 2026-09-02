@@ -564,10 +564,50 @@ def _ours_on(port: int) -> bool:
         return False
 
 
+def _pid_on_port(port: int) -> int | None:
+    """PID процесса, слушающего порт (netstat -ano — точный pid, без разбора
+    командной строки; wmic-парсинг переносил длинные строки и убивал сам себя)."""
+    import subprocess
+    try:
+        r = subprocess.run(["netstat", "-ano", "-p", "tcp"],
+                           capture_output=True, text=True, timeout=10,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        for line in (r.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[0].upper() == "TCP" \
+                    and parts[1].endswith(f":{port}") and parts[3].upper() == "LISTENING":
+                return int(parts[4])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _kill_pid(pid: int) -> None:
+    import subprocess
+    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def _is_python_pid(pid: int) -> bool:
+    """Владелец порта — python? (чтобы не прибить чужой сервис на 8747).
+    tasklist по одному PID — вывод короткий, без переносов cmdline."""
+    import subprocess
+    try:
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                           capture_output=True, text=True, timeout=10,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return "python" in (r.stdout or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def main(open_browser: bool = True):
     global PORT
+    import os
     import socket
+    import time
     import webbrowser
+    me = os.getpid()
     for port in range(PORT, PORT + 10):
         probe = socket.socket()
         probe.settimeout(0.4)
@@ -575,12 +615,25 @@ def main(open_browser: bool = True):
         probe.close()
         if busy:
             if _ours_on(port):
-                # наш сервер уже работает — второй не нужен (Qdrant однопроцессный)
+                # наш сервер уже РАБОТАЕТ и отвечает — второй не нужен
+                # (embedded-Qdrant однопроцессный), просто открываем браузер
                 if open_browser:
                     webbrowser.open(f"http://{HOST}:{port}/")
                 print(f"[gui] сервер уже работает: http://{HOST}:{port}/", flush=True)
                 return
-            continue                    # порт занят ЧУЖИМ сервисом — пробуем следующий
+            # порт занят, но /api/meta не ответил: либо наш ЗАЛИПШИЙ экземпляр
+            # (его добиваем — из-за него и был «зависший запуск»), либо чужой
+            # сервис (не трогаем — уходим на следующий порт). Принадлежность —
+            # по exe владельца порта (python), pid точный из netstat -ano.
+            owner = _pid_on_port(port)
+            if owner and owner != me and _is_python_pid(owner):
+                print(f"[gui] добиваю залипший сервер (pid {owner}) на порту {port}",
+                      flush=True)
+                _kill_pid(owner)
+                time.sleep(1.2)
+                PORT = port
+                break
+            continue                       # чужой сервис — пробуем следующий порт
         PORT = port
         break
     else:

@@ -394,6 +394,18 @@ def test_corrected_volume_replace_in_place(tmp_path, monkeypatch):
     assert "№2" in txt or "замечанию №2" in txt       # примечание для №2 есть
 
 
+def test_server_launch_helpers():
+    # РЕГРЕССИЯ v0.44.1: запуск «зависал», т.к. _kill_stale_servers парсил wmic
+    # CSV (перенос длинных строк) и процесс убивал сам себя. Теперь владелец
+    # порта берётся из netstat -ano (точный pid), self-kill исключён по os.getpid.
+    import app.gui.server as S
+    assert hasattr(S, "_pid_on_port") and hasattr(S, "_is_python_pid")
+    assert not hasattr(S, "_kill_stale_servers")       # опасный подход удалён
+    src = __import__("inspect").getsource(S.main)
+    assert "os.getpid()" in src and "owner != me" in src   # себя не трогаем
+    assert "wmic" not in src                            # не парсим wmic в main
+
+
 def test_gui_server_api(tmp_path, monkeypatch):
     # оболочка КАК В ЭКО.DOC (ТЗ 31.07): stdlib-сервер + один index.html,
     # без Streamlit/Flask вообще. Поднимаем сервер на свободном порту и
