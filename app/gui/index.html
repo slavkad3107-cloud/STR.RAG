@@ -464,14 +464,12 @@ async function corrPreview() {
     const r = await api("corr_preview", {project: P});
     const L = [`Принятых ответов: ${r.accepted}. Правок к внесению: ${r.total}.`];
     for (const v of r.volumes) {
-      L.push(`
-▼ ${v.volume}${v.error ? "  ⚠ " + v.error : ""}`);
+      L.push(`\n▼ ${v.volume}${v.error ? "  ⚠ " + v.error : ""}`);
       for (const c of v.changes.slice(0, 40))
         L.push(`  №${c.number}: ${c.placed}`);
       if (v.changes.length > 40) L.push(`  … и ещё ${v.changes.length - 40}`);
     }
-    $("corrBox").textContent = L.join("
-");
+    $("corrBox").textContent = L.join("\n");
   } catch (e) { $("corrBox").textContent = ""; err(e); }
 }
 async function corrWrite() {
@@ -479,8 +477,7 @@ async function corrWrite() {
   try {
     const r = await api("corr_write", {project: P});
     let t = "✅ Готово: " + r.names.join(", ");
-    if ((r.failed || []).length) t += "
-⚠ НЕ обработаны: " + r.failed.join("; ");
+    if ((r.failed || []).length) t += "\n⚠ НЕ обработаны: " + r.failed.join("; ");
     $("corrBox").textContent = t;
     if (r.outputs[0]) {
       const b = document.createElement("button");

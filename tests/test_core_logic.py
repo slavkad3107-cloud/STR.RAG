@@ -406,6 +406,27 @@ def test_server_launch_helpers():
     assert "wmic" not in src                            # не парсим wmic в main
 
 
+def test_index_html_js_valid():
+    # КРИТИЧНО (05.08): битый JS (реальный перенос строки в литерале от
+    # bash-heredoc) уезжал в релиз — страница пустая, «зависало». node --check
+    # ловит это; без node тест мягко пропускается (у CI/разработчика node есть).
+    import re, shutil, subprocess, tempfile, os
+    from pathlib import Path as _P
+    html = (_P(__file__).resolve().parent.parent / "app" / "gui" / "index.html").read_text(encoding="utf-8")
+    js = re.search(r"<script>\s*(.*?)\s*</script>", html, re.S).group(1)
+    node = shutil.which("node")
+    if not node:
+        import pytest as _pt
+        _pt.skip("node не установлен — пропуск проверки синтаксиса фронтенда")
+    f = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8")
+    f.write(js); f.close()
+    try:
+        r = subprocess.run([node, "--check", f.name], capture_output=True, text=True)
+        assert r.returncode == 0, "СЛОМАН JS в index.html: " + r.stderr[:400]
+    finally:
+        os.unlink(f.name)
+
+
 def test_gui_server_api(tmp_path, monkeypatch):
     # оболочка КАК В ЭКО.DOC (ТЗ 31.07): stdlib-сервер + один index.html,
     # без Streamlit/Flask вообще. Поднимаем сервер на свободном порту и
