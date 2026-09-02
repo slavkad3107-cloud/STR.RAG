@@ -246,7 +246,10 @@ def _sub_bounded(needle: str, hay: str) -> bool:
     (иначе правка для тома 6.1 вставала и в том 6 — находка аудита; тома у
     пользователя реально нумеруются 6/6.1/6.2)."""
     import re as _re
-    return bool(needle) and _re.search(_re.escape(needle) + r"(?![\d.])", hay) is not None
+    # граница: не цифра и не «.цифра» («том 6» ≠ «том 6.1»), но точка
+    # РАСШИРЕНИЯ допустима («том 6.3» ∈ «том 6.3.docx») — иначе (05.08) ни один
+    # ответ не матчился с томом и все 75 правок уезжали в первый том
+    return bool(needle) and _re.search(_re.escape(needle) + r"(?!\.?\d)", hay) is not None
 
 
 def _match_volume(a: dict, src: Path) -> bool:
@@ -265,121 +268,493 @@ def _match_volume(a: dict, src: Path) -> bool:
     return False
 
 
-def preview_corrections(project: str, sources: list) -> dict:
-    """DRY-RUN: что и куда будет вставлено в тома — БЕЗ записи файлов.
+# ─────────────── v0.45: настоящая корректировка тома ───────────────
+# Жалоба пользователя (05.08): «текст замечания просто напечатан поверх ООС —
+# нужно в ООС находить, где исправлять, что на что, и делать откорректированный
+# том». Диагностика на реальных томах ОПОЧКИ показала ТРИ причины:
+#  1) исходные .docx — конверсия из PDF с ИСПОРЧЕННОЙ кодировкой шрифта: в XML
+#     «Ɂɚɤɚɡɱɢɤ» вместо «Заказчик» (единое смещение +0x1D6 + 3 спецсимвола);
+#     поиск по нормальному тексту не находил НИЧЕГО;
+#  2) 33 % текста лежит в текстовых рамках (w:txbxContent) — python-docx их
+#     не обходит;
+#  3) каждая строка PDF — отдельный абзац (медиана 20 символов, слова разорваны
+#     переносами «сель скохозяйственного») — сравнение с одним абзацем бессмысленно.
+# Решение: декодер кодировки, обход всех w:p (включая рамки), поиск места по
+# ОКНУ соседних строк через символьные n-граммы без пробелов (переносам всё
+# равно), замена группы строк на «стало» СТАНДАРТНЫМ шрифтом (в кастомном
+# шрифте тома обычная кириллица показалась бы кракозябрами), markdown-таблица
+# → настоящая таблица docx, не найденное — компактно в конец без текста ответа.
+# Один план для предпросмотра и записи.
 
-    Возвращает {"volumes": [{"volume", "changes": [...]}], "total"}. Для каждой
-    правки: номер замечания, найден ли якорь (вставка рядом с местом) или уйдёт
-    «в конец», и текст правки. Даёт контроль перед НЕОБРАТИМОЙ записью в .docx."""
+_GARBLE_SHIFT = 0x1D6
+_GARBLE_EXTRA = {"ʋ": "№", "ɺ": "ё", "ʌ": "/", "Ɫ": "Л"}
+
+
+def decode_garbled(text: str) -> str:
+    """Восстановить кириллицу из «ɡɚɤɚɡɱɢɤ»-кодировки PDF→DOCX конверсий."""
+    out = []
+    for ch in text or "":
+        o = ord(ch)
+        if ch in _GARBLE_EXTRA:
+            out.append(_GARBLE_EXTRA[ch])
+        elif 0x0230 <= o <= 0x02AF:
+            d = o + _GARBLE_SHIFT
+            out.append(chr(d) if 0x0410 <= d <= 0x044F else ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def garble_ratio(text: str) -> float:
+    """Доля «испорченных» символов — признак конверсии из PDF."""
+    if not text:
+        return 0.0
+    bad = sum(1 for ch in text if 0x0230 <= ord(ch) <= 0x02AF)
+    return bad / len(text)
+
+
+def _all_paragraphs(doc):
+    """ВСЕ абзацы документа в документном порядке — тело, таблицы, текстовые
+    рамки (w:txbxContent): python-docx `paragraphs` рамок не видит, а в
+    PDF-конверсиях там треть текста."""
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph
+    # БЕЗ дедупа по id(el): lxml отдаёт временные прокси, id переиспользуется —
+    # такой «seen» молча пропускал абзацы (05.08: метки «терялись», 2 из 15).
+    # body.iter и так выдаёт каждый элемент ровно один раз.
+    for el in doc.element.body.iter(qn("w:p")):
+        yield Paragraph(el, doc)
+
+
+def _norm(s: str) -> str:
+    """Для сравнения: декод, нижний регистр, ё→е, без пробелов и пунктуации —
+    переносы строк PDF («свя зи») перестают мешать."""
+    import re as _re
+    s = decode_garbled(s or "").lower().replace("ё", "е")
+    return _re.sub(r"[^а-яa-z0-9]+", "", s)
+
+
+def _grams(s: str, n: int = 5) -> set[str]:
+    return {s[i:i + n] for i in range(len(s) - n + 1)} if len(s) >= n else set()
+
+
+_STOP_RU = {
+    "в", "на", "и", "с", "по", "для", "от", "до", "из", "при", "не", "что", "как",
+    "или", "а", "о", "об", "у", "к", "за", "же", "то", "это", "его", "их", "бы",
+    "был", "была", "были", "было", "быть", "также", "том", "тома", "раздел",
+    "разделе", "пункт", "пункте", "указано", "указан", "указана", "указаны",
+    "данные", "данных", "проект", "проекта", "проектом", "объект", "объекта",
+    "объекте", "настоящий", "настоящем", "рассматриваемого", "рассматриваемый",
+    "согласно", "соответствии", "требований", "требованиями", "приведены",
+    "приведен", "приведена", "представлены", "представлен", "представлена",
+    "отсутствуют", "отсутствует", "имеются", "имеется", "необходимо", "следует",
+}
+
+
+def _sig_words(text: str) -> set[str]:
+    """Значимые слова → префиксы 5 букв (грубый стемминг)."""
+    import re as _re
+    out: set[str] = set()
+    for w in _re.findall(r"[а-яёa-z0-9]+", decode_garbled(text or "").lower()):
+        if len(w) < 5 or w in _STOP_RU:
+            continue
+        out.add(w[:5])
+    return out
+
+
+def _loc_hints(location: str) -> list[str]:
+    import re as _re
+    hints = _re.findall(r"(?:п(?:ункт[аеуы]?|\.)|табл\w*\.?|разд\w*\.?)\s*№?\s*(\d+(?:\.\d+)*)",
+                        (location or "").lower())
+    multi = [h for h in hints if "." in h]
+    single = [h for h in hints if "." not in h]
+    return list(dict.fromkeys(multi + single))
+
+
+def _is_md_table(text: str) -> bool:
+    lines = [l for l in (text or "").splitlines() if l.strip()]
+    return len(lines) >= 2 and sum(1 for l in lines if l.count("|") >= 2) >= 2
+
+
+def _md_table_rows(text: str) -> list[list[str]]:
+    import re as _re
+    rows = []
+    for l in (text or "").splitlines():
+        if l.count("|") < 2:
+            continue
+        cells = [c.strip() for c in l.strip().strip("|").split("|")]
+        if all(_re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+            continue
+        rows.append(cells)
+    return rows
+
+
+class _Index:
+    """Индекс абзацев тома для быстрого нечёткого поиска."""
+
+    def __init__(self, doc):
+        self.pars = list(_all_paragraphs(doc))
+        self.text = [(p.text or "") for p in self.pars]
+        self.norm = [_norm(t) for t in self.text]
+        self.words = [_sig_words(t) for t in self.text]
+        self.garbled = garble_ratio("".join(self.text[:3000]))
+        # слово → множество индексов абзацев (для предфильтра кандидатов)
+        self.inv: dict[str, set[int]] = {}
+        for i, ws in enumerate(self.words):
+            for w in ws:
+                self.inv.setdefault(w, set()).add(i)
+
+    def window_text(self, i: int, k: int) -> str:
+        return "".join(self.norm[i:i + k])
+
+    def find(self, was: str, used: set[int], lo: int = 0, hi: int | None = None):
+        """Лучшее окно строк [i, i+k) для «было»: (i, k, score)."""
+        hi = len(self.pars) if hi is None else hi
+        ww = _sig_words(was)
+        wn = _norm(was)
+        wg = _grams(wn)
+        if len(ww) < 2 or len(wg) < 8:
+            return -1, 0, 0.0
+        # кандидаты: абзацы, где встречаются ≥2 значимых слова «было»
+        cnt: dict[int, int] = {}
+        for w in ww:
+            for i in self.inv.get(w, ()):
+                if lo <= i < hi:
+                    cnt[i] = cnt.get(i, 0) + 1
+        # топ-60 кандидатов по числу совпавших значимых слов: на 64k строк ×
+        # 75 ответов полный перебор окон занимал бы минуты
+        cands = sorted(cnt, key=lambda i: -cnt[i])[:60]
+        best = (-1, 0, 0.0)
+        target_len = len(wn)
+        for c in cands:
+            for start in range(max(lo, c - 3), c + 1):
+                if start in used:
+                    continue
+                acc = ""
+                for k in range(1, 12):
+                    if start + k > hi:
+                        break
+                    acc += self.norm[start + k - 1]
+                    if len(acc) < target_len * 0.5:
+                        continue
+                    if len(acc) > target_len * 2.2 + 40:
+                        break
+                    g = _grams(acc)
+                    if not g:
+                        continue
+                    score = len(wg & g) / len(wg)
+                    # штраф за окно сильно длиннее «было» (захват чужого текста)
+                    if len(acc) > target_len * 1.6:
+                        score *= 0.9
+                    if score > best[2]:
+                        best = (start, k, score)
+        return best
+
+    def find_heading(self, hint: str):
+        import re as _re
+        rx = _re.compile(r"(?<![\d.])" + _re.escape(hint) + r"(?![\d])")
+        for i, t in enumerate(self.text):
+            if len(t) < 140 and rx.search(decode_garbled(t)):
+                return i
+        return -1
+
+
+def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
+    """ПЛАН правок для одного тома: где и что менять. Общий для preview и записи.
+    Элемент: {number, mode: replace|insert|manual|skip, idx, k, score,
+    par_text, shall, location, is_table}."""
+    ix = _Index(doc)
+    used: set[int] = set()
+    plan: list[dict] = []
+    for a in answers:
+        num = a.get("number", "?")
+        # ДЕКОДИРУЕМ поля ответа: ИИ мог скопировать «ɢɧɬɟɧɫɢɜɧɨɫɬɶ» из индекса,
+        # собранного до фикса кодировки, — иначе мусор уехал бы в том (05.08)
+        shall = decode_garbled((a.get("edit_shall") or a.get("correction") or "").strip())
+        was = decode_garbled((a.get("edit_was") or "").strip())
+        loc = decode_garbled((a.get("edit_location") or "").strip())
+        remark = decode_garbled((a.get("remark") or "").strip())
+        e = {"number": num, "mode": "manual", "idx": -1, "k": 0, "score": 0.0,
+             "par_text": "", "shall": shall, "location": loc,
+             "is_table": _is_md_table(shall)}
+        if not shall:
+            e["mode"] = "skip"
+            plan.append(e)
+            continue
+        i, k, s = -1, 0, 0.0
+        if was:
+            # 1) в окне после заголовка пункта/таблицы из edit_location
+            for h in _loc_hints(loc):
+                hi_ = ix.find_heading(h)
+                if hi_ >= 0:
+                    i2, k2, s2 = ix.find(was, used, hi_, min(len(ix.pars), hi_ + 400))
+                    if s2 >= 0.45 and s2 > s:
+                        i, k, s = i2, k2, s2
+            # 2) по всему тому — при уверенном сходстве ЗАМЕНА; при среднем
+            #    (пересказ ИИ, 0.35–0.55) — безопасная ВСТАВКА после найденного
+            #    места, чтобы не испортить чужой абзац (калибровка 05.08)
+            near = None
+            if i < 0:
+                i2, k2, s2 = ix.find(was, used)
+                if s2 >= 0.55:
+                    i, k, s = i2, k2, s2
+                elif s2 >= 0.35:
+                    near = (i2, k2, s2)
+        if i >= 0:
+            used.update(range(i, i + k))
+            e.update(mode="replace", idx=i, k=k, score=round(s, 2),
+                     par_text=decode_garbled(" ".join(ix.text[i:i + k]))[:200])
+        elif near:
+            i2, k2, s2 = near
+            used.update(range(i2, i2 + k2))
+            e.update(mode="insert", idx=i2 + k2 - 1, k=1, score=round(s2, 2),
+                     par_text=decode_garbled(" ".join(ix.text[i2:i2 + k2]))[:160])
+        else:
+            for h in _loc_hints(loc):
+                hi_ = ix.find_heading(h)
+                if hi_ >= 0 and hi_ not in used:
+                    e.update(mode="insert", idx=hi_, k=1,
+                             par_text=decode_garbled(ix.text[hi_])[:160])
+                    used.add(hi_)
+                    break
+            # 3) место по ТЕКСТУ ЗАМЕЧАНИЯ: эксперт цитирует/пересказывает
+            #    конкретный фрагмент тома — ищем похожее окно и ВСТАВЛЯЕМ «стало»
+            #    сразу после него (не заменяем: уверенность ниже). Это лучше,
+            #    чем «в конец тома» для половины правок (05.08).
+            if e["mode"] == "manual" and remark:
+                i3, k3, s3 = ix.find(remark, used)
+                if s3 >= 0.30:
+                    last = i3 + k3 - 1
+                    used.update(range(i3, i3 + k3))
+                    e.update(mode="insert", idx=last, k=1, score=round(s3, 2),
+                             par_text=decode_garbled(" ".join(ix.text[i3:i3 + k3]))[:160])
+        plan.append(e)
+    return plan, ix
+
+
+def _std_run(run):
+    """Стандартный шрифт для ВСТАВЛЯЕМОГО текста: в томах-конверсиях шрифт
+    кастомный (глифы по смещённым кодам) — обычная кириллица в нём показалась
+    бы кракозябрами."""
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+    run.font.name = "Times New Roman"
+    rpr = run._r.get_or_add_rPr()
+    rf = rpr.find(qn("w:rFonts"))
+    if rf is None:
+        rf = rpr.makeelement(qn("w:rFonts"), {})
+        rpr.insert(0, rf)
+    for k in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
+        rf.set(qn(k), "Times New Roman")
+    run.font.size = Pt(12)
+
+
+def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
+    from docx.enum.text import WD_COLOR_INDEX
+    from docx.shared import Pt
+    stats = {"replace": 0, "insert": 0, "manual": 0, "skip": 0}
+    manual: list[dict] = []
+
+    def _yellow(run):
+        run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+
+    def _mark(par, num):
+        r = par.add_run(f" [изм. по замечанию №{num}]")
+        _std_run(r)
+        r.italic = True
+        r.font.size = Pt(8)
+        _yellow(r)
+
+    def _set_par(par, text):
+        for r in list(par.runs):
+            r.text = ""
+        base = par.runs[0] if par.runs else par.add_run("")
+        base.text = text
+        _std_run(base)
+        _yellow(base)
+        return base
+
+    def _table_after(par, rows):
+        if not rows:
+            return
+        ncols = max(len(r) for r in rows)
+        tbl = doc.add_table(rows=len(rows), cols=ncols)
+        try:
+            tbl.style = "Table Grid"
+        except KeyError:
+            # в томах-конверсиях из PDF стандартных стилей нет — рисуем
+            # границы вручную (w:tblBorders), иначе таблица без линий
+            from docx.oxml.ns import qn as _qn
+            from docx.oxml import OxmlElement
+            tpr = tbl._tbl.tblPr
+            borders = OxmlElement("w:tblBorders")
+            for side in ("top", "left", "bottom", "right", "insideH", "insideV"):
+                b = OxmlElement(f"w:{side}")
+                b.set(_qn("w:val"), "single")
+                b.set(_qn("w:sz"), "4")
+                b.set(_qn("w:color"), "000000")
+                borders.append(b)
+            tpr.append(borders)
+        for i, row in enumerate(rows):
+            for j in range(ncols):
+                cell = tbl.cell(i, j)
+                cell.text = row[j] if j < len(row) else ""
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        _std_run(r)
+                        r.font.size = Pt(9)
+                        r.bold = (i == 0)
+                        _yellow(r)
+        par._p.addnext(tbl._tbl)
+
+    for e in plan:
+        mode = e["mode"]
+        if mode == "skip":
+            stats["skip"] += 1
+            continue
+        if mode == "manual":
+            manual.append(e)
+            stats["manual"] += 1
+            continue
+        par = ix.pars[e["idx"]]
+        shall, num = e["shall"], e["number"]
+        head_lines = [l for l in shall.splitlines() if l.strip() and l.count("|") < 2]
+        body = " ".join(head_lines) if e["is_table"] else shall
+        if mode == "replace":
+            _set_par(par, body)
+            _mark(par, num)
+            # остальные строки окна — очищаем (текст перенесён в первую)
+            for j in range(e["idx"] + 1, e["idx"] + e["k"]):
+                for r in list(ix.pars[j].runs):
+                    r.text = ""
+        else:  # insert после заголовка
+            np = _insert_paragraph_after(par, [])
+            _set_par(np, body)
+            _mark(np, num)
+            par = np
+        if e["is_table"]:
+            from docx.oxml.ns import qn as _qn
+            in_box = any(anc.tag == _qn("w:txbxContent") for anc in par._p.iterancestors())
+            if in_box:
+                # внутри текстовой рамки настоящую таблицу Word может не открыть —
+                # кладём строки текстом «ячейка | ячейка»
+                for row in _md_table_rows(shall):
+                    np2 = _insert_paragraph_after(par, [])
+                    _set_par(np2, " | ".join(row))
+                    par = np2
+            else:
+                _table_after(par, _md_table_rows(shall))
+        stats[mode] += 1
+
+    if manual:
+        h = doc.add_paragraph()
+        hr = h.add_run("ПРАВКИ ПО ЗАМЕЧАНИЯМ, ТРЕБУЮЩИЕ РУЧНОГО ВНЕСЕНИЯ "
+                       "(место в томе автоматически не найдено)")
+        _std_run(hr)
+        hr.bold = True
+        for e in manual:
+            p = doc.add_paragraph()
+            r1 = p.add_run(f"№{e['number']}. ")
+            _std_run(r1)
+            r1.bold = True
+            if e["location"]:
+                r2 = p.add_run(f"Где: {e['location']}. ")
+                _std_run(r2)
+                r2.italic = True
+            r3 = p.add_run(e["shall"])
+            _std_run(r3)
+            _yellow(r3)
+    return stats
+
+
+# кэш планов: предпросмотр и запись идут подряд, а разбор тома-конверсии
+# (60k строк) стоит ~13 с на том — не делаем его дважды
+_PLAN_CACHE: dict[tuple, tuple] = {}
+_PLAN_TTL = 600.0
+
+
+def _answers_key(answers: list[dict]) -> tuple:
+    return tuple((str(a.get("number")), a.get("status"),
+                  len(a.get("edit_shall") or ""), len(a.get("correction") or ""))
+                 for a in answers)
+
+
+def _plan_for(src, mine: list[dict]):
+    """(doc, plan, ix) для тома — из кэша, если том и ответы не менялись."""
+    import time as _t
+    from docx import Document
+    key = (str(src), src.stat().st_mtime, _answers_key(mine))
+    hit = _PLAN_CACHE.get(key)
+    if hit and _t.time() - hit[3] < _PLAN_TTL:
+        return hit[0], hit[1], hit[2]
+    doc = Document(str(src))
+    plan, ix = plan_corrections(doc, mine)
+    # держим не больше 3 томов (по 30 МБ каждый)
+    if len(_PLAN_CACHE) >= 3:
+        _PLAN_CACHE.pop(next(iter(_PLAN_CACHE)))
+    _PLAN_CACHE[key] = (doc, plan, ix, _t.time())
+    return doc, plan, ix
+
+
+def _volume_answers(answers: list[dict], srcs: list, si: int, src) -> list[dict]:
+    """Ответы данного тома (по полю «Том ООС»); без тома — в первый."""
+    if len(srcs) <= 1:
+        return list(answers)
+    matched_ids = {id(a) for s2 in srcs for a in answers if _match_volume(a, s2)}
+    mine = [a for a in answers if _match_volume(a, src)]
+    if si == 0:
+        mine += [a for a in answers if id(a) not in matched_ids]
+    return mine
+
+
+def _placed_text(e: dict) -> str:
+    if e["mode"] == "replace":
+        return (f"ЗАМЕНА {e['k']} стр. (сходство {int(e['score'] * 100)}%): "
+                f"«{e['par_text'][:120]}…»")
+    if e["mode"] == "insert":
+        return f"ВСТАВКА после «{e['par_text'][:80]}»"
+    if e["mode"] == "skip":
+        return "пропуск: у ответа нет текста правки («стало»/«правка»)"
+    return ("в конец тома, раздел «требуют ручного внесения»"
+            + (f" (указано: {e['location'][:70]})" if e["location"] else ""))
+
+
+def preview_corrections(project: str, sources: list) -> dict:
+    """DRY-RUN: тот же план, что и при записи — что и КУДА встанет, с цитатой
+    заменяемого фрагмента (декодированной) и оценкой сходства."""
     from docx import Document
     data = _load_answers(project)
     answers = [a for a in data.get("answers", [])
                if a.get("status") in ("accepted", "edited")]
     srcs = [Path(s) for s in sources if s]
-    result = {"volumes": [], "total": 0, "accepted": len(answers)}
-    if not srcs:
-        return result
-    matched_ids = {id(a) for s2 in srcs for a in answers if _match_volume(a, s2)}
+    result = {"volumes": [], "total": 0, "accepted": len(answers),
+              "stats": {"replace": 0, "insert": 0, "manual": 0, "skip": 0}}
     for si, src in enumerate(srcs):
-        if len(srcs) > 1:
-            mine = [a for a in answers if _match_volume(a, src)]
-            if si == 0:
-                mine += [a for a in answers if id(a) not in matched_ids]
-        else:
-            mine = list(answers)
-        vol_error = ""
+        mine = _volume_answers(answers, srcs, si, src)
+        vol = {"volume": src.name, "changes": [], "answers": len(mine)}
         try:
-            doc = Document(str(src))
-            ptexts = [(None, (p.text or "").lower()) for p in _iter_all_paragraphs(doc)]
-        except Exception as e:  # noqa: BLE001 — предпросмотр не должен падать,
-            ptexts = []         # но и МОЛЧАТЬ нельзя: запись на этом томе упадёт
-            vol_error = f"том не читается ({e}) — запись правок для него не выполнится"
-        changes = []
-        for a in mine:
-            corr = (a.get("correction") or "").strip()
-            # приоритет — ЗАМЕНА ПО МЕСТУ (найден фрагмент «как написано сейчас»)
-            rx = _was_regex((a.get("edit_was") or "").strip())
-            if rx and (a.get("edit_shall") or "").strip() and \
-                    any(rx.search(lt) for _p, lt in ptexts):
-                changes.append({
-                    "number": a.get("number", "?"),
-                    "placed": "ЗАМЕНА текста по месту («было» найдено в томе)",
-                    "correction": a.get("edit_shall", ""),
-                })
-                continue
-            tok = _anchor_token(corr) or _anchor_token(a.get("remark", ""))
-            found = bool(tok) and any(_anchor_re(tok).search(lt) for _p, lt in ptexts)
-            changes.append({
-                "number": a.get("number", "?"),
-                "placed": (f"рядом с «{tok}»" if found
-                           else ("в конец (якорь «%s» не найден)" % tok if tok
-                                 else "в конец (нет явного места в тексте правки)")),
-                "correction": corr or (a.get("user_answer") or a.get("answer") or ""),
-            })
-        vol = {"volume": src.name, "changes": changes}
-        if vol_error:
-            vol["error"] = vol_error
+            doc, plan, ix = _plan_for(src, mine)
+        except Exception as e:  # noqa: BLE001
+            vol["error"] = f"том не читается ({e}) — запись правок для него не выполнится"
+            result["volumes"].append(vol)
+            continue
+        if ix.garbled > 0.03:
+            vol["warning"] = (
+                "том — конверсия из PDF с испорченной кодировкой текста; места "
+                "найдены по восстановленному тексту, вставки сделаны стандартным "
+                "шрифтом. Для чистого результата лучше исходный Word-том.")
+        for e in plan:
+            vol["changes"].append({"number": e["number"], "placed": _placed_text(e),
+                                   "correction": e["shall"][:300], "mode": e["mode"]})
+            result["stats"][e["mode"]] = result["stats"].get(e["mode"], 0) + 1
         result["volumes"].append(vol)
-        result["total"] += len(changes)
+        result["total"] += len(plan)
     return result
 
 
-def _was_regex(edit_was: str):
-    """Регэксп для поиска фрагмента «как написано сейчас» в абзаце тома:
-    пробелы/переносы в docx гуляют, поэтому токены сшиваем через \\s+."""
-    import re
-    toks = [re.escape(t) for t in (edit_was or "").split() if t]
-    if len(toks) < 3:            # слишком короткое «было» — велик риск ложной замены
-        return None
-    return re.compile(r"\s+".join(toks), re.I | re.S)
-
-
-def _try_replace_in_place(ptexts, a: dict, anchor_last: dict) -> bool:
-    """ЗАМЕНА ТЕКСТА ПО МЕСТУ (v0.44): если «edit_was» найден в абзаце тома —
-    старый фрагмент заменяется на «edit_shall» (жёлтая заливка + пометка
-    №замечания). Это и есть «новый раздел с учётом исправлений», а не
-    примечание рядом. Форматирование остальной части абзаца сохраняется:
-    правится только последний run, накрывающий фрагмент, либо абзац
-    пересобирается тремя run'ами (до/СТАЛО/после)."""
-    from docx.enum.text import WD_COLOR_INDEX
-    was, shall = (a.get("edit_was") or "").strip(), (a.get("edit_shall") or "").strip()
-    rx = _was_regex(was)
-    if not (rx and shall):
-        return False
-    for par, low in ptexts:
-        if par is None:
-            continue
-        m = rx.search(par.text or "")
-        if not m:
-            continue
-        before, after = par.text[:m.start()], par.text[m.end():]
-        for r in list(par.runs):          # пересборка абзаца: до | СТАЛО | после
-            r.text = ""
-        runs_src = par.runs or [par.add_run("")]
-        base = runs_src[0]
-        base.text = before
-        num = a.get("number", "?")
-        r2 = par.add_run(f"{shall} ")
-        r2.font.highlight_color = WD_COLOR_INDEX.YELLOW
-        r3 = par.add_run(f"[изм. по замечанию №{num}]")
-        r3.font.highlight_color = WD_COLOR_INDEX.YELLOW
-        r3.italic = True
-        if after:
-            par.add_run(after)
-        return True
-    return False
-
-
 def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], list[str]]:
-    """РЕАЛЬНО откорректированные тома ООС: открываем ИСХОДНЫЙ .docx, вставляем
-    правки по принятым/правленым ответам с ЖЁЛТОЙ заливкой — по якорю
-    («табл./п./раздел N») сразу после нужного абзаца, иначе — в конец, в раздел
-    «КОРРЕКТИРОВКИ ПО ЗАМЕЧАНИЯМ ЭКСПЕРТИЗЫ». Документ НЕ пересобирается,
-    поэтому большие тома (десятки МБ) обрабатываются быстро. Если томов
-    несколько — ответы раскладываются по полю «Том ООС» (без тома — в первый).
-    Возвращает пути файлов *_КОРР.docx."""
+    """Откорректированные тома: план → применение → *_КОРР.docx."""
     from docx import Document
-    from docx.enum.text import WD_COLOR_INDEX
     data = _load_answers(project)
     answers = [a for a in data.get("answers", [])
                if a.get("status") in ("accepted", "edited")]
@@ -387,75 +762,28 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
     out_dir = project_paths(project)["out"]
     out_dir.mkdir(parents=True, exist_ok=True)
     outs: list[Path] = []
-    if not srcs:
-        return outs, []
-
-    matched_ids = {id(a) for s2 in srcs for a in answers if _match_volume(a, s2)}
     failed: list[str] = []
     for si, src in enumerate(srcs):
-        if len(srcs) > 1:
-            mine = [a for a in answers if _match_volume(a, src)]
-            if si == 0:
-                mine += [a for a in answers if id(a) not in matched_ids]
-        else:
-            mine = list(answers)
+        mine = _volume_answers(answers, srcs, si, src)
         try:
-            doc = Document(str(src))
+            doc, plan, ix = _plan_for(src, mine)
         except PermissionError:
-            raise  # хаб показывает понятное «том открыт в Word» — не глотаем
-        except Exception as e:  # noqa: BLE001 — битый том не должен ронять остальные
+            raise
+        except Exception as e:  # noqa: BLE001
             failed.append(f"{src.name}: {e}")
             print(f"[m5] ПРОПУЩЕН {src.name}: {e}", flush=True)
             continue
-        # ищем якорь и в абзацах тела, и внутри таблиц (частый случай в томах ООС)
-        ptexts = [(p, (p.text or "").lower()) for p in _iter_all_paragraphs(doc)]
-        tail = []
-        anchor_last: dict[int, object] = {}  # якорь → последний вставленный абзац
-        replaced = 0
-        for a in mine:
-            num = a.get("number", "?")
-            # СНАЧАЛА пробуем заменить текст ПО МЕСТУ («было»→«стало», v0.44) —
-            # только если не вышло, вставляем правку-примечание рядом с якорем
-            if _try_replace_in_place(ptexts, a, anchor_last={}):
-                replaced += 1
-                continue
-            ans = (a.get("user_answer") or a.get("answer") or "").strip()
-            corr = (a.get("correction") or "").strip()
-            runs = [(f"[Изменение по замечанию №{num}] ", True, True)]
-            if ans:
-                runs.append((f"ОТВЕТ: {ans} ", False, True))
-            if corr:
-                runs.append((f"ВНОСИМАЯ ПРАВКА: {corr}", False, True))
-            tok = _anchor_token(corr) or _anchor_token(a.get("remark", ""))
-            target = _find_anchor_paragraph(ptexts, tok)
-            if target is not None:
-                # несколько правок к одному якорю — вставляем ПОСЛЕ предыдущей
-                # (иначе addnext давал обратный порядок, LIFO)
-                key = id(target._p)
-                after = anchor_last.get(key, target)
-                anchor_last[key] = _insert_paragraph_after(after, runs)
-            else:
-                tail.append(runs)
-        if tail:
-            h = doc.add_paragraph()
-            hr = h.add_run("КОРРЕКТИРОВКИ ПО ЗАМЕЧАНИЯМ ЭКСПЕРТИЗЫ")
-            hr.bold = True
-            for runs in tail:
-                p = doc.add_paragraph()
-                for t, b, hl in runs:
-                    r = p.add_run(t)
-                    r.bold = b
-                    if hl:
-                        r.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        stats = _apply_plan(doc, plan, ix)
         out = out_dir / f"{src.stem}_КОРР.docx"
         doc.save(str(out))
+        # документ мутирован — из кэша вон, иначе повторная запись легла бы
+        # поверх уже внесённых правок
+        for k in [k for k in _PLAN_CACHE if k[0] == str(src)]:
+            _PLAN_CACHE.pop(k, None)
         outs.append(out)
-        print(f"[m5] {src.name}: правок {len(mine)} (замен по месту {replaced}) "
-              f"→ {out.name}", flush=True)
+        print(f"[m5] {src.name}: замен {stats['replace']}, вставок {stats['insert']}, "
+              f"вручную {stats['manual']} → {out.name}", flush=True)
     if failed and not outs:
         raise RuntimeError("Ни один том не удалось открыть: " + "; ".join(failed)
                            + ". Откройте файлы в Word и пересохраните как .docx.")
-    # failed возвращаем ВСЕГДА (находка аудита): раньше при частичном сбое —
-    # один том битый из нескольких — GUI показывал «Готово», и пользователь
-    # не знал, что в пропущенный том правки НЕ внесены.
     return outs, failed

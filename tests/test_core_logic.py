@@ -346,6 +346,19 @@ def test_single_model_mode(tmp_path, monkeypatch):
     assert load_config().resolve_provider("module4") == "deepseek"  # режим выключен
 
 
+def test_decode_garbled_pdf_font():
+    # РЕАЛЬНЫЕ тома ОПОЧКИ (.docx из PDF): «Ɂɚɤɚɡɱɢɤ» вместо «Заказчик» —
+    # единое смещение +0x1D6 плюс спецсимволы; без декодера поиск места правки
+    # не находил НИЧЕГО, а мусорные «стало» уезжали в том как есть.
+    from pmoos.output.docx_writer import decode_garbled, garble_ratio, _norm
+    s = "Ɂɚɤɚɡɱɢɤ: Ƚɨɫɭɞɚɪɫɬɜɟɧɧɵɣ ɤɨɦɢɬɟɬ ɉɫɤɨɜɫɤɨɣ ɨɛɥɚɫɬɢ ʋ5 ɟɺ"
+    assert decode_garbled(s) == "Заказчик: Государственный комитет Псковской области №5 её"
+    assert decode_garbled("обычный текст 2.1.4") == "обычный текст 2.1.4"   # не трогаем
+    assert garble_ratio(s) > 0.5 and garble_ratio("норм") == 0.0
+    # переносы PDF («сель скохозяйственного») не мешают сравнению
+    assert _norm("сель скохозяйственного") == _norm("сельскохозяйственного")
+
+
 def test_corrected_volume_replace_in_place(tmp_path, monkeypatch):
     # ЗАПРОС ЮЗЕРА 05.08: «должен быть сформирован новый раздел ООС с учётом
     # исправлений» — правка «БЫЛО→СТАЛО» вносится ПРЯМО В ТЕКСТ тома

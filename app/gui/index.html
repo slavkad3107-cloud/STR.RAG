@@ -462,9 +462,13 @@ async function corrPreview() {
   $("corrBox").textContent = "Анализ томов…";
   try {
     const r = await api("corr_preview", {project: P});
-    const L = [`Принятых ответов: ${r.accepted}. Правок к внесению: ${r.total}.`];
+    const st = r.stats || {};
+    const L = [`Принятых ответов: ${r.accepted}. Правок к внесению: ${r.total} — ` +
+               `замен по месту ${st.replace||0}, вставок рядом ${st.insert||0}, ` +
+               `в раздел «вручную» ${st.manual||0}.`];
     for (const v of r.volumes) {
-      L.push(`\n▼ ${v.volume}${v.error ? "  ⚠ " + v.error : ""}`);
+      L.push(`\n▼ ${v.volume} (ответов: ${v.answers ?? "?"})${v.error ? "  ⚠ " + v.error : ""}`);
+      if (v.warning) L.push(`  ⚠ ${v.warning}`);
       for (const c of v.changes.slice(0, 40))
         L.push(`  №${c.number}: ${c.placed}`);
       if (v.changes.length > 40) L.push(`  … и ещё ${v.changes.length - 40}`);
