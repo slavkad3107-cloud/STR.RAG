@@ -61,7 +61,7 @@ for /f "usebackq eol=# tokens=1 delims= " %%P in ("requirements.txt") do (
   pip install --prefer-binary --timeout 120 --retries 10 "%%P"
 )
 :DEPSOK
-REM Штамп зависимостей: run.bat сравнивает хэш requirements.txt с этим файлом
+REM Штамп зависимостей: STROYRAG.bat (the Cyrillic-named launcher in this folder) сравнивает хэш requirements.txt с этим файлом
 REM и при расхождении предупреждает, что нужен повторный install.bat.
 set "REQHASH="
 for /f "skip=1 tokens=1" %%h in ('certutil -hashfile requirements.txt SHA256 2^>nul') do if not defined REQHASH set "REQHASH=%%h"
@@ -102,7 +102,7 @@ echo     keys file: %PMOOS_DATA%\.env
 echo ============================================================
 echo   If a package was still missed, just run install.bat again
 echo   (it resumes from cache / mirror).
-echo   Start the UI:      run.bat
+echo   Start the UI:      STROYRAG.bat (the Cyrillic-named launcher in this folder)
 echo   Run one module:    run_module.bat modules\module1_inventory.py --project "Name"
 echo ------------------------------------------------------------
 echo   API keys file: %PMOOS_DATA%\.env  (or set keys in the app sidebar)

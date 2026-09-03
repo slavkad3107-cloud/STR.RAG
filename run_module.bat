@@ -20,7 +20,7 @@ if not "%~1"=="" goto DIRECT
 :MENU
 echo ============================================================
 echo   STR.RAG - run a single module (CLI)
-echo   For normal work use run.bat (the app). This is advanced.
+echo   For normal work use STROYRAG.bat (Cyrillic name in the folder) (the app). This is advanced.
 echo ============================================================
 echo   1 - Module 1: systematize project docs (inventory)
 echo   2 - Module 2: build RAG index

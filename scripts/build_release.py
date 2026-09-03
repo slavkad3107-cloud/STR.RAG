@@ -6,7 +6,7 @@
 какая версия у тебя. Рядом кладётся такой же .zip (для переноса/архива).
 Версия берётся из pmoos/__init__.__version__ — имя всегда совпадает с кодом.
 
-venv НЕ копируется: он общий (%USERPROFILE%\\.pmoos-rag\\venv) и run.bat находит
+venv НЕ копируется: он общий (%USERPROFILE%\\.pmoos-rag\\venv) и СТРОЙРАГ.bat находит
 его сам — поэтому папка релиза лёгкая (только код).
 
 Запуск:  python scripts/build_release.py         (из папки приложения)
@@ -103,7 +103,7 @@ def build() -> Path:
 
     # 3) ПРОВЕРКА ЦЕЛОСТНОСТИ: релиз без этих файлов не запустится
     must = ["app/gui/server.py", "app/gui/index.html", "pmoos/__init__.py",
-            "run.bat", "СТРОЙРАГ.bat"]
+            "СТРОЙРАГ.bat"]
     missing = [m for m in must if not (folder / m).exists()]
     if missing or failed:
         print("ОШИБКА СБОРКИ: релиз НЕПОЛНЫЙ.")
@@ -121,8 +121,7 @@ def build() -> Path:
 
     size_mb = zip_out.stat().st_size / 2**20
     print(f"Собран релиз v{__version__} «{__codename__}» ({len(files)} файлов):")
-    print(f"  папка (запускать отсюда): {folder}\\СТРОЙРАГ.bat  (нативная оболочка)")
-    print(f"  запасной вход (браузер):  {folder}\\run.bat")
+    print(f"  папка (запускать отсюда): {folder}\\СТРОЙРАГ.bat")
     print(f"  архив (перенос):          {zip_out.name}  ({size_mb:.1f} МБ)")
     return folder
 

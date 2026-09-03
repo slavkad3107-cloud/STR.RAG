@@ -58,9 +58,14 @@ def build() -> str:
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
     text = build()
-    for name in ("СТРОЙРАГ.bat", "run.bat"):
+    # ЕДИНСТВЕННЫЙ вход — СТРОЙРАГ.bat (run.bat был его копией и путал)
+    for name in ("СТРОЙРАГ.bat",):
         (root / name).write_bytes(text.encode("cp866"))
         print(f"записан {name} ({len(text)} байт, control-символов нет)")
+    stale = root / "run.bat"
+    if stale.exists():
+        stale.unlink()
+        print("удалён устаревший run.bat")
 
 
 if __name__ == "__main__":

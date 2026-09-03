@@ -638,7 +638,8 @@ def test_native_launcher_points_at_venv_and_app():
     bs = chr(92)
     root = _P(__file__).resolve().parent.parent
     srv = "app" + bs + "gui" + bs + "server.py"
-    for name in ("СТРОЙРАГ.bat", "run.bat"):
+    assert not (root / "run.bat").exists(), "run.bat удалён как дубль — не возвращать"
+    for name in ("СТРОЙРАГ.bat",):
         bat = root / name
         assert bat.exists(), f"нет {name}"
         txt = bat.read_bytes().decode("cp866")
