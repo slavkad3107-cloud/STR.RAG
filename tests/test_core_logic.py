@@ -526,6 +526,26 @@ def test_apply_safety_rules(tmp_path, monkeypatch):
     assert plan[0]["mode"] == "insert" and plan[0]["idx"] == 1, plan[0]
 
 
+def test_docx_text_len_counts_textboxes(tmp_path):
+    # ВЕРИФИКАТОР v0.47.1: LibreOffice кладёт текст PDF в текстовые рамки
+    # (w:txbxContent) — счётчик по body.paragraphs давал 0 и отвергал
+    # нормальную конверсию. Считаем по ВСЕМ w:t документа.
+    from docx import Document
+    from docx.oxml.ns import qn
+    from pmoos.ingest.convert import _docx_text_len
+    d = Document()
+    p = d.add_paragraph()
+    r = p.add_run()
+    pict = r._r.makeelement(qn("w:pict"), {})
+    box = pict.makeelement(qn("w:txbxContent"), {})
+    ip = box.makeelement(qn("w:p"), {}); ir = ip.makeelement(qn("w:r"), {})
+    it = ir.makeelement(qn("w:t"), {}); it.text = "Текст внутри рамки " * 20
+    ir.append(it); ip.append(ir); box.append(ip); pict.append(box); r._r.append(pict)
+    f = tmp_path / "box.docx"; d.save(str(f))
+    assert sum(len(x.text) for x in Document(str(f)).paragraphs) == 0   # тело пустое
+    assert _docx_text_len(f) > 300                                       # но текст есть
+
+
 def test_convert_sources_to_docx(tmp_path):
     # «добавить pdf и другие форматы» для откорректированного тома
     import shutil

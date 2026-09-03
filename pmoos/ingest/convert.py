@@ -137,9 +137,13 @@ def _convert_ocr_text(src: Path, dst: Path) -> int:
 
 
 def _docx_text_len(path: Path) -> int:
+    """Объём текста docx по ВСЕМ узлам w:t — включая текстовые рамки
+    (w:txbxContent) и таблицы: LibreOffice кладёт текст PDF именно в рамки,
+    и подсчёт по body.paragraphs давал 0 для нормальной конверсии."""
     from docx import Document
+    from docx.oxml.ns import qn
     d = Document(str(path))
-    return sum(len(p.text) for p in d.paragraphs)
+    return sum(len(t.text or "") for t in d.element.body.iter(qn("w:t")))
 
 
 # порядок способов по умолчанию: PDF — быстрый текст (секунды) + OCR для
