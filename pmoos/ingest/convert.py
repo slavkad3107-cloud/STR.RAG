@@ -86,25 +86,30 @@ def _convert_via_word(src: Path, dst: Path, timeout: int = 900) -> None:
         raise RuntimeError((r.stderr or r.stdout or "Word не вернул результат")[:300])
 
 
-def _convert_pdf_fallback(src: Path, dst: Path) -> None:
-    """PDF → простой .docx через pymupdf: текст постранично, заголовок «стр. N»."""
+def _convert_pdf_fallback(src: Path, dst: Path) -> str:
+    """PDF → простой .docx через pymupdf: текст постранично, заголовок «стр. N».
+    Возвращает извлечённый текст (для проверки «скан / битый шрифт»)."""
     import fitz  # PyMuPDF
     from docx import Document
     from docx.shared import Pt
     doc = Document()
     pdf = fitz.open(str(src))
+    chunks: list[str] = []
     try:
         for i, page in enumerate(pdf, start=1):
             h = doc.add_paragraph()
             rh = h.add_run(f"стр. {i}")
             rh.bold = True
             rh.font.size = Pt(9)
-            for line in (page.get_text("text") or "").splitlines():
+            txt = page.get_text("text") or ""
+            chunks.append(txt)
+            for line in txt.splitlines():
                 if line.strip():
                     doc.add_paragraph(line.rstrip())
     finally:
         pdf.close()
     doc.save(str(dst))
+    return "\n".join(chunks)
 
 
 def _convert_ocr_text(src: Path, dst: Path) -> int:
@@ -163,40 +168,66 @@ def to_docx(src: str | Path, dst_dir: str | Path, *,
         return {"path": dst, "method": "copy", "note": ""}
     if prefer is None:
         prefer = _DEFAULT_PREFER.get(ext, _OTHER_PREFER)
+    # РАБОТАЕМ ВО ВРЕМЕННОЙ ПАПКЕ: результат переносится в dst только при
+    # успехе. Раньше заготовка неудавшейся попытки (pdf-text без текста)
+    # оставалась под именем тома и уезжала в список/в запись как «том-призрак»
+    # (ревью); при провале всех способов dst не существует.
+    import tempfile
+    tmp_dir = Path(tempfile.mkdtemp(prefix="strrag_conv_", dir=str(dst_dir)))
+    tmp = tmp_dir / dst.name
     errors: list[str] = []
-    for method in prefer:
-        try:
-            if method == "soffice":
-                if not soffice_path():
-                    raise RuntimeError("LibreOffice не установлен")
-                out = _convert_via_soffice(src, dst_dir)
-                return {"path": out, "method": "soffice",
-                        "note": "сконвертировано LibreOffice"
-                                + (" (PDF → текст постранично)" if ext == ".pdf" else "")}
-            if method == "word":
-                ver = word_version()
-                if ver < 12:
-                    raise RuntimeError(f"Word {ver:g} не подходит (нужен 2007+)")
-                if ext == ".pdf" and ver < 15:
-                    raise RuntimeError(f"Word {ver:g} не открывает PDF (нужен 2013+)")
-                _convert_via_word(src, dst)
-                return {"path": dst, "method": "word",
-                        "note": "сконвертировано через Word (с оформлением)"}
-            if method == "pdf-text" and ext == ".pdf":
-                _convert_pdf_fallback(src, dst)
-                if _docx_text_len(dst) < 200:
-                    raise RuntimeError("в PDF нет текстового слоя (скан)")
-                return {"path": dst, "method": "pdf-text",
-                        "note": "PDF переведён в текст без оформления — правки "
-                                "встанут по тексту; для точного результата лучше "
-                                "Word-том"}
-            if method == "ocr-text" and ext == ".pdf":
-                n = _convert_ocr_text(src, dst)
-                if n < 200:
-                    raise RuntimeError("OCR не дал текста")
-                return {"path": dst, "method": "ocr-text",
-                        "note": "скан-PDF распознан OCR и переведён в текст без "
-                                "оформления — проверьте результат"}
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{method}: {str(e)[:120]}")
+
+    def _done(method: str, note: str, produced: Path | None = None) -> dict:
+        p = produced or tmp
+        if dst.exists():
+            dst.unlink()
+        shutil.move(str(p), str(dst))
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return {"path": dst, "method": method, "note": note}
+
+    try:
+        for method in prefer:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+                if method == "soffice":
+                    if not soffice_path():
+                        raise RuntimeError("LibreOffice не установлен")
+                    out = _convert_via_soffice(src, tmp_dir)
+                    if ext == ".pdf" and _docx_text_len(out) < 200:
+                        # LibreOffice «успешно» делает пустой docx из скана
+                        raise RuntimeError("LibreOffice не извлёк текст из PDF (скан?)")
+                    return _done("soffice", "сконвертировано LibreOffice"
+                                 + (" (PDF → текст постранично)" if ext == ".pdf" else ""),
+                                 out)
+                if method == "word":
+                    ver = word_version()
+                    if ver < 14:   # SaveAs2 появился в Word 2010
+                        raise RuntimeError(f"Word {ver:g} не подходит (нужен 2010+)")
+                    if ext == ".pdf" and ver < 15:
+                        raise RuntimeError(f"Word {ver:g} не открывает PDF (нужен 2013+)")
+                    _convert_via_word(src, tmp)
+                    return _done("word", "сконвертировано через Word (с оформлением)")
+                if method == "pdf-text" and ext == ".pdf":
+                    text = _convert_pdf_fallback(src, tmp)
+                    from .loaders import is_garbled
+                    if _docx_text_len(tmp) < 200:
+                        raise RuntimeError("в PDF нет текстового слоя (скан)")
+                    if is_garbled(text) or text.count("(cid:") >= 3:
+                        # испорченный текстовый слой — как скан, нужен OCR
+                        raise RuntimeError("текстовый слой PDF испорчен (шрифт без кодировки)")
+                    return _done("pdf-text",
+                                 "PDF переведён в текст без оформления — правки "
+                                 "встанут по тексту; для точного результата лучше Word-том")
+                if method == "ocr-text" and ext == ".pdf":
+                    n = _convert_ocr_text(src, tmp)
+                    if n < 200:
+                        raise RuntimeError("OCR не дал текста")
+                    return _done("ocr-text",
+                                 "скан-PDF распознан OCR и переведён в текст без "
+                                 "оформления — проверьте результат")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{method}: {str(e)[:120]}")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     raise RuntimeError(f"не удалось привести «{src.name}» к .docx — " + "; ".join(errors))

@@ -258,16 +258,23 @@ def _volume_tokens(text: str) -> set[str]:
     import re as _re
     out: set[str] = set()
     low = (text or "").lower().replace("ё", "е")
-    for m in _re.finditer(r"том[аеу]?\s*№?\s*(\d+(?:\.\d+)+)(?:\s*[-–—]\s*(\d+(?:\.\d+)+))?", low):
-        a, b = m.group(1), m.group(2)
-        out.add(a)
-        if b:
-            pa, pb = a.rsplit(".", 1), b.rsplit(".", 1)
-            if pa[0] == pb[0] and pa[1].isdigit() and pb[1].isdigit():
-                for k in range(int(pa[1]), int(pb[1]) + 1):
-                    out.add(f"{pa[0]}.{k}")
-            else:
-                out.add(b)
+    num = r"\d+(?:\.\d+)+"
+    # после слова «том/тома» — ЦЕПОЧКА номеров: «6.1, 6.2 и 6.3», «6.1–6.3»
+    # (ревью: «тома 6.1 и 6.2» давало только 6.1)
+    for m in _re.finditer(r"том[аеу]?\s*№?\s*(" + num + r"(?:\s*(?:,|;|и|[-–—])\s*" + num + r")*)", low):
+        chain = m.group(1)
+        parts = _re.split(r"\s*(?:,|;|и)\s*", chain)
+        for part in parts:
+            rng = _re.split(r"\s*[-–—]\s*", part)
+            if len(rng) == 2:
+                a, b = rng
+                pa, pb = a.rsplit(".", 1), b.rsplit(".", 1)
+                if pa[0] == pb[0] and pa[1].isdigit() and pb[1].isdigit() and int(pa[1]) <= int(pb[1]):
+                    for k in range(int(pa[1]), int(pb[1]) + 1):
+                        out.add(f"{pa[0]}.{k}")
+                    continue
+            for tok in _re.findall(num, part):
+                out.add(tok)
     return out
 
 
@@ -288,16 +295,18 @@ def _match_volume(a: dict, src: Path) -> bool:
     «где править» и текст замечания: «Том 6.2, п. 4.2.3» → том 6.2. Реальный
     случай (05.09): полтора десятка правок «Том 6.2/6.3» ложились в том 6.1."""
     tok = _src_volume_token(src)
-    # ЯВНО названный том («Том 6.2, п. 4.2.3» в «где править» или в замечании)
-    # главнее служебного поля «Том ООС»: то поле заполняет поиск по базе и
-    # часто указывает не тот том (05.09: правки 6.2/6.3 лежали в 6.1)
-    named = _volume_tokens(a.get("edit_location") or "") or _volume_tokens(a.get("remark") or "")
+    # Приоритет: 1) «Том X.Y» в «где править» (ИИ пишет адрес правки);
+    # 2) служебное поле «Том ООС»; 3) только если оба пусты — тома из текста
+    # замечания (ревью: в замечании часто упомянут ЧУЖОЙ том — «см. том 5.1
+    # ПОС» — и он не должен перебивать верное поле)
+    named = _volume_tokens(a.get("edit_location") or "")
     if named and tok:
         return tok in named
     v = (a.get("oos_volume") or "").lower().strip()
     n, stem = src.name.lower(), src.stem.lower()
     if not v:
-        return False
+        named = _volume_tokens(a.get("remark") or "")
+        return bool(tok) and tok in named
     if _sub_bounded(v, n) or _sub_bounded(n, v) or _sub_bounded(stem, v):
         return True
     vp = Path(v)
@@ -393,17 +402,32 @@ _STOP_RU = {
     "постановление", "постановления", "постановлением", "правительства",
     "правительство", "российской", "федерации", "федеральный", "федерального",
     "закона", "закон", "приказ", "приказа", "приказом", "требования", "статьи",
+    # общие слова названий глав ООС: без них «МЕРОПРИЯТИЯ ПО ОХРАНЕ ОКРУЖАЮЩЕЙ
+    # СРЕДЫ» совпадала с любой темой и перебивала профильный раздел (ревью)
+    "окружающей", "окружающую", "окружающая", "среды", "среду", "среда",
+    "охрана", "природной", "природную", "природная", "перечень", "перечня",
+    # каркасные слова заголовков ООС — тему задаёт ОБЪЕКТ воздействия
+    # («…АКУСТИЧЕСКИХ ПОЛЕЙ», «…НА РАСТИТЕЛЬНЫЙ МИР»), а не эти слова
+    "мероприятия", "мероприятий", "мероприятиям", "воздействие", "воздействия",
+    "воздействию", "воздействий", "оценка", "оценки", "оценке", "оценку",
     "пункта", "пункту", "пунктом", "уточнить", "указать", "представить",
     "привести", "дополнить", "обосновать", "замечание", "замечания", "экспертизы",
 }
 
 
+_STOP_PREF: set[str] = set()
+
+
 def _sig_words(text: str) -> set[str]:
-    """Значимые слова → префиксы 5 букв (грубый стемминг)."""
+    """Значимые слова → префиксы 5 букв (грубый стемминг). Стоп-слова
+    сверяются ТОЖЕ по префиксу: иначе «мероприятиям»/«охраной» проходили и
+    общая глава «МЕРОПРИЯТИЯ ПО ОХРАНЕ ОКРУЖАЮЩЕЙ СРЕДЫ» ловила любую тему."""
     import re as _re
+    if not _STOP_PREF:
+        _STOP_PREF.update(w[:5] for w in _STOP_RU if len(w) >= 5)
     out: set[str] = set()
     for w in _re.findall(r"[а-яёa-z0-9]+", decode_garbled(text or "").lower()):
-        if len(w) < 5 or w in _STOP_RU:
+        if len(w) < 5 or w in _STOP_RU or w[:5] in _STOP_PREF:
             continue
         out.add(w[:5])
     return out
@@ -440,8 +464,29 @@ class _Index:
     """Индекс абзацев тома для быстрого нечёткого поиска."""
 
     def __init__(self, doc):
+        from docx.oxml.ns import qn as _qn
         self.pars = list(_all_paragraphs(doc))
         self.text = [(p.text or "") for p in self.pars]
+        # ДЕРЖАТЕЛИ НЕТЕКСТОВОГО СОДЕРЖИМОГО: абзацы с рисунком, текстовой
+        # рамкой (в PDF-конверсиях один «пустой» абзац держит до 1500 рамок =
+        # страницы тома) или полем. В окно замены такие абзацы НЕ попадают —
+        # иначе очистка окна уносила рисунок/страницы (ревью 05.09)
+        self.holders: set[int] = set()
+        for i, p in enumerate(self.pars):
+            el = p._p
+            for child in el.iter(_qn("w:drawing"), _qn("w:pict"), _qn("w:txbxContent"),
+                                 _qn("w:fldChar"), _qn("w:object")):
+                # рамка/рисунок ВНУТРИ вложенной рамки принадлежат её абзацу
+                anc = child.getparent()
+                nested = False
+                while anc is not None and anc is not el:
+                    if anc.tag == _qn("w:txbxContent"):
+                        nested = True
+                        break
+                    anc = anc.getparent()
+                if not nested:
+                    self.holders.add(i)
+                    break
         self.norm = [_norm(t) for t in self.text]
         self.words = [_sig_words(t) for t in self.text]
         self.garbled = garble_ratio("".join(self.text[:3000]))
@@ -508,7 +553,9 @@ class _Index:
             if body >= 2:
                 ws = _sig_words(title)
                 if ws:
-                    self.heads.append((i, ws, caps, title[:100]))
+                    # last = ПОСЛЕДНЯЯ строка склеенного заголовка: вставка идёт
+                    # после неё, а не между строками заголовка (ревью)
+                    self.heads.append((i, ws, caps, title[:100], j - 1))
             i = j
         self._head_pos = [h[0] for h in self.heads]
 
@@ -521,7 +568,7 @@ class _Index:
         strict=True (название в кавычках): достаточно и одного точного слова,
         если оно покрывает ≥ половины заголовка."""
         best = (-1, -1, 0.0, "")
-        for pos, (i, ws, caps, title) in enumerate(self.heads):
+        for pos, (i, ws, caps, title, last) in enumerate(self.heads):
             ov = len(topic & ws)
             if ov == 0:
                 continue
@@ -538,7 +585,8 @@ class _Index:
                 continue
             if score > best[2]:
                 end = self._head_pos[pos + 1] if pos + 1 < len(self._head_pos) else min(len(self.text), i + 600)
-                best = (i, end, score, title[:80])
+                # возвращаем ПОСЛЕДНЮЮ строку заголовка: вставка — после неё
+                best = (last, end, score, title[:80])
         return best
 
     def window_text(self, i: int, k: int) -> str:
@@ -566,11 +614,14 @@ class _Index:
         target_len = len(wn)
         for c in cands:
             for start in range(max(lo, c - 3), c + 1):
-                if start in used or start in self.noise:
+                if start in used or start in self.noise or start in self.holders:
                     continue
                 acc = ""
                 for k in range(1, 12):
-                    if start + k > hi or (start + k - 1) in self.noise:
+                    # окно НЕ пересекает уже занятые правкой строки (ревью:
+                    # вторая замена затирала первую) и держателей рамок/рисунков
+                    j = start + k - 1
+                    if start + k > hi or j in self.noise or j in used or j in self.holders:
                         break
                     acc += self.norm[start + k - 1]
                     if len(acc) < target_len * 0.5:
@@ -746,6 +797,30 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
     return plan, ix
 
 
+def _blank_par_text(par) -> int:
+    """Стереть ТЕКСТ абзаца (все w:t, в т.ч. внутри w:hyperlink / w:ins /
+    w:smartTag / строчных sdt), НЕ трогая рисунки, разрывы, поля и текст
+    ВЛОЖЕННЫХ текстовых рамок (w:txbxContent — это другие абзацы тома).
+    Возвращает число очищенных w:t."""
+    from docx.oxml.ns import qn
+    el = par._p
+    n = 0
+    for t in el.iter(qn("w:t")):
+        anc = t.getparent()
+        nested = False
+        while anc is not None and anc is not el:
+            if anc.tag == qn("w:txbxContent"):
+                nested = True
+                break
+            anc = anc.getparent()
+        if nested:
+            continue
+        if t.text:
+            t.text = ""
+            n += 1
+    return n
+
+
 def _std_run(run):
     """Стандартный шрифт для ВСТАВЛЯЕМОГО текста: в томах-конверсиях шрифт
     кастомный (глифы по смещённым кодам) — обычная кириллица в нём показалась
@@ -780,10 +855,21 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
         _yellow(r)
 
     def _set_par(par, text):
-        for r in list(par.runs):
-            r.text = ""
-        base = par.runs[0] if par.runs else par.add_run("")
-        base.text = text
+        """Заменить ТЕКСТ абзаца на «стало», сохранив нетекстовое содержимое:
+        рисунки, разрывы, поля, вложенные рамки остаются (ревью: Run.text=''
+        удалял w:drawing/w:pict/w:fldChar); стирается и текст внутри
+        гиперссылок/w:ins/w:smartTag (ревью: оставался хвост «старое+новое»)."""
+        _blank_par_text(par)
+        base = par.add_run(text)
+        # новый текст — В НАЧАЛО абзаца (сразу после свойств), а не в хвост
+        # за рисунками
+        r_el = base._r
+        par._p.remove(r_el)
+        ppr = par._p.pPr
+        if ppr is not None:
+            ppr.addnext(r_el)
+        else:
+            par._p.insert(0, r_el)
         _std_run(base)
         _yellow(base)
         return base
@@ -844,10 +930,10 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
         if mode == "replace":
             _set_par(par, body)
             _mark(par, num)
-            # остальные строки окна — очищаем (текст перенесён в первую)
+            # остальные строки окна — стираем ТОЛЬКО текст (рисунки/рамки/поля
+            # остаются; текст перенесён в первую строку)
             for j in range(e["idx"] + 1, e["idx"] + e["k"]):
-                for r in list(ix.pars[j].runs):
-                    r.text = ""
+                _blank_par_text(ix.pars[j])
         else:  # insert после заголовка
             np = _insert_paragraph_after(par, [])
             _set_par(np, body)
@@ -897,12 +983,19 @@ def repair_structure(doc) -> int:
     from docx.oxml.ns import qn
     body = doc.element.body
     fixes = 0
+    block_tags = {qn("w:p"), qn("w:tbl")}
     for tag in ("w:tc", "w:txbxContent", "w:sdtContent"):
         for el in body.iter(qn(tag)):
-            kids = [c for c in el if c.tag != qn("w:tcPr")]
-            if kids and kids[-1].tag != qn("w:p"):
-                el.append(el.makeelement(qn("w:p"), {}))
-                fixes += 1
+            kids = [c for c in el if c.tag not in (qn("w:tcPr"), qn("w:sdtPr"), qn("w:sdtEndPr"))]
+            if not kids or kids[-1].tag == qn("w:p"):
+                continue
+            # sdtContent бывает СТРОЧНЫМ (внутри абзаца: дети w:r/w:hyperlink),
+            # ячеечным (w:tc) или строковым (w:tr) — туда абзац класть НЕЛЬЗЯ
+            # (ревью: w:p внутри w:p делал файл битым). Чиним только блочные.
+            if tag == "w:sdtContent" and not all(k.tag in block_tags for k in kids):
+                continue
+            el.append(el.makeelement(qn("w:p"), {}))
+            fixes += 1
     blocks = [c for c in body if c.tag != qn("w:sectPr")]
     if blocks and blocks[-1].tag != qn("w:p"):
         blocks[-1].addnext(body.makeelement(qn("w:p"), {}))
@@ -917,9 +1010,18 @@ _PLAN_TTL = 600.0
 
 
 def _answers_key(answers: list[dict]) -> tuple:
-    return tuple((str(a.get("number")), a.get("status"),
-                  len(a.get("edit_shall") or ""), len(a.get("correction") or ""))
-                 for a in answers)
+    """Ключ кэша плана: любое изменение полей, влияющих на МЕСТО и ТЕКСТ правки
+    (ревью: раньше учитывались только длины «стало»/«правки», и после правки
+    «было»/«где править» пользователем предпросмотр показывал старый план)."""
+    import hashlib
+    h = hashlib.sha1()
+    for a in answers:
+        for f in ("number", "status", "edit_shall", "correction", "edit_was",
+                  "edit_location", "remark", "user_answer", "oos_volume"):
+            h.update(str(a.get(f) or "").encode("utf-8", "replace"))
+            h.update(b"\x1f")
+        h.update(b"\x1e")
+    return (len(answers), h.hexdigest())
 
 
 def _plan_for(src, mine: list[dict]):
@@ -1019,6 +1121,11 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
             failed.append(f"{src.name}: {e}")
             print(f"[m5] ПРОПУЩЕН {src.name}: {e}", flush=True)
             continue
+        # документ сейчас будет МУТИРОВАН — из кэша вон ДО применения (ревью:
+        # при сбое сохранения — том открыт в Word — изменённый doc оставался в
+        # кэше, и повторная запись вносила все правки второй раз)
+        for k in [k for k in _PLAN_CACHE if k[0] == str(src)]:
+            _PLAN_CACHE.pop(k, None)
         stats = _apply_plan(doc, plan, ix)
         fixes = repair_structure(doc)
         if fixes:

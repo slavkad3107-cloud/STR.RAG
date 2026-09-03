@@ -431,6 +431,101 @@ def test_corrections_placement_rules(tmp_path, monkeypatch):
     assert "по теме" in e3["via"]
 
 
+def test_apply_safety_rules(tmp_path, monkeypatch):
+    # РЕВЬЮ v0.47 (запись правок): 1) вторая замена не затирает первую;
+    # 2) замена не удаляет рисунок; 3) текст в гиперссылке стирается;
+    # 4) repair_structure не лезет в строчный sdt; 5) кэш плана — из кэша вон
+    # ДО применения; 6) «тома 6.1 и 6.2»; 7) чужой том в замечании не главнее
+    # поля «Том ООС»; 8) многострочный заголовок — вставка после последней строки.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json, zipfile
+    from docx import Document
+    from docx.oxml.ns import qn
+    from lxml import etree
+    from pmoos.projects import register_project
+    from pmoos.paths import project_paths
+    from pmoos.output import docx_writer as DW
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    register_project("БЕЗ")
+    src = tmp_path / "том 6.1.docx"
+    d = Document()
+    d.add_paragraph("Раздел 5. Обращение с отходами производства и потребления")
+    d.add_paragraph("Количество отходов при строительстве определено расчётом по "
+                    "нормативам образования и составляет 1250 тонн за период работ.")
+    d.add_paragraph("Отходы передаются лицензированной организации по договору "
+                    "на размещение на полигоне твёрдых коммунальных отходов района.")
+    # абзац с рисунком между строками текста
+    from PIL import Image
+    png = tmp_path / "pic.png"; Image.new("RGB", (8, 8), "red").save(str(png))
+    d.add_paragraph().add_run().add_picture(str(png))
+    p_h = d.add_paragraph("Классы опасности отходов приняты по ФККО, см. ")
+    hl = p_h._p.makeelement(qn("w:hyperlink"), {})
+    r = hl.makeelement(qn("w:r"), {}); t = r.makeelement(qn("w:t"), {}); t.text = "таблицу 5.4 приложения"
+    r.append(t); hl.append(r); p_h._p.append(hl)
+    d.save(str(src))
+    pa = project_paths("БЕЗ")["answers"]; pa.parent.mkdir(parents=True, exist_ok=True)
+    was1 = ("Количество отходов при строительстве определено расчётом по нормативам "
+            "образования и составляет 1250 тонн за период работ")
+    pa.write_text(json.dumps({"answers": [
+        {"number": "1", "status": "accepted", "answer": "о", "remark": "отходы",
+         "edit_was": was1, "edit_shall": "ПЕРВАЯ ПРАВКА: количество отходов 1380 тонн."},
+        {"number": "2", "status": "accepted", "answer": "о", "remark": "отходы",
+         "edit_was": was1, "edit_shall": "ВТОРАЯ ПРАВКА: уточнён норматив образования."},
+        {"number": "3", "status": "accepted", "answer": "о", "remark": "фкко",
+         "edit_was": "Классы опасности отходов приняты по ФККО, см. таблицу 5.4 приложения",
+         "edit_shall": "Классы опасности приняты по ФККО (приказ № 1027)."},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    outs, failed = DW.write_corrected_volumes("БЕЗ", [str(src)])
+    assert outs and not failed
+    od = Document(str(outs[0]))
+    txt = "\n".join(p.text for p in od.paragraphs)
+    assert "ПЕРВАЯ ПРАВКА" in txt                          # 1) первая цела
+    assert "Раздел 5. Обращение" in txt                    # заголовок цел
+    root = etree.fromstring(zipfile.ZipFile(outs[0]).read("word/document.xml"))
+    assert len(list(root.iter(W + "drawing"))) == 1        # 2) рисунок остался
+    assert "таблицу 5.4 приложения" not in txt             # 3) хвост гиперссылки стёрт
+    assert "приказ № 1027" in txt
+    # 4) строчный sdt внутри абзаца — repair_structure ничего не «чинит»
+    d2 = Document(); p2 = d2.add_paragraph("Дата: ")
+    sdt = p2._p.makeelement(qn("w:sdt"), {}); sc = sdt.makeelement(qn("w:sdtContent"), {})
+    rr = sc.makeelement(qn("w:r"), {}); tt = rr.makeelement(qn("w:t"), {}); tt.text = "01.01.2026"
+    rr.append(tt); sc.append(rr); sdt.append(sc); p2._p.append(sdt)
+    assert DW.repair_structure(d2) == 0
+    assert not list(sc.iter(qn("w:p")))
+    # 5) кэш: после записи (даже неудачной) мутированный doc не остаётся
+    DW._PLAN_CACHE.clear()
+    DW._plan_for(src, [{"number": "9", "status": "accepted", "edit_shall": "х"}])
+    assert any(k[0] == str(src) for k in DW._PLAN_CACHE)
+    import docx.document
+    monkeypatch.setattr(docx.document.Document, "save",
+                        lambda self, p: (_ for _ in ()).throw(PermissionError("open in Word")))
+    import pytest as _pt
+    with _pt.raises(PermissionError):
+        DW.write_corrected_volumes("БЕЗ", [str(src)])
+    assert not any(k[0] == str(src) for k in DW._PLAN_CACHE)
+    monkeypatch.undo()
+    # 6) цепочка томов; 7) приоритет «Том ООС» над чужим томом из замечания
+    assert DW._volume_tokens("тома 6.1 и 6.2") == {"6.1", "6.2"}
+    assert DW._volume_tokens("Том 6.1, 6.2; том 6.3") == {"6.1", "6.2", "6.3"}
+    from pathlib import Path as _P
+    s61, s51 = _P("Раздел ПД №6_ООС_том 6.1.docx"), _P("Раздел ПД №5_ПОС_том 5.1.docx")
+    a = {"oos_volume": "раздел пд №6_оос_том 6.1.pdf", "edit_location": "",
+         "remark": "уточнить в соответствии с томом 5.1 ПОС"}
+    assert DW._match_volume(a, s61) and not DW._match_volume(a, s51)
+    # 8) заголовок ЗАГЛАВНЫМИ на двух строках — вставка ПОСЛЕ второй строки
+    d3 = Document()
+    d3.add_paragraph("ВЫБРОСЫ ЗАГРЯЗНЯЮЩИХ")
+    d3.add_paragraph("ВЕЩЕСТВ В АТМОСФЕРУ")
+    for _ in range(3):
+        d3.add_paragraph("В период строительства источниками выбросов являются двигатели "
+                         "строительной техники и автотранспорта, сварочные посты и пересыпка.")
+    plan, ix = DW.plan_corrections(d3, [{"number": "4", "status": "accepted", "answer": "о",
+                                         "remark": "уточнить перечень выбросов загрязняющих веществ в атмосферу",
+                                         "edit_location": "раздел «Выбросы загрязняющих веществ в атмосферу»",
+                                         "edit_shall": "Перечень веществ дополнен бенз(а)пиреном."}])
+    assert plan[0]["mode"] == "insert" and plan[0]["idx"] == 1, plan[0]
+
+
 def test_convert_sources_to_docx(tmp_path):
     # «добавить pdf и другие форматы» для откорректированного тома
     import shutil
