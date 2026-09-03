@@ -358,13 +358,25 @@ def _corr_dir(project: str) -> Path:
 
 
 def api_corr_upload(q, body_bytes):
-    """Загрузка ИСХОДНОГО тома раздела (.docx) для внесения правок."""
+    """Загрузка ИСХОДНОГО тома раздела для внесения правок: .docx как есть;
+    .pdf/.doc/.rtf/.odt приводятся к .docx (pmoos.ingest.convert: LibreOffice /
+    Word 2007+ / текст PDF / OCR скана). Оригинал хранится в corr_sources/_orig."""
+    from pmoos.ingest.convert import WORD_FORMATS, to_docx
     name = Path(urllib.parse.unquote(q.get("name", "том.docx"))).name
-    if not name.lower().endswith(".docx"):
-        raise ValueError("нужен .docx (старый .doc пересохраните в Word как .docx)")
-    dest = _corr_dir(q["project"]) / re.sub(_BAD_RX, "_", name)
-    dest.write_bytes(body_bytes)
-    return {"saved": dest.name}
+    name = re.sub(_BAD_RX, "_", name)
+    if Path(name).suffix.lower() not in WORD_FORMATS:
+        raise ValueError("нужен docx / doc / pdf / rtf / odt")
+    cdir = _corr_dir(q["project"])
+    if name.lower().endswith(".docx"):
+        dest = cdir / name
+        dest.write_bytes(body_bytes)
+        return {"saved": dest.name, "method": "copy", "note": ""}
+    orig_dir = cdir / "_orig"
+    orig_dir.mkdir(parents=True, exist_ok=True)
+    orig = orig_dir / name
+    orig.write_bytes(body_bytes)
+    res = to_docx(orig, cdir)
+    return {"saved": res["path"].name, "method": res["method"], "note": res["note"]}
 
 
 def api_corr_list(q, body):

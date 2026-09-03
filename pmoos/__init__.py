@@ -4,8 +4,8 @@
 Версия меняется при каждой значимой доработке (см. README -> История версий).
 """
 
-__version__ = "0.45.0"
-__codename__ = "InPlace"
+__version__ = "0.46.0"
+__codename__ = "Formats"
 
 # Человекочитаемая версия для вывода в UI и логах
 VERSION = f"STR.RAG v{__version__} «{__codename__}»"

@@ -425,6 +425,7 @@ class _Index:
         # 75 ответов полный перебор окон занимал бы минуты
         cands = sorted(cnt, key=lambda i: -cnt[i])[:60]
         best = (-1, 0, 0.0)
+        best_dist = 10 ** 9
         target_len = len(wn)
         for c in cands:
             for start in range(max(lo, c - 3), c + 1):
@@ -446,8 +447,13 @@ class _Index:
                     # штраф за окно сильно длиннее «было» (захват чужого текста)
                     if len(acc) > target_len * 1.6:
                         score *= 0.9
-                    if score > best[2]:
+                    # при РАВНОМ сходстве берём окно, ближайшее по длине к «было»:
+                    # иначе выигрывало окно с лишней строкой сверху (заголовок
+                    # «Раздел 10…» затирался заменой — найдено тестом)
+                    dist = abs(len(acc) - target_len)
+                    if score > best[2] or (score == best[2] and dist < best_dist):
                         best = (start, k, score)
+                        best_dist = dist
         return best
 
     def find_heading(self, hint: str):
@@ -606,6 +612,13 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
                         r.bold = (i == 0)
                         _yellow(r)
         par._p.addnext(tbl._tbl)
+        # ОБЯЗАТЕЛЬНО абзац ПОСЛЕ таблицы: если таблица оказывается последним
+        # элементом ячейки (w:tc), Word считает файл повреждённым и не
+        # открывает его (реальный случай: том 6.1, «Таблица 10.2» в ячейке —
+        # «откорректированный файл не открыть, пишет ошибка»); в теле документа
+        # абзац ещё и не даёт двум таблицам подряд слипнуться в одну
+        from docx.oxml.ns import qn as _qn2
+        tbl._tbl.addnext(par._p.makeelement(_qn2("w:p"), {}))
 
     for e in plan:
         mode = e["mode"]
@@ -665,6 +678,28 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
             _std_run(r3)
             _yellow(r3)
     return stats
+
+
+def repair_structure(doc) -> int:
+    """Страховка перед сохранением: OOXML требует, чтобы ячейка таблицы (w:tc),
+    текстовая рамка (w:txbxContent) и содержимое sdt заканчивались АБЗАЦЕМ, а
+    тело документа — абзацем перед w:sectPr. Нарушение = «Word обнаружил
+    нечитаемое содержимое». Добавляет пустые w:p где нужно; возвращает число
+    ремонтов (в норме 0)."""
+    from docx.oxml.ns import qn
+    body = doc.element.body
+    fixes = 0
+    for tag in ("w:tc", "w:txbxContent", "w:sdtContent"):
+        for el in body.iter(qn(tag)):
+            kids = [c for c in el if c.tag != qn("w:tcPr")]
+            if kids and kids[-1].tag != qn("w:p"):
+                el.append(el.makeelement(qn("w:p"), {}))
+                fixes += 1
+    blocks = [c for c in body if c.tag != qn("w:sectPr")]
+    if blocks and blocks[-1].tag != qn("w:p"):
+        blocks[-1].addnext(body.makeelement(qn("w:p"), {}))
+        fixes += 1
+    return fixes
 
 
 # кэш планов: предпросмотр и запись идут подряд, а разбор тома-конверсии
@@ -774,6 +809,10 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
             print(f"[m5] ПРОПУЩЕН {src.name}: {e}", flush=True)
             continue
         stats = _apply_plan(doc, plan, ix)
+        fixes = repair_structure(doc)
+        if fixes:
+            print(f"[m5] {src.name}: структура починена ({fixes}) — ячейка/рамка "
+                  f"заканчивалась таблицей, Word такой файл не открыл бы", flush=True)
         out = out_dir / f"{src.stem}_КОРР.docx"
         doc.save(str(out))
         # документ мутирован — из кэша вон, иначе повторная запись легла бы

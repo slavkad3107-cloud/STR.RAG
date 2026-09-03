@@ -359,6 +359,105 @@ def test_decode_garbled_pdf_font():
     assert _norm("сель скохозяйственного") == _norm("сельскохозяйственного")
 
 
+def test_convert_sources_to_docx(tmp_path):
+    # «добавить pdf и другие форматы» для откорректированного тома
+    import shutil
+    from docx import Document
+    from pmoos.ingest.convert import to_docx, soffice_path, WORD_FORMATS
+    assert {".pdf", ".doc", ".rtf", ".odt", ".docx"} <= WORD_FORMATS
+    # docx → копия
+    src = tmp_path / "том.docx"
+    d = Document(); d.add_paragraph("Исходный том"); d.save(str(src))
+    r = to_docx(src, tmp_path / "o1")
+    assert r["method"] == "copy" and r["path"].exists()
+    # текстовый PDF → docx через pymupdf (быстрый путь по умолчанию)
+    import fitz
+    pdf = tmp_path / "том.pdf"
+    pd = fitz.open(); page = pd.new_page()
+    # латиница: встроенный шрифт Helvetica у fitz без кириллицы, а проверяем
+    # здесь механику конверсии, не шрифты
+    # ≥200 ВИДИМЫХ символов (порог «не скан» в конвертере): строки в пределах
+    # страницы, а не одна длинная за краем листа
+    for i in range(8):
+        page.insert_text((72, 72 + i * 16), "Forest land within the object boundaries is absent.")
+    page.insert_text((72, 220), "Section 2.1.4 Land characteristics")
+    pd.save(str(pdf)); pd.close()
+    r2 = to_docx(pdf, tmp_path / "o2")
+    assert r2["method"] == "pdf-text"
+    txt = " ".join(p.text for p in Document(str(r2["path"])).paragraphs)
+    assert "Forest land" in txt and "Section 2.1.4" in txt and "стр. 1" in txt
+    # неподдерживаемый формат — понятная ошибка
+    bad = tmp_path / "том.xlsx"; bad.write_bytes(b"x")
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        to_docx(bad, tmp_path / "o3")
+    # .doc через LibreOffice (если установлен; иначе пропуск)
+    if not soffice_path():
+        _pt.skip("LibreOffice нет — конверсия .doc не проверяется")
+    import subprocess
+    subprocess.run([soffice_path(), "--headless", "--convert-to", "doc",
+                    "--outdir", str(tmp_path / "docsrc"), str(src)],
+                   capture_output=True, timeout=300)
+    doc_file = tmp_path / "docsrc" / "том.doc"
+    if doc_file.exists():
+        r3 = to_docx(doc_file, tmp_path / "o4")
+        assert r3["method"] == "soffice"
+        assert "Исходный том" in Document(str(r3["path"])).paragraphs[0].text
+
+
+def test_corrected_volume_table_in_cell_opens(tmp_path, monkeypatch):
+    # РЕАЛЬНЫЙ СЛУЧАЙ (том 6.1 ОПОЧКИ): правка-таблица встала в ЯЧЕЙКУ и стала
+    # её последним элементом — Word: «файл повреждён, не открыть». OOXML требует
+    # абзац после таблицы в ячейке. Проверяем и структуру, и repair_structure.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json, zipfile
+    from docx import Document
+    from docx.oxml.ns import qn
+    from lxml import etree
+    from pmoos.projects import register_project
+    from pmoos.paths import project_paths
+    from pmoos.output.docx_writer import write_corrected_volumes, repair_structure
+    register_project("ЯЧ")
+    src = tmp_path / "том 6.1.docx"
+    d = Document()
+    d.add_paragraph("Раздел 10. Программа производственного экологического контроля")
+    t = d.add_table(rows=1, cols=1)
+    t.cell(0, 0).paragraphs[0].text = (
+        "Перечень контролируемых показателей мониторинга атмосферного воздуха "
+        "приведён в таблице ниже по постам наблюдения и периодичности отбора проб")
+    d.save(str(src))
+    pa = project_paths("ЯЧ")["answers"]
+    pa.parent.mkdir(parents=True, exist_ok=True)
+    pa.write_text(json.dumps({"answers": [{
+        "number": "5", "status": "accepted", "answer": "о", "remark": "мониторинг",
+        "edit_was": "Перечень контролируемых показателей мониторинга атмосферного "
+                    "воздуха приведён в таблице ниже по постам наблюдения и "
+                    "периодичности отбора проб",
+        "edit_shall": "Таблица 10.2 Предложения к программе мониторинга\n"
+                      "| Пост | Показатель | Периодичность |\n|---|---|---|\n"
+                      "| П1 | NO2 | 1 раз в квартал |\n| П2 | взвешенные | 1 раз в квартал |",
+    }]}, ensure_ascii=False), encoding="utf-8")
+    outs, failed = write_corrected_volumes("ЯЧ", [str(src)])
+    assert outs and not failed
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    root = etree.fromstring(zipfile.ZipFile(outs[0]).read("word/document.xml"))
+    assert any(tb.getparent().tag == W + "tc" for tb in root.iter(W + "tbl")), \
+        "таблица правки должна встать внутрь ячейки (проверяем именно этот путь)"
+    bad = [tc for tc in root.iter(W + "tc")
+           if [c for c in tc if c.tag != W + "tcPr"][-1].tag != W + "p"]
+    assert not bad, "ячейка заканчивается таблицей — Word не откроет"
+    body = root.find(W + "body")
+    assert [c for c in body if c.tag != W + "sectPr"][-1].tag == W + "p"
+    # ремонт на заведомо битой структуре: ячейка → таблица последней
+    d2 = Document()
+    cell = d2.add_table(rows=1, cols=1).cell(0, 0)
+    inner = d2.add_table(rows=1, cols=1)
+    cell._tc.append(inner._tbl)
+    assert repair_structure(d2) >= 1
+    assert cell._tc[-1].tag == qn("w:p")
+    assert repair_structure(d2) == 0            # повторно чинить нечего
+
+
 def test_corrected_volume_replace_in_place(tmp_path, monkeypatch):
     # ЗАПРОС ЮЗЕРА 05.08: «должен быть сформирован новый раздел ООС с учётом
     # исправлений» — правка «БЫЛО→СТАЛО» вносится ПРЯМО В ТЕКСТ тома

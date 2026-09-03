@@ -426,8 +426,8 @@ async function renderExport() {
       ответов будут внесены прямо в текст: найденное «БЫЛО» заменяется на «СТАЛО»
       (жёлтая заливка + № замечания), остальное встаёт по якорям «п./табл./раздел».
       Результат — файлы <b>*_КОРР.docx</b>.</div>
-    <button class="sec" onclick="$('corrInp').click()">📄 Загрузить исходные тома (.docx)…</button>
-    <input type="file" id="corrInp" hidden multiple accept=".docx" onchange="corrUpload(this.files)">
+    <button class="sec" onclick="$('corrInp').click()">📄 Загрузить исходные тома (docx / doc / pdf / rtf / odt)…</button>
+    <input type="file" id="corrInp" hidden multiple accept=".docx,.doc,.pdf,.rtf,.odt,.docm" onchange="corrUpload(this.files)">
     <table style="margin:6px 0"><tbody>${cv.volumes.map(v =>
       `<tr><td>${esc(v.name)}</td><td style="width:80px">${v.kb} КБ</td>
        <td style="width:60px"><button class="sec" data-cdel="${esc(v.name)}">✖</button></td></tr>`).join("") ||
@@ -451,11 +451,17 @@ async function renderExport() {
     });
 }
 async function corrUpload(files) {
-  let n = 0;
+  let n = 0; const notes = [];
   for (const f of files) {
-    try { await apiRaw("corr_upload", {name: encodeURIComponent(f.name)}, f); n++; }
-    catch (e) { err(e); }
+    const conv = !/\.docx$/i.test(f.name);
+    if (conv) $("corrBox").textContent = `Конвертирую ${f.name} в .docx (PDF/DOC → секунды; скан с OCR — минуты)…`;
+    try {
+      const r = await apiRaw("corr_upload", {name: encodeURIComponent(f.name)}, f);
+      n++;
+      if (r.note) notes.push(`${r.saved}: ${r.note}`);
+    } catch (e) { err(e); }
   }
+  $("corrBox").textContent = notes.join("\n");
   toast(`Загружено томов: ${n}`); renderExport();
 }
 async function corrPreview() {
