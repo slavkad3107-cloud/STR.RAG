@@ -252,12 +252,52 @@ def _sub_bounded(needle: str, hay: str) -> bool:
     return bool(needle) and _re.search(_re.escape(needle) + r"(?!\.?\d)", hay) is not None
 
 
+def _volume_tokens(text: str) -> set[str]:
+    """Номера томов, названные в тексте: «Том 6.1», «том 6.2,», «тома 6.1–6.3»
+    → {'6.1','6.2'}. Диапазон «6.1–6.3» раскрывается по последней цифре."""
+    import re as _re
+    out: set[str] = set()
+    low = (text or "").lower().replace("ё", "е")
+    for m in _re.finditer(r"том[аеу]?\s*№?\s*(\d+(?:\.\d+)+)(?:\s*[-–—]\s*(\d+(?:\.\d+)+))?", low):
+        a, b = m.group(1), m.group(2)
+        out.add(a)
+        if b:
+            pa, pb = a.rsplit(".", 1), b.rsplit(".", 1)
+            if pa[0] == pb[0] and pa[1].isdigit() and pb[1].isdigit():
+                for k in range(int(pa[1]), int(pb[1]) + 1):
+                    out.add(f"{pa[0]}.{k}")
+            else:
+                out.add(b)
+    return out
+
+
+def _src_volume_token(src: Path) -> str:
+    """Номер тома из имени файла: «Раздел ПД №6_ООС_том 6.1.docx» → '6.1'."""
+    import re as _re
+    m = _re.search(r"том[аеу]?\s*№?\s*(\d+(?:\.\d+)+)", src.stem.lower())
+    if m:
+        return m.group(1)
+    m = _re.search(r"(\d+\.\d+(?:\.\d+)*)", src.stem)
+    return m.group(1) if m else ""
+
+
 def _match_volume(a: dict, src: Path) -> bool:
-    """Относится ли принятый ответ к данному тому (по полю «Том ООС»)."""
+    """Относится ли принятый ответ к данному тому.
+
+    Смотрим НЕ ТОЛЬКО служебное поле «Том ООС» (оно часто пусто/неверно), но и
+    «где править» и текст замечания: «Том 6.2, п. 4.2.3» → том 6.2. Реальный
+    случай (05.09): полтора десятка правок «Том 6.2/6.3» ложились в том 6.1."""
+    tok = _src_volume_token(src)
+    # ЯВНО названный том («Том 6.2, п. 4.2.3» в «где править» или в замечании)
+    # главнее служебного поля «Том ООС»: то поле заполняет поиск по базе и
+    # часто указывает не тот том (05.09: правки 6.2/6.3 лежали в 6.1)
+    named = _volume_tokens(a.get("edit_location") or "") or _volume_tokens(a.get("remark") or "")
+    if named and tok:
+        return tok in named
     v = (a.get("oos_volume") or "").lower().strip()
+    n, stem = src.name.lower(), src.stem.lower()
     if not v:
         return False
-    n, stem = src.name.lower(), src.stem.lower()
     if _sub_bounded(v, n) or _sub_bounded(n, v) or _sub_bounded(stem, v):
         return True
     vp = Path(v)
@@ -348,6 +388,13 @@ _STOP_RU = {
     "согласно", "соответствии", "требований", "требованиями", "приведены",
     "приведен", "приведена", "представлены", "представлен", "представлена",
     "отсутствуют", "отсутствует", "имеются", "имеется", "необходимо", "следует",
+    # юридические слова-паразиты: уводили правки в список нормативов
+    # («Постановления Правительства Российской Федерации», 05.09)
+    "постановление", "постановления", "постановлением", "правительства",
+    "правительство", "российской", "федерации", "федеральный", "федерального",
+    "закона", "закон", "приказ", "приказа", "приказом", "требования", "статьи",
+    "пункта", "пункту", "пунктом", "уточнить", "указать", "представить",
+    "привести", "дополнить", "обосновать", "замечание", "замечания", "экспертизы",
 }
 
 
@@ -398,11 +445,101 @@ class _Index:
         self.norm = [_norm(t) for t in self.text]
         self.words = [_sig_words(t) for t in self.text]
         self.garbled = garble_ratio("".join(self.text[:3000]))
+        # КОЛОНТИТУЛЫ: в PDF-конверсии верхний/нижний колонтитул повторяется на
+        # каждой странице отдельной строкой («ПРИЛОЖЕНИЕ РАСЧЕТ РАССЕИВАНИЯ…»,
+        # шифр тома). Пять правок легли в такую строку (05.09) — исключаем
+        # строки, повторяющиеся ≥5 раз, из поиска мест и заголовков
+        cnt: dict[str, int] = {}
+        for nrm in self.norm:
+            if nrm:
+                cnt[nrm] = cnt.get(nrm, 0) + 1
+        # только ДЛИННЫЕ повторы (≥20 символов без пробелов): короткие ячейки
+        # «шт», «м3», числа повторяются сотни раз и не колонтитулы (порог без
+        # длины вычёркивал 25 % строк тома — всё уходило «вручную»)
+        self.noise: set[int] = {i for i, nrm in enumerate(self.norm)
+                                if nrm and 20 <= len(nrm) < 160 and cnt[nrm] >= 5}
         # слово → множество индексов абзацев (для предфильтра кандидатов)
         self.inv: dict[str, set[int]] = {}
         for i, ws in enumerate(self.words):
+            if i in self.noise:
+                continue
             for w in ws:
                 self.inv.setdefault(w, set()).add(i)
+        # ЗАГОЛОВКИ РАЗДЕЛОВ ТОМА (для поиска места ПО ТЕМЕ): в PDF-конверсиях
+        # заголовки идут ЗАГЛАВНЫМИ и БЕЗ номеров («ОХРАНА НЕДР»), номера
+        # пунктов из ответов («п. 3.5.1») в тексте не существуют (05.09).
+        # Кандидат: короткая строка, не колонтитул, не конец фразы, после неё
+        # идёт текст; ЗАГЛАВНЫМИ — всегда, обычным регистром — если перед ней
+        # пустая/короткая строка (подраздел).
+        import re as _re
+        # heads: (idx_первой_строки, слова, заголовок ЗАГЛАВНЫМИ?, текст)
+        self.heads: list[tuple[int, set[str], bool, str]] = []
+        n = len(self.text)
+        i = 0
+        while i < n:
+            dt = decode_garbled(self.text[i]).strip()
+            L = len(dt)
+            ok = (12 <= L <= 120 and i not in self.noise and "\t" not in dt
+                  and dt[-1] not in ".,;:" and _re.search(r"[А-ЯЁа-яё]{4,}", dt))
+            if not ok:
+                i += 1
+                continue
+            letters = _re.sub(r"[^А-ЯЁа-яёA-Za-z]", "", dt)
+            caps = bool(letters) and letters == letters.upper()
+            prev_short = i == 0 or len(self.text[i - 1].strip()) < 40
+            if not (caps or (dt[0].isupper() and prev_short)):
+                i += 1
+                continue
+            # ЗАГЛАВНЫЙ заголовок часто разорван PDF на 2–3 строки
+            # («ВЫБРОСЫ ЗАГРЯЗНЯЮЩИХ» / «ВЕЩЕСТВ В АТМОСФЕРУ») — склеиваем
+            j = i + 1
+            title = dt
+            if caps:
+                while j < n:
+                    nx = decode_garbled(self.text[j]).strip()
+                    nl = _re.sub(r"[^А-ЯЁа-яёA-Za-z]", "", nx)
+                    if 3 <= len(nx) <= 120 and nl and nl == nl.upper() and "\t" not in nx \
+                            and _re.search(r"[А-ЯЁ]{3,}", nx) and j not in self.noise:
+                        title += " " + nx
+                        j += 1
+                    else:
+                        break
+            body = sum(1 for q in range(j, min(n, j + 6)) if len(self.text[q]) > 60)
+            if body >= 2:
+                ws = _sig_words(title)
+                if ws:
+                    self.heads.append((i, ws, caps, title[:100]))
+            i = j
+        self._head_pos = [h[0] for h in self.heads]
+
+    def find_topic_heading(self, topic: set[str], *, strict: bool = False
+                           ) -> tuple[int, int, float, str]:
+        """Заголовок раздела, лучше всего совпадающий с темой ответа (значимые
+        слова «где править» + замечания). Возвращает (idx, end_idx, score,
+        текст заголовка); idx=-1 если совпадение слабое. Заголовки ЗАГЛАВНЫМИ
+        (главы) надёжнее строк обычного регистра — для последних порог выше.
+        strict=True (название в кавычках): достаточно и одного точного слова,
+        если оно покрывает ≥ половины заголовка."""
+        best = (-1, -1, 0.0, "")
+        for pos, (i, ws, caps, title) in enumerate(self.heads):
+            ov = len(topic & ws)
+            if ov == 0:
+                continue
+            cover = ov / len(ws)
+            if strict:
+                if ov < 2 and cover < 0.5:
+                    continue
+            elif ov < 2 or (not caps and (ov < 3 and cover < 0.6)):
+                continue
+            score = cover + 0.05 * ov + (0.1 if caps else 0.0)
+            # слабое совпадение по теме (0.27–0.29 на реальных томах) уводило
+            # правку в чужой раздел — лучше честно «вручную»
+            if score < 0.35 and not strict:
+                continue
+            if score > best[2]:
+                end = self._head_pos[pos + 1] if pos + 1 < len(self._head_pos) else min(len(self.text), i + 600)
+                best = (i, end, score, title[:80])
+        return best
 
     def window_text(self, i: int, k: int) -> str:
         return "".join(self.norm[i:i + k])
@@ -429,11 +566,11 @@ class _Index:
         target_len = len(wn)
         for c in cands:
             for start in range(max(lo, c - 3), c + 1):
-                if start in used:
+                if start in used or start in self.noise:
                     continue
                 acc = ""
                 for k in range(1, 12):
-                    if start + k > hi:
+                    if start + k > hi or (start + k - 1) in self.noise:
                         break
                     acc += self.norm[start + k - 1]
                     if len(acc) < target_len * 0.5:
@@ -456,11 +593,39 @@ class _Index:
                         best_dist = dist
         return best
 
-    def find_heading(self, hint: str):
+    _FRONT_RX = None   # строки состава проекта / оглавления — не заголовки тела
+
+    def _is_front_matter(self, i: int) -> bool:
+        """«3.3.2 717/14/15-П-1/ТКР.ЭС» (состав проекта), «3.3.2 …….. 45»
+        (оглавление) — такие строки первыми содержат номер пункта и раньше
+        перехватывали вставку «по заголовку» (реальный случай 05.09)."""
         import re as _re
-        rx = _re.compile(r"(?<![\d.])" + _re.escape(hint) + r"(?![\d])")
+        if _Index._FRONT_RX is None:
+            _Index._FRONT_RX = _re.compile(
+                r"\d+/\d+/\d+-|\.{4,}\s*\d*\s*$|\s\d{1,3}\s*$|^содержание|^оглавление")
+        return bool(_Index._FRONT_RX.search(decode_garbled(self.text[i]).strip().lower()))
+
+    def find_heading(self, hint: str):
+        """Индекс ЗАГОЛОВКА пункта/таблицы «hint» В ТЕЛЕ тома: короткая строка,
+        НАЧИНАЮЩАЯСЯ с номера (не «рис. 3.5.1» посреди текста), не из состава
+        проекта/оглавления, и после неё идёт обычный текст (≥2 из следующих 6
+        строк длиннее 60 символов). Первое такое вхождение."""
+        import re as _re
+        # после номера — пробел и слово с ЗАГЛАВНОЙ («3.3.2 Характеристика…»);
+        # строки таблиц «1 п п Наименование», списки «5 - Особо большой», текст
+        # «7 время в течении…» — не заголовки (реальные промахи 05.09)
+        # заголовок бывает и ЗАГЛАВНЫМИ («3.5.1 ИНТЕНСИВНОСТЬ ДВИЖЕНИЯ»)
+        rx = _re.compile(r"^(?i:п\.?|пункт|табл\w*\.?|таблица|раздел)?\s*№?\s*"
+                         + _re.escape(hint) + r"(?![\d])[.)]?\s+[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z]{2,}")
+        n = len(self.text)
         for i, t in enumerate(self.text):
-            if len(t) < 140 and rx.search(decode_garbled(t)):
+            dt = decode_garbled(t).strip()
+            if not dt or len(dt) > 140 or "\t" in dt or not rx.match(dt):
+                continue
+            if self._is_front_matter(i) or i in self.noise:
+                continue
+            body = sum(1 for j in range(i + 1, min(n, i + 7)) if len(self.text[j]) > 60)
+            if body >= 2:
                 return i
         return -1
 
@@ -482,57 +647,100 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
         remark = decode_garbled((a.get("remark") or "").strip())
         e = {"number": num, "mode": "manual", "idx": -1, "k": 0, "score": 0.0,
              "par_text": "", "shall": shall, "location": loc,
-             "is_table": _is_md_table(shall)}
+             "is_table": _is_md_table(shall), "via": ""}
         if not shall:
             e["mode"] = "skip"
             plan.append(e)
             continue
-        i, k, s = -1, 0, 0.0
+        # заголовки пунктов/таблиц из «где править» — В ТЕЛЕ тома (не в составе
+        # проекта и не в оглавлении); окно поиска — сам пункт (до 400 строк)
+        hints = _loc_hints(loc)
+        heads = [(h, ix.find_heading(h)) for h in hints]
+        heads = [(h, hi_) for h, hi_ in heads if hi_ >= 0]
+        i, k, s, via = -1, 0, 0.0, ""
+        near = None
         if was:
-            # 1) в окне после заголовка пункта/таблицы из edit_location
-            for h in _loc_hints(loc):
-                hi_ = ix.find_heading(h)
-                if hi_ >= 0:
-                    i2, k2, s2 = ix.find(was, used, hi_, min(len(ix.pars), hi_ + 400))
-                    if s2 >= 0.45 and s2 > s:
-                        i, k, s = i2, k2, s2
-            # 2) по всему тому — при уверенном сходстве ЗАМЕНА; при среднем
-            #    (пересказ ИИ, 0.35–0.55) — безопасная ВСТАВКА после найденного
-            #    места, чтобы не испортить чужой абзац (калибровка 05.08)
-            near = None
+            # 1) «было» внутри нужного пункта — самое надёжное место
+            for h, hi_ in heads:
+                i2, k2, s2 = ix.find(was, used, hi_, min(len(ix.pars), hi_ + 400))
+                if s2 >= 0.45 and s2 > s:
+                    i, k, s, via = i2, k2, s2, f"«было» в п. {h}"
+            # 2) по всему тому — только при УВЕРЕННОМ сходстве (замена); при
+            #    среднем 0.45–0.55 — вставка после найденного места. Ниже 0.45
+            #    в чужой текст не лезем (05.09: 0.35 давало «куда попало»)
             if i < 0:
                 i2, k2, s2 = ix.find(was, used)
                 if s2 >= 0.55:
-                    i, k, s = i2, k2, s2
-                elif s2 >= 0.35:
+                    i, k, s, via = i2, k2, s2, "«было» найдено в томе"
+                elif s2 >= 0.50:
                     near = (i2, k2, s2)
         if i >= 0:
             used.update(range(i, i + k))
-            e.update(mode="replace", idx=i, k=k, score=round(s, 2),
+            e.update(mode="replace", idx=i, k=k, score=round(s, 2), via=via,
                      par_text=decode_garbled(" ".join(ix.text[i:i + k]))[:200])
         elif near:
             i2, k2, s2 = near
             used.update(range(i2, i2 + k2))
             e.update(mode="insert", idx=i2 + k2 - 1, k=1, score=round(s2, 2),
+                     via="похоже на «было» (сходство среднее)",
                      par_text=decode_garbled(" ".join(ix.text[i2:i2 + k2]))[:160])
         else:
-            for h in _loc_hints(loc):
-                hi_ = ix.find_heading(h)
-                if hi_ >= 0 and hi_ not in used:
-                    e.update(mode="insert", idx=hi_, k=1,
+            # 3) сразу после заголовка нужного пункта/таблицы (в теле тома)
+            for h, hi_ in heads:
+                if hi_ not in used:
+                    e.update(mode="insert", idx=hi_, k=1, via=f"после заголовка п. {h}",
                              par_text=decode_garbled(ix.text[hi_])[:160])
                     used.add(hi_)
                     break
-            # 3) место по ТЕКСТУ ЗАМЕЧАНИЯ: эксперт цитирует/пересказывает
-            #    конкретный фрагмент тома — ищем похожее окно и ВСТАВЛЯЕМ «стало»
-            #    сразу после него (не заменяем: уверенность ниже). Это лучше,
-            #    чем «в конец тома» для половины правок (05.08).
+            # 4) ПО ТЕМЕ: раздел тома, чей заголовок совпадает со значимыми
+            #    словами «где править» + замечания (в PDF-конверсиях номеров
+            #    пунктов нет — только названия). Внутри раздела ещё раз ищем
+            #    «было»/цитату замечания (порог ниже: область уже верная);
+            #    иначе — сразу после заголовка раздела.
+            if e["mode"] == "manual":
+                import re as _re2
+                # название раздела/таблицы в кавычках из «где править» —
+                # самый точный ориентир, пробуем его первым
+                quoted = " ".join(_re2.findall(r"[«\"„]([^»\"“]{4,80})[»\"“]", loc))
+                ti = -1
+                if quoted:
+                    ti, tend, ts, ttitle = ix.find_topic_heading(_sig_words(quoted), strict=True)
+                if ti < 0:
+                    topic = _sig_words(loc) | _sig_words(remark)
+                    ti, tend, ts, ttitle = ix.find_topic_heading(topic)
+                if ti >= 0:
+                    placed = False
+                    if was:
+                        i4, k4, s4 = ix.find(was, used, ti, tend)
+                        if s4 >= 0.40:
+                            used.update(range(i4, i4 + k4))
+                            e.update(mode="replace" if s4 >= 0.55 else "insert",
+                                     idx=i4 if s4 >= 0.55 else i4 + k4 - 1,
+                                     k=k4 if s4 >= 0.55 else 1, score=round(s4, 2),
+                                     via=f"«было» в разделе «{ttitle[:40]}»",
+                                     par_text=decode_garbled(" ".join(ix.text[i4:i4 + k4]))[:160])
+                            placed = True
+                    if not placed and remark:
+                        i5, k5, s5 = ix.find(remark, used, ti, tend)
+                        if s5 >= 0.40:
+                            used.update(range(i5, i5 + k5))
+                            e.update(mode="insert", idx=i5 + k5 - 1, k=1, score=round(s5, 2),
+                                     via=f"цитата замечания в разделе «{ttitle[:40]}»",
+                                     par_text=decode_garbled(" ".join(ix.text[i5:i5 + k5]))[:160])
+                            placed = True
+                    if not placed and ti not in used:
+                        used.add(ti)
+                        e.update(mode="insert", idx=ti, k=1, score=round(ts, 2),
+                                 via=f"в раздел «{ttitle[:40]}» (по теме)",
+                                 par_text=ttitle)
+            # 5) по ТЕКСТУ ЗАМЕЧАНИЯ по всему тому — только при высоком сходстве
             if e["mode"] == "manual" and remark:
                 i3, k3, s3 = ix.find(remark, used)
-                if s3 >= 0.30:
+                if s3 >= 0.50:
                     last = i3 + k3 - 1
                     used.update(range(i3, i3 + k3))
                     e.update(mode="insert", idx=last, k=1, score=round(s3, 2),
+                             via="по цитате из замечания",
                              par_text=decode_garbled(" ".join(ix.text[i3:i3 + k3]))[:160])
         plan.append(e)
     return plan, ix
@@ -732,7 +940,9 @@ def _plan_for(src, mine: list[dict]):
 
 
 def _volume_answers(answers: list[dict], srcs: list, si: int, src) -> list[dict]:
-    """Ответы данного тома (по полю «Том ООС»); без тома — в первый."""
+    """Ответы данного тома: по полю «Том ООС» и по «Том X.Y» в тексте ответа.
+    Ответ, называющий несколько томов («Том 6.1, Том 6.2, Том 6.3»), идёт в
+    КАЖДЫЙ из них; не отнесённые ни к одному тому — в первый."""
     if len(srcs) <= 1:
         return list(answers)
     matched_ids = {id(a) for s2 in srcs for a in answers if _match_volume(a, s2)}
@@ -743,11 +953,12 @@ def _volume_answers(answers: list[dict], srcs: list, si: int, src) -> list[dict]
 
 
 def _placed_text(e: dict) -> str:
+    via = f" [{e['via']}]" if e.get("via") else ""
     if e["mode"] == "replace":
-        return (f"ЗАМЕНА {e['k']} стр. (сходство {int(e['score'] * 100)}%): "
+        return (f"ЗАМЕНА {e['k']} стр. (сходство {int(e['score'] * 100)}%){via}: "
                 f"«{e['par_text'][:120]}…»")
     if e["mode"] == "insert":
-        return f"ВСТАВКА после «{e['par_text'][:80]}»"
+        return f"ВСТАВКА после «{e['par_text'][:80]}»{via}"
     if e["mode"] == "skip":
         return "пропуск: у ответа нет текста правки («стало»/«правка»)"
     return ("в конец тома, раздел «требуют ручного внесения»"

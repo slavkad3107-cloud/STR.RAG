@@ -359,6 +359,78 @@ def test_decode_garbled_pdf_font():
     assert _norm("сель скохозяйственного") == _norm("сельскохозяйственного")
 
 
+def test_corrections_placement_rules(tmp_path, monkeypatch):
+    # «правки встают куда попало» (05.09) — три правила размещения:
+    # 1) том берётся из «Том X.Y» в тексте ответа; 2) заголовок пункта ищется
+    # в ТЕЛЕ (не в составе проекта/оглавлении); 3) слабая похожесть → вручную.
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pathlib import Path as _P
+    from docx import Document
+    from pmoos.output.docx_writer import (_match_volume, _volume_answers,
+                                          _volume_tokens, plan_corrections)
+    # 1) раскладка по томам
+    s61, s62 = _P("Раздел ПД №6_ООС_том 6.1.docx"), _P("Раздел ПД №6_ООС_том 6.2.docx")
+    a62 = {"number": "11", "oos_volume": "", "edit_location": "Том 6.2, Раздел ООС, п. 4.2.3"}
+    a_multi = {"number": "70", "edit_location": "Том 6.1, Том 6.2, Раздел 6"}
+    a_none = {"number": "99", "edit_location": "п. 3"}
+    assert _volume_tokens("тома 6.1–6.3") == {"6.1", "6.2", "6.3"}
+    assert _match_volume(a62, s62) and not _match_volume(a62, s61)
+    got = {s.name[-8:-5]: [x["number"] for x in _volume_answers([a62, a_multi, a_none], [s61, s62], i, s)]
+           for i, s in enumerate([s61, s62])}
+    assert got == {"6.1": ["70", "99"], "6.2": ["11", "70"]}
+    # 2) заголовок в теле, а не в составе проекта / оглавлении
+    d = Document()
+    d.add_paragraph("3.3.2\t717/14/15-П-1/ТКР.ЭС")                 # состав проекта
+    d.add_paragraph("3.3.2 Электроснабжение ......................... 45")   # оглавление
+    for _ in range(3):
+        d.add_paragraph("Строка вводной части тома без содержательного текста по пункту.")
+    d.add_paragraph("3.3.2 Характеристика источников выбросов")     # НАСТОЯЩИЙ заголовок
+    d.add_paragraph("В период эксплуатации источниками выбросов являются котельная и "
+                    "автотранспорт, работающий на территории объекта реконструкции.")
+    d.add_paragraph("Перечень источников с параметрами приведён в таблице 3.5 ниже по тексту "
+                    "с указанием координат и высоты каждого источника.")
+    plan, ix = plan_corrections(d, [{"number": "10", "status": "accepted", "answer": "о",
+                                     "remark": "дополнить п. 3.3.2 данными о фоне",
+                                     "edit_location": "Том 6.1, п. 3.3.2",
+                                     "edit_shall": "Фоновые концентрации приняты по справке ЦГМС."}])
+    e = plan[0]
+    assert e["mode"] == "insert" and "Характеристика источников" in e["par_text"], e
+    assert "после заголовка" in e["via"]
+    # 3) нет пункта и слабая похожесть на текст замечания → вручную, не «куда попало»
+    d2 = Document()
+    for _ in range(4):
+        d2.add_paragraph("Комплексная система очистки поверхностного стока обеспечивает "
+                         "требуемую степень очистки перед сбросом в водный объект.")
+    plan2, _ = plan_corrections(d2, [{"number": "3", "status": "accepted", "answer": "о",
+                                      "remark": "уточнить объём поверхностного стока с площадки",
+                                      "edit_location": "", "edit_was": "",
+                                      "edit_shall": "Объём стока принят 120 м3/сут."}])
+    assert plan2[0]["mode"] == "manual", plan2[0]
+    # 4) ПО ТЕМЕ: в PDF-конверсиях заголовки ЗАГЛАВНЫМИ и без номеров — правка
+    #    про отходы идёт в раздел «…ОБРАЩЕНИЮ С ОТХОДАМИ», а не «куда попало»
+    d3 = Document()
+    d3.add_paragraph("ОХРАНА АТМОСФЕРНОГО ВОЗДУХА")
+    for _ in range(3):
+        d3.add_paragraph("Выбросы загрязняющих веществ в период эксплуатации определены расчётом "
+                         "по методикам с учётом характеристик автотранспортного потока.")
+    d3.add_paragraph("")
+    d3.add_paragraph("МЕРОПРИЯТИЯ ПО СБОРУ, ИСПОЛЬЗОВАНИЮ И РАЗМЕЩЕНИЮ ОТХОДОВ")
+    for _ in range(3):
+        d3.add_paragraph("Строительные отходы накапливаются в контейнерах на площадке и вывозятся "
+                         "на лицензированный полигон по договору с региональным оператором.")
+    plan3, ix3 = plan_corrections(d3, [{"number": "16", "status": "accepted", "answer": "о",
+                                        "remark": "уточнить нормативы образования отходов и "
+                                                  "места их размещения",
+                                        "edit_location": "Том 6.1, п. 5.1, Таблица 5.4",
+                                        "edit_was": "",
+                                        "edit_shall": "Нормативы образования отходов приведены в "
+                                                      "таблице 5.4 по ФККО."}])
+    e3 = plan3[0]
+    assert len(ix3.heads) == 2
+    assert e3["mode"] == "insert" and "ОТХОДОВ" in e3["par_text"], e3
+    assert "по теме" in e3["via"]
+
+
 def test_convert_sources_to_docx(tmp_path):
     # «добавить pdf и другие форматы» для откорректированного тома
     import shutil
