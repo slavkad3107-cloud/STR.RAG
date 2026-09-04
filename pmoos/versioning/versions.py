@@ -263,6 +263,30 @@ def set_current_version(project: str, group_key: str, filename: str) -> dict:
     return data
 
 
+def inactive_files(project: str) -> set[str]:
+    """Файлы НЕАКТУАЛЬНЫХ версий (в группах, где версий ≥ 2, все кроме
+    выбранной «актуальной»). Поиск и ответы их не используют (v0.48, ТЗ:
+    «если 2 версии — старая и откорректированная — это должно быть видно и
+    выбрано, что использовать»)."""
+    paths = project_paths(project)
+    p = paths["versions"]
+    if not p.exists():
+        return set()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return set()
+    out: set[str] = set()
+    for g in (data.get("groups") or {}).values():
+        vers = g.get("versions") or []
+        if len(vers) < 2:
+            continue
+        for v in vers:
+            if not v.get("is_current"):
+                out.add(v["file"])
+    return out
+
+
 def change_timeline(project: str) -> list[dict]:
     """Плоский список событий версий для графа изменений во времени."""
     paths = project_paths(project)

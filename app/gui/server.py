@@ -100,8 +100,13 @@ def api_info(q, body):
         pass
     rd = project_paths(p)["remarks_dir"]
     remarks = sorted(f.name for f in rd.iterdir() if f.is_file()) if rd.exists() else []
+    # текущая единая модель — свежая при каждом обновлении шапки (health может
+    # автоматически переключить провайдера при исчерпанном лимите)
+    cfg = _cfg()
+    prov = cfg.default_provider()
     return {"organization": org, "object_type": ot,
-            "uploads": list_uploads(p), "remarks": remarks}
+            "uploads": list_uploads(p), "remarks": remarks,
+            "model": f"{prov} · {cfg.model_for(prov, 'answer') or '—'}"}
 
 
 def api_org(q, body):
@@ -249,11 +254,25 @@ def api_reg_choose(q, body):
 
 
 def api_scan(q, body):
-    """PNG листа-источника: сохранённый снимок или живой рендер."""
+    """PNG листа-источника: сохранённый снимок или живой рендер. С параметром
+    vi=N — лист N-го ВАРИАНТА значения (чтобы подтвердить/выбрать, видя источник)."""
     from pmoos.data import registry as R
     from pmoos.paths import project_paths
     p, key = q["project"], q["key"]
     rec = (R.load_registry(p).get("indicators") or {}).get(key, {})
+    vi = q.get("vi")
+    if vi is not None and vi != "":
+        v = (rec.get("variants") or [])[int(vi)] if (rec.get("variants") or [])[int(vi):] else {}
+        if v.get("scan"):
+            sp = project_paths(p)["root"] / v["scan"]
+            if sp.exists():
+                return ("image/png", sp.read_bytes())
+        s0 = (v.get("sources") or [{}])[0]
+        png = R.render_source_page(p, s0.get("file", ""), s0.get("loc", ""))
+        if not png:
+            raise FileNotFoundError("скан варианта недоступен: исходник удалён после "
+                                    "индексации — загрузите том и соберите показатели заново")
+        return ("image/png", png)
     if rec.get("scan"):
         sp = project_paths(p)["root"] / rec["scan"]
         if sp.exists():
@@ -443,6 +462,158 @@ def api_open(q, body):
     return {"ok": True}
 
 
+# ───────────── ОБЪЕКТЫ: удалить / экспорт / импорт (v0.48, ТЗ) ─────────────
+def api_project_delete(q, body):
+    from pmoos.projects import delete_project
+    name = str(body.get("name", "")).strip()
+    if not name or body.get("confirm") != name:
+        raise ValueError("для удаления передайте confirm = точное имя объекта")
+    for k in list(_JOBS):
+        if k == name:
+            _JOBS.pop(k, None)
+    return delete_project(name)
+
+
+def api_project_export(q, body):
+    from pmoos.projects import export_project
+    out = export_project(str(body.get("name", "")).strip())
+    return {"path": str(out), "name": out.name}
+
+
+def api_project_import(q, body_bytes):
+    """RAW: zip экспорта объекта → новый объект (без затирания существующих)."""
+    import tempfile
+    from pmoos.projects import import_project
+    name = Path(urllib.parse.unquote(q.get("name", "объект.zip"))).name
+    if not name.lower().endswith(".zip"):
+        raise ValueError("нужен zip экспорта объекта")
+    with tempfile.NamedTemporaryFile("wb", suffix=".zip", delete=False) as f:
+        f.write(body_bytes)
+        tmp = f.name
+    try:
+        created = import_project(tmp)
+    finally:
+        try:
+            Path(tmp).unlink()
+        except OSError:
+            pass
+    return {"ok": True, "project": created}
+
+
+# ───────────── ВЕРСИИ ДОКУМЕНТОВ (ТЗ: видно и выбрано, что использовать) ─────────────
+def api_versions(q, body):
+    from pmoos.versioning.versions import analyze_versions, inactive_files
+    p = q["project"]
+    data = analyze_versions(p, object_type=_ot(p))
+    groups = []
+    for gkey, g in (data.get("groups") or {}).items():
+        groups.append({"key": gkey, "section": g.get("section"), "base": g.get("base"),
+                       "versions": g.get("versions") or [], "multi": len(g.get("versions") or []) > 1})
+    groups.sort(key=lambda g: (not g["multi"], g["section"] or "", g["base"] or ""))
+    return {"groups": groups, "warnings": data.get("content_warnings") or [],
+            "inactive": sorted(inactive_files(p))}
+
+
+def api_version_set(q, body):
+    from pmoos.versioning.versions import set_current_version
+    set_current_version(body["project"], body["group"], body["file"])
+    return {"ok": True}
+
+
+# ───────────── СЕРВИС: модели ИИ (как в ЭКО.DOC) ─────────────
+def api_ai_options(q, body):
+    from pmoos.core.health import read_health, rank_working, rank_models, TIERS, TIER_RU
+    from pmoos.config import ENV_KEYS
+    cfg = _cfg()
+    h = read_health()
+    cur = cfg.default_provider()
+    provs = []
+    for p in TIERS:
+        r = h.get(p) or {}
+        models = r.get("models") or []
+        provs.append({
+            "name": p, "tier": TIER_RU.get(TIERS.get(p, 9), "?"),
+            "has_key": bool(cfg.has_key(p)) or p == "ollama",
+            "ok": bool(r.get("ok")), "error": r.get("error", ""),
+            "ms": r.get("ms"), "best_model": r.get("best_model", ""),
+            "models": rank_models(p, models, top=12) if models else [],
+            "current_model": cfg.model_for(p, "answer"),
+        })
+    ranked = [p for p, _ in rank_working(h)]
+    with _JOBS_LOCK:
+        job = dict(_JOBS.get("__probe__") or {})
+    return {"providers": provs, "current": cur, "current_model": cfg.model_for(cur, "answer"),
+            "ranked": ranked, "single_model": bool(cfg.get("ai.single_model", True)),
+            "probe": job, "checked_at": h.get("checked_at", "") if isinstance(h, dict) else ""}
+
+
+def api_ai_probe(q, body):
+    """Проверить ВСЕ модели (работа/лимит) в фоне сервера; итог — в ai_options."""
+    with _JOBS_LOCK:
+        if (_JOBS.get("__probe__") or {}).get("running"):
+            return {"ok": False, "error": "проверка уже идёт"}
+        _JOBS["__probe__"] = {"running": True, "error": ""}
+
+    def run():
+        err = ""
+        try:
+            from pmoos.core.health import probe_all
+            probe_all(_cfg())
+        except Exception as e:  # noqa: BLE001
+            err = str(e)[:200]
+        with _JOBS_LOCK:
+            _JOBS["__probe__"] = {"running": False, "error": err}
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True}
+
+
+def api_ai_select(q, body):
+    """Выбор ИИ: mode=auto — лучший рабочий (по ранжированию ТЗ: большие
+    бесплатные → локальные → DeepSeek); mode=manual — провайдер и модель вручную."""
+    from pmoos.core.health import auto_select, read_health
+    cfg = _cfg()
+    mode = body.get("mode", "auto")
+    if mode == "auto":
+        p, m = auto_select(cfg, read_health() or None, force=True)
+        if not p:
+            raise RuntimeError("нет ни одного рабочего провайдера — нажмите «Проверить все»")
+        return {"provider": p, "model": m}
+    provider = str(body.get("provider", "")).strip()
+    model = str(body.get("model", "")).strip()
+    if not provider:
+        raise ValueError("не указан провайдер")
+    cfg.set("ai.default_provider", provider)
+    if model:
+        for role in ("answer", "review"):
+            cfg.set(f"ai.providers.{provider}.{role}", model)
+        for role in ("extract", "expand"):
+            if not cfg.model_for(provider, role):
+                cfg.set(f"ai.providers.{provider}.{role}", model)
+    if "single_model" in body:
+        cfg.set("ai.single_model", bool(body["single_model"]))
+    cfg.save()
+    return {"provider": provider, "model": model or cfg.model_for(provider, "answer")}
+
+
+# ───────────── ГЕНЕРАЦИЯ РАЗДЕЛА ИИ (фоном) ─────────────
+def api_gen(q, body):
+    from pmoos.pipeline import section_gen as G
+    p, action = body["project"], body.get("action", "start")
+    if action == "start":
+        target = str(body.get("target") or _cfg().get("target_section", "OOS") or "OOS")
+        pid = G.start_background(p, target, object_type=_ot(p))
+        return {"pid": pid, "target": target}
+    if action == "stop":
+        G.stop_generation(p)
+    return {"ok": True}
+
+
+def api_gen_state(q, body):
+    from pmoos.pipeline.section_gen import read_state
+    st = read_state(q["project"])
+    return {k: st.get(k) for k in ("status", "message", "total", "done", "target", "output")}
+
+
 def api_health(q, body):
     from pmoos.core.health import read_health, rank_working, TIER_RU, TIERS
     h = read_health()
@@ -467,9 +638,14 @@ ROUTES_JSON = {
     "uprza": api_uprza, "open": api_open, "health": api_health,
     "corr_list": api_corr_list, "corr_preview": api_corr_preview,
     "corr_write": api_corr_write, "corr_delete": api_corr_delete,
+    "project_delete": api_project_delete, "project_export": api_project_export,
+    "versions": api_versions, "version_set": api_version_set,
+    "ai_options": api_ai_options, "ai_probe": api_ai_probe, "ai_select": api_ai_select,
+    "gen": api_gen, "gen_state": api_gen_state,
 }
 ROUTES_RAW = {"upload": api_upload, "remarks_upload": api_remarks_upload,
-              "uprza_import": api_uprza_import, "corr_upload": api_corr_upload}
+              "uprza_import": api_uprza_import, "corr_upload": api_corr_upload,
+              "project_import": api_project_import}
 ROUTES_BIN = {"scan": api_scan}
 
 
@@ -512,7 +688,7 @@ class Handler(BaseHTTPRequestHandler):
             if name in ("info", "index_state", "registry", "answers",
                         "answers_state", "uprza", "scan", "upload",
                         "remarks_upload", "uprza_import", "corr_upload",
-                        "corr_list"):
+                        "corr_list", "versions", "gen_state"):
                 if not q.get("project", "").strip():
                     raise ValueError("не выбран объект/проект — создайте его "
                                      "кнопкой «+ Новый»")

@@ -546,6 +546,163 @@ def test_docx_text_len_counts_textboxes(tmp_path):
     assert _docx_text_len(f) > 300                                       # но текст есть
 
 
+def test_project_export_import_delete(tmp_path, monkeypatch):
+    # ТЗ 05.09: «добавить удалить/загрузить объект»
+    import json as _json
+    import zipfile
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos import projects as PR
+    from pmoos.paths import project_paths, data_root
+    PR.register_project("Экспорт")
+    pp = project_paths("Экспорт")
+    pp["inventory"].parent.mkdir(parents=True, exist_ok=True)
+    pp["inventory"].write_text(_json.dumps({"project": "Экспорт", "organization": "ООО Т"}),
+                               encoding="utf-8")
+    (pp["root"] / "tmp_uploads").mkdir(parents=True, exist_ok=True)
+    (pp["root"] / "tmp_uploads" / "x.pdf").write_bytes(b"x")
+    z = PR.export_project("Экспорт")
+    names = zipfile.ZipFile(z).namelist()
+    assert "inventory.json" in names and "_project.json" in names
+    assert not any("tmp_uploads" in n for n in names), "исходники в экспорт не попадают"
+    new = PR.import_project(z)
+    assert new == "Экспорт (импорт)" and new in PR.list_projects()
+    inv2 = _json.loads(project_paths(new)["inventory"].read_text(encoding="utf-8"))
+    assert inv2["project"] == new and inv2["organization"] == "ООО Т"
+    r = PR.delete_project("Экспорт")
+    assert r["ok"] and "Экспорт" not in PR.list_projects() and not pp["root"].exists()
+    assert list((data_root() / "_trash").iterdir()), "удалённый объект уходит в _trash"
+    assert new in PR.list_projects()
+
+
+def test_inactive_versions_excluded_from_search(tmp_path, monkeypatch):
+    # ТЗ 05.09: две версии тома — видно и выбрано, какую использовать;
+    # неактуальная редакция не попадает в поиск/ответы
+    import json as _json
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.paths import project_paths
+    from pmoos.versioning.versions import inactive_files, set_current_version
+    pp = project_paths("Вер")
+    pp["versions"].parent.mkdir(parents=True, exist_ok=True)
+    pp["versions"].write_text(_json.dumps({"groups": {
+        "g1": {"section": "OOS", "versions": [
+            {"file": "ООС_старый.docx", "is_current": False, "rank": 0, "label": "v1"},
+            {"file": "ООС_корр.docx", "is_current": True, "rank": 1, "label": "v2"}]},
+        "g2": {"section": "PZ", "versions": [
+            {"file": "ПЗ.docx", "is_current": True, "rank": 0, "label": ""}]}}},
+        ensure_ascii=False), encoding="utf-8")
+    assert inactive_files("Вер") == {"ООС_старый.docx"}
+    from pmoos.retrieval.hybrid import HybridRetriever
+    r = HybridRetriever.__new__(HybridRetriever)
+
+    class _E:
+        def embed_queries(self, qs):
+            return [[0.0]]
+
+    class _S:
+        def search(self, project, qv, top, sections=None, exclude_sections=None):
+            return [{"payload": {"file": "ООС_старый.docx"}, "score": 1.0},
+                    {"payload": {"file": "ООС_корр.docx"}, "score": 0.9}]
+    r.embedder, r.store = _E(), _S()
+    hits = r._dense("Вер", "q", candidates=5, sections=None, exclude_sections=None)
+    assert [h["payload"]["file"] for h in hits] == ["ООС_корр.docx"]
+    # пользователь переключил актуальную редакцию — исключается другая
+    set_current_version("Вер", "g1", "ООС_старый.docx")
+    assert inactive_files("Вер") == {"ООС_корр.docx"}
+    r._inactive_cache = {}
+    hits = r._dense("Вер", "q", candidates=5, sections=None, exclude_sections=None)
+    assert [h["payload"]["file"] for h in hits] == ["ООС_старый.docx"]
+
+
+def test_section_gen_from_other_sections(tmp_path, monkeypatch):
+    # ТЗ 05.09: «по исходным данным из разделов ПД (без ООС/ИЭИ/ОЦЕНКИ) сгенерировать
+    # эти разделы в автоматическом режиме» — главы, источники, таблицы, пробелы
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.pipeline import section_gen as G
+    from pmoos.projects import register_project
+    register_project("Ген")
+    calls = []
+
+    def retrieve(q):
+        return [{"payload": {"file": "ПЗ.docx", "loc": "с. 3", "section": "PZ",
+                             "text": "Площадь участка 2,5 га"}, "score": 0.8}]
+
+    def chat(cfg, msgs, **kw):
+        calls.append(msgs)
+        return ("Текст главы по данным [ПЗ.docx, с. 3].\n\n"
+                "| Показатель | Значение |\n|---|---|\n| Площадь | 2,5 га |\n\n"
+                "◈ ВНЕСТИ: класс опасности отходов")
+    out = G.run_section_gen("Ген", "OOS", retrieve=retrieve, chat=chat,
+                            object_type="площадной")
+    assert out.exists() and out.suffix == ".docx" and "ГЕНЕРАЦИЯ_OOS" in out.name
+    from docx import Document
+    d = Document(str(out))
+    txt = "\n".join(p.text for p in d.paragraphs)
+    assert "◈ ВНЕСТИ" in txt and "ПЗ.docx" in txt
+    assert d.tables and d.tables[0].cell(1, 0).text.strip() == "Площадь"
+    st = G.read_state("Ген")
+    assert st["status"] == "done" and st["done"] == st["total"] >= 3
+    assert st["output"] == str(out)
+    # ИИ получил фрагменты исходных разделов и требование указывать источники
+    assert "Площадь участка" in calls[0][1]["content"]
+    assert "ВНЕСТИ" in calls[0][0]["content"] or "ВНЕСТИ" in calls[0][1]["content"]
+
+
+def test_gui_service_endpoints(tmp_path, monkeypatch):
+    # ТЗ 05.09: СЕРВИС (модели ИИ — состояние/лучшая/вручную), версии, генерация,
+    # экспорт/удаление объекта — всё через настоящие HTTP-эндпоинты
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import json as _json
+    import threading
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    import importlib
+    import app.gui.server as S
+    importlib.reload(S)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), S.Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        def get(path):
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
+                return _json.loads(r.read())
+
+        def post(path, obj):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                                         data=_json.dumps(obj).encode(), method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return _json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return _json.loads(e.read())
+        q = urllib.parse.quote
+        assert post("/api/project_new", {"name": "Серв"})["ok"]
+        # СЕРВИС: состояние моделей + ручной выбор → единая модель в шапке
+        o = get("/api/ai_options")
+        names = {p["name"] for p in o["providers"]}
+        assert {"mistral", "ollama", "deepseek"} <= names and o["current"]
+        assert all("tier" in p and "has_key" in p for p in o["providers"])
+        r = post("/api/ai_select", {"mode": "manual", "provider": "deepseek",
+                                    "model": "deepseek-chat", "single_model": True})
+        assert r["provider"] == "deepseek" and r["model"] == "deepseek-chat"
+        assert get("/api/meta")["model"] == "deepseek · deepseek-chat"
+        assert get("/api/ai_options")["current"] == "deepseek"
+        assert "error" in post("/api/ai_select", {"mode": "manual", "provider": ""})
+        # версии документов (пусто до индексации) и состояние генерации
+        v = get("/api/versions?project=" + q("Серв"))
+        assert v["groups"] == [] and v["inactive"] == []
+        assert get("/api/gen_state?project=" + q("Серв"))["status"] == "idle"
+        # экспорт объекта → zip; удаление только с подтверждением именем
+        e = post("/api/project_export", {"name": "Серв"})
+        assert e["name"].endswith(".zip") and __import__("os").path.exists(e["path"])
+        assert "error" in post("/api/project_delete", {"name": "Серв"})
+        assert post("/api/project_delete", {"name": "Серв", "confirm": "Серв"})["ok"]
+        assert "Серв" not in get("/api/meta")["projects"]
+    finally:
+        srv.shutdown()
+
+
 def test_convert_sources_to_docx(tmp_path):
     # «добавить pdf и другие форматы» для откорректированного тома
     import shutil

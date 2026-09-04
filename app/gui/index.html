@@ -60,6 +60,10 @@ img.scan{max-width:100%;border:1px solid var(--line);border-radius:6px;margin-to
   <b>СТРОЙ.RAG</b>
   <label>Объект: <select id="prj" onchange="switchProject()"></select></label>
   <button class="sec" onclick="newProject()">+ Новый</button>
+  <button class="sec" onclick="exportProject()" title="Сохранить объект в zip (перенос на другой компьютер)">📦 Экспорт</button>
+  <button class="sec" onclick="$('impInp').click()" title="Загрузить объект из zip экспорта">📥 Загрузить</button>
+  <input type="file" id="impInp" hidden accept=".zip" onchange="importProject(this.files[0])">
+  <button class="sec" onclick="delProject()" title="Удалить объект (папка уходит в _trash)">✖ Удалить</button>
   <label>Раздел: <select id="tgt" onchange="setTarget()"></select></label>
   <span class="mut" id="hdrInfo">—</span>
 </header>
@@ -78,7 +82,7 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 async function api(name, body, q) {
-  const qs = new URLSearchParams(Object.assign({}, q, name.match(/^(info|index_state|registry|answers|answers_state|uprza|corr_list)$/) ? {project: P} : {})).toString();
+  const qs = new URLSearchParams(Object.assign({}, q, name.match(/^(info|index_state|registry|answers|answers_state|uprza|corr_list|versions|gen_state)$/) ? {project: P} : {})).toString();
   const r = await fetch(`/api/${name}${qs ? "?" + qs : ""}`,
     body === undefined ? {} : {method: "POST", body: JSON.stringify(body)});
   const d = await r.json();
@@ -103,7 +107,7 @@ function toast(t, isErr) {
 }
 const err = e => toast("Ошибка: " + e.message, true);
 
-const TABS = ["ЗАГРУЗКА","БАЗА","ДАННЫЕ","ОТВЕТЫ","ВЫГРУЗКА","УПРЗА"];
+const TABS = ["ЗАГРУЗКА","БАЗА","ДАННЫЕ","ОТВЕТЫ","ВЫГРУЗКА","УПРЗА","СЕРВИС"];
 function buildTabs() {
   $("nav").innerHTML = TABS.map((t,i) =>
     `<button id="nb${i}" onclick="showTab(${i})">${t}</button>`).join("");
@@ -114,7 +118,7 @@ function showTab(i) {
     $("nb"+k).classList.toggle("on", k===i);
     $("tab"+k).classList.toggle("on", k===i);
   });
-  [renderUpload,renderIndex,renderData,renderAnswers,renderExport,renderUprza][i]();
+  [renderUpload,renderIndex,renderData,renderAnswers,renderExport,renderUprza,renderService][i]();
 }
 
 /* ── шапка ── */
@@ -129,6 +133,7 @@ async function boot() {
   await refreshHeader();
   showTab(0);
   setInterval(pollStates, 2500);
+  setInterval(pollGen, 3000);
 }
 async function refreshHeader() {
   if (!P) { $("hdrInfo").textContent = "создайте объект («+ Новый»)"; return; }
@@ -137,7 +142,7 @@ async function refreshHeader() {
     $("hdrInfo").innerHTML =
       `🏢 ${esc(i.organization || "организация не указана")} · ` +
       `📐 тип: <b>${esc(i.object_type)}</b> (зафиксирован) · ` +
-      `🤖 единая модель: ${esc(META.model)} · ${esc(META.version)}`;
+      `🤖 единая модель: ${esc(i.model || META.model)} · ${esc(META.version)}`;
     window._info = i;
   } catch (e) { err(e); }
 }
@@ -168,6 +173,45 @@ async function setTarget() {
   try { await api("target", {code: $("tgt").value}); toast("Раздел переключён."); }
   catch (e) { err(e); }
 }
+async function reloadProjects(selectName) {
+  META = await api("meta");
+  $("prj").innerHTML = META.projects.map(p => `<option>${esc(p)}</option>`).join("");
+  P = META.projects.includes(selectName) ? selectName : (META.projects[0] || "");
+  $("prj").value = P; localStorage.setItem("strrag_prj", P);
+  remarksPath = "";
+  await refreshHeader(); showTab(0);
+}
+async function delProject() {
+  if (!P) return toast("Объект не выбран.", true);
+  const typed = prompt(`Удалить объект «${P}»?\nПапка объекта уйдёт в _trash (можно вернуть вручную), база поиска будет удалена.\n\nДля подтверждения введите имя объекта:`);
+  if (typed === null) return;
+  if (typed.trim() !== P) return toast("Имя не совпало — удаление отменено.", true);
+  try {
+    const r = await api("project_delete", {name: P, confirm: typed.trim()});
+    toast("Объект удалён" + (r.trashed ? " (копия в _trash)" : ""));
+    await reloadProjects("");
+  } catch (e) { err(e); }
+}
+async function exportProject() {
+  if (!P) return toast("Объект не выбран.", true);
+  try {
+    const r = await api("project_export", {name: P});
+    toast("Экспорт готов: " + r.name);
+    openPath(r.path);
+  } catch (e) { err(e); }
+}
+async function importProject(f) {
+  if (!f) return;
+  try {
+    const qs = new URLSearchParams({name: encodeURIComponent(f.name)}).toString();
+    const resp = await fetch(`/api/project_import?${qs}`, {method: "POST", body: f});
+    const d = await resp.json();
+    if (d && d.error) throw new Error(d.error);
+    toast("Объект загружен: " + d.project);
+    await reloadProjects(d.project);
+  } catch (e) { err(e); }
+  $("impInp").value = "";
+}
 
 /* ── ЗАГРУЗКА ── */
 function renderUpload() {
@@ -194,11 +238,54 @@ function renderUpload() {
     <input type="text" id="orgInp" value="${esc((window._info||{}).organization||"")}"
            placeholder="ООО «…» — заказчик / проектировщик" style="width:70%">
     <button class="act" onclick="saveOrg()">💾 Сохранить</button>
+  </div>
+  <div class="card"><h3>🗂 Версии документов (какую редакцию использовать)</h3>
+    <div class="msg">Если один и тот же том загружен в нескольких редакциях (старая и
+      откорректированная), здесь видно все версии; отметьте актуальную — поиск, ответы и
+      генерация используют только её. Список появляется после индексации.</div>
+    <div id="verBox" class="msg">…</div>
   </div>`;
   const dz = $("drop");
   dz.ondragover = e => { e.preventDefault(); dz.classList.add("hov"); };
   dz.ondragleave = () => dz.classList.remove("hov");
   dz.ondrop = e => { e.preventDefault(); dz.classList.remove("hov"); upFiles(e.dataTransfer.files); };
+  loadVersions();
+}
+async function loadVersions() {
+  const box = $("verBox");
+  if (!box) return;
+  if (!P) { box.textContent = "объект не выбран"; return; }
+  let d;
+  try { d = await api("versions"); } catch (e) { box.textContent = "версии: " + e.message; return; }
+  const multi = (d.groups || []).filter(g => g.multi);
+  const single = (d.groups || []).length - multi.length;
+  if (!multi.length) {
+    box.textContent = (d.groups || []).length
+      ? `Документов с несколькими редакциями нет (томов: ${single}).`
+      : "Документы ещё не проиндексированы — версии определяются при индексации (вкладка БАЗА).";
+    return;
+  }
+  box.innerHTML = multi.map(g => `
+    <div style="margin:6px 0;padding:6px;border:1px solid var(--line);border-radius:6px">
+      <b>${esc(g.section || "?")}</b> · ${esc(g.base || g.key)} — редакций: ${g.versions.length}<br>
+      ${g.versions.map(v => `
+        <label style="display:block;margin:2px 0">
+          <input type="radio" name="ver_${esc(g.key)}" data-vgroup="${esc(g.key)}" data-vfile="${esc(v.file)}"
+                 ${v.is_current ? "checked" : ""}>
+          ${v.is_current ? "<b>" : ""}${esc(v.file)}${v.is_current ? " ← используется</b>" : ""}
+          <span class="mut">${esc(v.label || "")}${v.date ? " · " + esc(v.date) : ""}</span>
+        </label>`).join("")}
+    </div>`).join("") +
+    ((d.warnings || []).length ? `<div class="warn">⚠ ${d.warnings.map(esc).join("<br>")}</div>` : "") +
+    `<div class="mut">Неактуальные версии исключены из поиска: ${(d.inactive || []).length}. ` +
+    `Ответы, сформированные раньше, пересоберите (вкладка ОТВЕТЫ).</div>`;
+  box.querySelectorAll("[data-vgroup]").forEach(r => r.onchange = async () => {
+    try {
+      await api("version_set", {project: P, group: r.dataset.vgroup, file: r.dataset.vfile});
+      toast("Актуальная редакция: " + r.dataset.vfile);
+      loadVersions();
+    } catch (e) { err(e); }
+  });
 }
 async function upFiles(files) {
   let n = 0;
@@ -303,20 +390,30 @@ async function editVal(key) {
 function showVars(key) {
   const row = (window._reg.rows || []).find(r => r.key === key);
   $("varsBox").innerHTML = `<h3>Варианты — ${esc(row.label)}</h3>` +
+    `<div class="msg">Нажмите «🖼 лист» у варианта — откроется лист-источник (скан/страница
+       документа), чтобы подтвердить значение, затем выберите его кнопкой.</div>` +
     row.variants.map((v,i) =>
-      `<button class="act" data-vkey="${esc(key)}" data-vi="${i}">${esc(v.value)} ${esc(v.unit)}</button>
+      `<button class="act" data-vkey="${esc(key)}" data-vi="${i}">✔ ${esc(v.value)} ${esc(v.unit)}</button>
+       <button class="sec" data-skey="${esc(key)}" data-svi="${i}">🖼 лист</button>
        <span class="msg">${v.count}× · ${esc(v.src)}</span><br>`).join("");
   $("varsBox").querySelectorAll("[data-vkey]").forEach(b =>
     b.onclick = () => chooseVar(b.dataset.vkey,
       (window._reg.rows.find(r => r.key === b.dataset.vkey).variants[+b.dataset.vi]||{}).value));
+  $("varsBox").querySelectorAll("[data-skey]").forEach(b =>
+    b.onclick = () => showScan(b.dataset.skey, b.dataset.svi));
 }
 async function chooseVar(key, value) {
   try { await api("reg_choose", {project: P, key, value}); renderData(); }
   catch (e) { err(e); }
 }
-function showScan(key) {
+function showScan(key, vi) {
+  const row = (window._reg.rows || []).find(r => r.key === key) || {};
+  const v = vi !== undefined && vi !== "" ? (row.variants || [])[+vi] : null;
+  const title = v ? `Лист-источник варианта «${esc(v.value)} ${esc(v.unit)}» — ${esc(v.src)}`
+                  : `Лист-источник — ${esc(row.source || "")}`;
+  const viq = v ? `&vi=${encodeURIComponent(vi)}` : "";
   $("scanBox").innerHTML =
-    `<h3>Лист-источник</h3><img class="scan" src="/api/scan?project=${encodeURIComponent(P)}&key=${key}&t=${Date.now()}"
+    `<h3>${title}</h3><img class="scan" src="/api/scan?project=${encodeURIComponent(P)}&key=${key}${viq}&t=${Date.now()}"
      onerror="this.outerHTML='<div class=warn>Скан недоступен: исходник удалён после индексации. Загрузите том и соберите показатели заново.</div>'">`;
 }
 
@@ -436,6 +533,16 @@ async function renderExport() {
     <button class="act" onclick="corrWrite()" ${cv.volumes.length ? "" : "disabled"}>📝 Сформировать откорректированный раздел</button>
     <div id="corrBox" class="msg"></div>
   </div>
+  <div class="card"><h3>🤖 ГЕНЕРАЦИЯ РАЗДЕЛА ИИ по исходным данным других разделов ПД</h3>
+    <div class="msg">Раздел (ООС / ИЭИ / ОЦЕНКА — выбран в шапке) пишется главами по
+      структуре ПП № 87: ИИ берёт исходные данные из остальных разделов проекта в базе
+      (ПЗ, ПЗУ, АР, ИОС, ПОС, инженерные изыскания…), собранные показатели и указывает
+      источники [файл, место]. Чего не хватает — пометки «◈ ВНЕСТИ» и список пробелов
+      в конце документа. Нужна проиндексированная база (вкладка БАЗА).</div>
+    <button class="act" id="genStart" onclick="genStart()">🏗 Сформировать раздел ИИ</button>
+    <button class="sec" id="genStop" onclick="genStop()" disabled>⏹ Остановить</button>
+    <div class="msg" id="genBox"></div>
+  </div>
   <div class="card"><h3>Документы для экспертизы (папка out проекта)</h3>
     <button class="act" onclick="doExport('answers_docx')">📋 Таблица ответов (docx)</button>
     <button class="act" onclick="doExport('answers_xlsx')">📋 Таблица ответов (xlsx)</button>
@@ -511,6 +618,34 @@ async function doExport(kind) {
 async function openPath(p) {
   try { await api("open", {path: p}); } catch (e) { err(e); }
 }
+async function genStart() {
+  if (!P) return toast("Объект не выбран.", true);
+  try {
+    const r = await api("gen", {project: P, action: "start", target: $("tgt").value});
+    toast(`Генерация раздела ${r.target} запущена (минуты — по главе за запрос к ИИ).`);
+    pollGen();
+  } catch (e) { err(e); }
+}
+async function genStop() {
+  try { await api("gen", {project: P, action: "stop"}); toast("Остановка после текущей главы…"); }
+  catch (e) { err(e); }
+}
+async function pollGen() {
+  const box = $("genBox");
+  if (!box || !P) return;
+  let s;
+  try { s = await api("gen_state"); } catch (e) { return; }
+  const running = s.status === "running";
+  if ($("genStart")) $("genStart").disabled = running;
+  if ($("genStop")) $("genStop").disabled = !running;
+  if (!s.status) { box.textContent = ""; return; }
+  const prog = s.total ? ` ${s.done || 0}/${s.total} глав` : "";
+  const ru = {running: "⏳ идёт", done: "✅ готово", stopped: "⏹ остановлено", error: "⚠ ошибка"}[s.status] || s.status;
+  box.innerHTML = `${ru}${prog}: ${esc(s.message || "")}` +
+    (s.output && s.status === "done"
+      ? ` <button class="sec" id="genOpen">Открыть документ</button>` : "");
+  if ($("genOpen")) $("genOpen").onclick = () => openPath(s.output);
+}
 
 /* ── УПРЗА ── */
 async function renderUprza() {
@@ -545,6 +680,79 @@ async function upUprza(f) {
     toast(`Импортировано веществ: ${r.rows}` +
       (r.exceedances.length ? ` · превышений: ${r.exceedances.length}` : ""));
     renderUprza();
+  } catch (e) { err(e); }
+}
+
+/* ── СЕРВИС (как в ЭКО.DOC): модели ИИ ── */
+async function renderService() {
+  let d;
+  try { d = await api("ai_options"); } catch (e) { err(e); return; }
+  window._ai = d;
+  const probing = d.probe && d.probe.running;
+  const rows = d.providers.map(p => {
+    const st = !p.has_key ? "<span class='mut'>нет ключа</span>"
+             : p.ok ? "<span class='ok'>✅ работает</span>"
+             : p.error ? `<span class='warn'>⚠ ${esc(p.error)}</span>`
+             : "<span class='mut'>не проверялся</span>";
+    const rank = d.ranked.indexOf(p.name);
+    return `<tr class="${p.name === d.current ? "sel" : ""}">
+      <td>${rank >= 0 ? rank + 1 : "—"}</td>
+      <td><b>${esc(p.name)}</b>${p.name === d.current ? " ← текущий" : ""}</td>
+      <td>${esc(p.tier)}</td><td>${st}</td>
+      <td>${esc(p.best_model || p.current_model || "")}</td>
+      <td>${p.ms != null ? p.ms + " мс" : ""}</td></tr>`;
+  }).join("");
+  $("tab6").innerHTML = `
+  <div class="card"><h3>🤖 Модели ИИ — состояние и выбор лучшей</h3>
+    <div class="msg">Одна модель используется во всех местах программы (ответы, показатели,
+      генерация). Ранжирование по ТЗ: большие бесплатные → локальные → DeepSeek.
+      Ключи берутся из общих настроек (.env / config).
+      ${d.checked_at ? "Последняя проверка: " + esc(d.checked_at) : "Проверка ещё не выполнялась."}</div>
+    <button class="act" onclick="aiProbe()" ${probing ? "disabled" : ""}>🔍 Проверить все модели</button>
+    <button class="act" onclick="aiAuto()">⭐ Выбрать лучшую автоматически</button>
+    <span class="msg" id="aiMsg">${probing ? "⏳ идёт проверка провайдеров…" : (d.probe && d.probe.error ? "⚠ " + esc(d.probe.error) : "")}</span>
+    <table><thead><tr><th>#</th><th>Провайдер</th><th>Уровень</th><th>Состояние</th><th>Лучшая модель</th><th>Отклик</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+  </div>
+  <div class="card"><h3>✋ Выбор ИИ вручную (провайдер и модель)</h3>
+    <div class="msg">Текущий: <b>${esc(d.current)}</b> · ${esc(d.current_model || "—")}</div>
+    <label>Провайдер: <select id="aiProv" onchange="aiFillModels()">${d.providers.map(p =>
+      `<option value="${esc(p.name)}" ${p.name === d.current ? "selected" : ""}>${esc(p.name)}${p.has_key ? "" : " (нет ключа)"}</option>`).join("")}</select></label>
+    <label>Модель: <select id="aiModel"></select></label>
+    <input type="text" id="aiModelTxt" placeholder="…или имя модели вручную" style="width:36%">
+    <label><input type="checkbox" id="aiSingle" ${d.single_model ? "checked" : ""}> одна модель во всех местах</label>
+    <button class="act" onclick="aiSet()">💾 Применить</button>
+  </div>`;
+  aiFillModels();
+  if (probing) setTimeout(() => { if ($("tab6").classList.contains("on")) renderService(); }, 4000);
+}
+function aiFillModels() {
+  const d = window._ai || {providers: []};
+  const p = d.providers.find(x => x.name === $("aiProv").value) || {models: []};
+  const list = (p.models || []).slice();
+  if (p.current_model && !list.includes(p.current_model)) list.unshift(p.current_model);
+  $("aiModel").innerHTML = list.map(m =>
+    `<option ${m === p.current_model ? "selected" : ""}>${esc(m)}</option>`).join("") ||
+    "<option value=''>— список появится после проверки —</option>";
+}
+async function aiProbe() {
+  try { await api("ai_probe", {}); toast("Проверка запущена (до минуты)…"); renderService(); }
+  catch (e) { err(e); }
+}
+async function aiAuto() {
+  try {
+    const r = await api("ai_select", {mode: "auto"});
+    toast(`Выбрано: ${r.provider} · ${r.model}`);
+    META = await api("meta"); await refreshHeader(); renderService();
+  } catch (e) { err(e); }
+}
+async function aiSet() {
+  const model = ($("aiModelTxt").value || "").trim() || $("aiModel").value;
+  try {
+    const r = await api("ai_select", {mode: "manual", provider: $("aiProv").value, model,
+                                      single_model: $("aiSingle").checked});
+    toast(`Применено: ${r.provider} · ${r.model}`);
+    META = await api("meta"); await refreshHeader(); renderService();
   } catch (e) { err(e); }
 }
 

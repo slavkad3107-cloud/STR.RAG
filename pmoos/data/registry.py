@@ -241,7 +241,21 @@ def extract_from_index(project: str, cfg=None, *, progress=None,
                 (scans_dir / f"{key}.png").write_bytes(png)
                 rec["scan"] = f"scans/{key}.png"
         except Exception:  # noqa: BLE001 — снимок вторичен, сбор важнее
-            continue
+            pass
+        # СНИМКИ ДЛЯ КАЖДОГО ВАРИАНТА (ТЗ 05.09: «нужно видеть, откуда эти
+        # данные, чтобы подтвердить/выбрать значение — лист/скан/документ»)
+        for vi, v in enumerate((rec.get("variants") or [])[:6]):
+            s0 = (v.get("sources") or [{}])[0]
+            if not s0.get("file"):
+                continue
+            try:
+                png_v = render_source_page(project, s0.get("file", ""), s0.get("loc", ""))
+                if png_v:
+                    scans_dir.mkdir(parents=True, exist_ok=True)
+                    (scans_dir / f"{key}_v{vi}.png").write_bytes(png_v)
+                    v["scan"] = f"scans/{key}_v{vi}.png"
+            except Exception:  # noqa: BLE001
+                continue
 
     reg["scanned_chunks"] = seen
     save_registry(project, reg)

@@ -269,11 +269,34 @@ class HybridRetriever:
         return corp
 
     # ---- single components ----------------------------------------------
+    def _inactive(self, project: str) -> set[str]:
+        """Файлы неактуальных версий документов (выбор пользователя во вкладке
+        ЗАГРУЗКА → «Версии документов»): из поиска исключаются, чтобы ответы не
+        опирались на старую редакцию тома. Кэш на 30 с."""
+        import time as _t
+        cache = getattr(self, "_inactive_cache", None)
+        if cache is None:
+            cache = self._inactive_cache = {}
+        hit = cache.get(project)
+        if hit and _t.time() - hit[1] < 30:
+            return hit[0]
+        try:
+            from ..versioning.versions import inactive_files
+            s = inactive_files(project)
+        except Exception:  # noqa: BLE001
+            s = set()
+        cache[project] = (s, _t.time())
+        return s
+
     def _dense(self, project: str, query: str, *, candidates: int,
                sections, exclude_sections) -> list[dict]:
         qv = self.embedder.embed_queries([query])[0]
-        return self.store.search(project, qv, top=candidates,
+        hits = self.store.search(project, qv, top=candidates,
                                  sections=sections, exclude_sections=exclude_sections)
+        inactive = self._inactive(project)
+        if inactive:
+            hits = [h for h in hits if (h.get("payload") or {}).get("file") not in inactive]
+        return hits
 
     def _bm25(self, project: str, query: str, *, candidates: int,
               sections, exclude_sections) -> list[dict]:
@@ -288,6 +311,7 @@ class HybridRetriever:
         out: list[dict] = []
         sset = set(sections) if sections else None
         xset = set(exclude_sections) if exclude_sections else None
+        inactive = self._inactive(project)
         for i in order:
             if float(scores[i]) <= 0.0:
                 break  # порядок убывающий: дальше только нерелевантные (нулевые)
@@ -296,6 +320,8 @@ class HybridRetriever:
             if sset and sec not in sset:
                 continue
             if xset and sec in xset:
+                continue
+            if inactive and pl.get("file") in inactive:
                 continue
             out.append({"id": corp.ids[i], "score": float(scores[i]),
                         "text": corp.texts[i], "payload": pl})
