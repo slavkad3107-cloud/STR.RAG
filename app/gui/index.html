@@ -197,15 +197,13 @@ async function reloadProjects(selectName) {
 }
 async function delProject() {
   if (!P) return toast("Объект не выбран.", true);
-  const typed = prompt(`Удалить объект «${P}»?\nПапка объекта уйдёт в _trash (можно вернуть вручную), база поиска будет удалена.\n\nДля подтверждения введите имя объекта:`);
-  if (typed === null) return;
-  if (typed.trim() !== P) return toast("Имя не совпало — удаление отменено.", true);
+  if (!confirm(`Удалить объект «${P}»?\nПапка объекта уйдёт в _trash (можно вернуть вручную), база поиска будет удалена.`)) return;
   const victim = P;
   // опрос вкладок (каждые 2,5 с) пересоздавал папку удаляемого объекта —
   // на время удаления текущий объект снимаем
   P = ""; localStorage.removeItem("strrag_prj");
   try {
-    const r = await api("project_delete", {name: victim, confirm: typed.trim()});
+    const r = await api("project_delete", {name: victim, confirm: victim});
     toast("Объект удалён" + (r.trashed ? " (копия в _trash)" : ""));
   } catch (e) { err(e); }
   await reloadProjects("");
@@ -245,7 +243,8 @@ function renderUpload() {
       <input type="text" id="urlInp" placeholder="…или ссылка https / Google Drive" style="width:60%">
       <button class="act" onclick="upUrl()">⬇ Скачать</button>
       <input type="text" id="dirInp" placeholder="…или путь к папке на диске" style="width:40%;margin-top:6px">
-      <button class="act" onclick="upDir()">📂 Забрать из папки</button>
+      <button class="act" onclick="upDir()">📂 Показать папку и выбрать файлы</button>
+      <div id="dirBox"></div>
     </div>
     <table><thead><tr><th>Файл</th><th style="width:90px">Размер</th></tr></thead>
     <tbody>${i.uploads.map(f =>
@@ -324,8 +323,44 @@ async function upUrl() {
   } catch (e) { err(e); }
 }
 async function upDir() {
+  // сначала ПОКАЗЫВАЕМ содержимое папки и даём выбрать (07.09: «попадают
+  // не выбранные файлы») — копируются только отмеченные
+  const path = $("dirInp").value.trim();
+  if (!path) return toast("Укажите путь к папке.", true);
   try {
-    const r = await api("copy_folder", {project: P, path: $("dirInp").value});
+    const r = await api("copy_folder", {project: P, path, list: true});
+    const box = $("dirBox");
+    if (!r.files.length) { box.innerHTML = "<span class='msg'>папка пуста</span>"; return; }
+    window._dirFiles = r.files;
+    box.innerHTML = `<div class="msg">В папке файлов: ${r.files.length}, поддерживаемых: ${r.supported}.
+        Отметьте, что забрать (файлы подпапок помечены 📁):</div>
+      <div style="margin:4px 0">
+        <button class="sec" onclick="dirMark('all')">выбрать все</button>
+        <button class="sec" onclick="dirMark('top')">только корень папки</button>
+        <button class="sec" onclick="dirMark('none')">снять все</button>
+      </div>
+      <div style="max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:6px">
+      ${r.files.map((f,i) => `<label style="display:block;${f.ok ? "" : "color:var(--mut)"}">
+        <input type="checkbox" data-dfi="${i}" ${f.ok && !f.sub ? "checked" : ""} ${f.ok ? "" : "disabled"}>
+        ${f.sub ? "📁 " : ""}${esc(f.rel)} <span class="mut">${f.kb} КБ${f.ok ? "" : " · формат не поддерживается"}</span></label>`).join("")}
+      </div>
+      <button class="act" onclick="upDirCopy()">📂 Забрать отмеченные</button>
+      <button class="sec" onclick="$('dirBox').innerHTML=''">Отмена</button>`;
+  } catch (e) { err(e); }
+}
+function dirMark(mode) {
+  document.querySelectorAll("[data-dfi]").forEach(cb => {
+    const f = window._dirFiles[+cb.dataset.dfi];
+    if (cb.disabled) return;
+    cb.checked = mode === "all" ? true : mode === "top" ? !f.sub : false;
+  });
+}
+async function upDirCopy() {
+  const files = [...document.querySelectorAll("[data-dfi]")].filter(cb => cb.checked)
+    .map(cb => window._dirFiles[+cb.dataset.dfi].rel);
+  if (!files.length) return toast("Ничего не отмечено.", true);
+  try {
+    const r = await api("copy_folder", {project: P, path: $("dirInp").value.trim(), files});
     toast(`Скопировано файлов: ${r.copied}`);
     await refreshHeader(); renderUpload();
   } catch (e) { err(e); }

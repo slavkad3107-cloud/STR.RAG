@@ -168,8 +168,16 @@ def api_fetch_url(q, body):
 
 
 def api_copy_folder(q, body):
-    from pmoos.ingest.uploads import copy_folder
-    return {"copied": copy_folder(body["project"], body["path"])}
+    """list=true — только показать содержимое папки (для выбора файлов);
+    files=[…] — скопировать ТОЛЬКО выбранные относительные пути."""
+    from pmoos.ingest.uploads import copy_folder, list_folder
+    if body.get("list"):
+        files = list_folder(body["path"])
+        return {"files": files, "supported": sum(1 for f in files if f["ok"])}
+    files = body.get("files")
+    if files is not None and not isinstance(files, list):
+        raise ValueError("files должен быть списком относительных путей")
+    return {"copied": copy_folder(body["project"], body["path"], files=files)}
 
 
 def api_index(q, body):
@@ -607,7 +615,10 @@ def api_ai_options(q, body):
         job = dict(_JOBS.get("__probe__") or {})
     return {"providers": provs, "current": cur, "current_model": cfg.model_for(cur, "answer"),
             "ranked": ranked, "single_model": bool(cfg.get("ai.single_model", True)),
-            "probe": job, "checked_at": h.get("checked_at", "") if isinstance(h, dict) else ""}
+            "probe": job,
+            # время проверки хранится у каждого провайдера — берём самое свежее
+            "checked_at": max((str(v.get("checked_at") or "") for v in h.values()
+                               if isinstance(v, dict)), default="").replace("T", " ")}
 
 
 def api_ai_probe(q, body):
@@ -869,6 +880,23 @@ def _is_python_pid(pid: int) -> bool:
         return False
 
 
+def _parse_port(argv: list[str]) -> int | None:
+    """--port N / --port=N в аргументах (второй экземпляр рядом с рабочим)."""
+    for i, a in enumerate(argv):
+        if a.startswith("--port="):
+            v = a.split("=", 1)[1]
+        elif a == "--port" and i + 1 < len(argv):
+            v = argv[i + 1]
+        else:
+            continue
+        try:
+            n = int(v)
+        except ValueError:
+            return None
+        return n if 1024 <= n <= 65535 else None
+    return None
+
+
 def main(open_browser: bool = True):
     global PORT
     import os
@@ -876,6 +904,7 @@ def main(open_browser: bool = True):
     import time
     import webbrowser
     me = os.getpid()
+    PORT = _parse_port(sys.argv) or PORT
     for port in range(PORT, PORT + 10):
         probe = socket.socket()
         probe.settimeout(0.4)

@@ -601,6 +601,34 @@ def test_empty_answer_replaced_by_stub_and_reasked(tmp_path, monkeypatch):
     assert 'all(a.get("needs_ai") for a in pack_ans)' in src, "мёртвый ИИ должен останавливать прогон"
 
 
+def test_copy_folder_only_selected_files(tmp_path, monkeypatch):
+    # 07.09.2026: «попадают не выбранные файлы, если загружаешь из папки» —
+    # сначала список с выбором, копируются только отмеченные
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path / "data"))
+    from pmoos.ingest.uploads import list_folder, copy_folder, list_uploads
+    src = tmp_path / "папка"
+    (src / "под").mkdir(parents=True)
+    (src / "ПЗ.docx").write_bytes(b"a")
+    (src / "ООС.pdf").write_bytes(b"b")
+    (src / "под" / "старый.pdf").write_bytes(b"c")
+    (src / "заметки.exe").write_bytes(b"d")
+    (src / ".DS_Store").write_bytes(b"e")
+    lst = list_folder(src)
+    rels = {f["rel"]: f for f in lst}
+    assert set(rels) == {"ПЗ.docx", "ООС.pdf", "под/старый.pdf", "заметки.exe"}
+    assert rels["под/старый.pdf"]["sub"] and not rels["ПЗ.docx"]["sub"]
+    assert rels["заметки.exe"]["ok"] is False and rels["ООС.pdf"]["ok"] is True
+    n = copy_folder("Выбор", src, files=["ПЗ.docx", "заметки.exe"])
+    assert n == 1                                    # exe не поддерживается
+    assert [u["name"] for u in list_uploads("Выбор")] == ["ПЗ.docx"]
+    assert copy_folder("Выбор", src, files=[]) == 0   # пустой выбор — ничего
+    assert copy_folder("Всё", src) == 3               # без files — как раньше
+    from app.gui.server import _parse_port
+    assert _parse_port(["x", "--port", "8748"]) == 8748
+    assert _parse_port(["x", "--port=9000"]) == 9000
+    assert _parse_port(["x", "--port", "abc"]) is None and _parse_port(["x"]) is None
+
+
 def test_project_export_import_delete(tmp_path, monkeypatch):
     # ТЗ 05.09: «добавить удалить/загрузить объект»
     import json as _json

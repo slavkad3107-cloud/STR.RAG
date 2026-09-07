@@ -86,22 +86,53 @@ def unpack_zip_path(project: str, zip_path: str | Path) -> list[str]:
     return saved
 
 
-def copy_folder(project: str, folder: str | Path) -> int:
-    """Скопировать поддерживаемые файлы из папки (с подпапками) в проект."""
+def list_folder(folder: str | Path) -> list[dict]:
+    """Что лежит в папке (с подпапками): относительный путь, размер, поддерживается
+    ли формат. Для выбора файлов ПЕРЕД копированием (07.09.2026: «попадают не
+    выбранные файлы, если загружаешь из папки»)."""
+    from .loaders import SUPPORTED_EXT
+    src = Path(str(folder).strip().strip('"'))
+    if not src.is_dir():
+        raise FileNotFoundError(f"папка не найдена: {src}")
+    out = []
+    for f in sorted(src.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(src)
+        if any(part.startswith(".") or part == "__MACOSX" for part in rel.parts):
+            continue
+        out.append({"rel": str(rel).replace("\\", "/"),
+                    "kb": f.stat().st_size // 1024,
+                    "sub": len(rel.parts) > 1,
+                    "ok": f.suffix.lower() in SUPPORTED_EXT})
+    return out
+
+
+def copy_folder(project: str, folder: str | Path,
+                files: list[str] | None = None) -> int:
+    """Скопировать поддерживаемые файлы из папки (с подпапками) в проект.
+    files — относительные пути (как в list_folder): копируются ТОЛЬКО они."""
     from .loaders import SUPPORTED_EXT
     src = Path(str(folder).strip().strip('"'))
     if not src.is_dir():
         raise FileNotFoundError(f"папка не найдена: {src}")
     up = project_paths(project)["uploads"]
     up.mkdir(parents=True, exist_ok=True)
+    wanted = None
+    if files is not None:
+        wanted = {str(x).replace("\\", "/").strip("/") for x in files if str(x).strip()}
     n = 0
     for f in sorted(src.rglob("*")):
-        if f.is_file() and f.suffix.lower() in SUPPORTED_EXT:
-            try:
-                shutil.copy2(f, up / _flat(list(f.relative_to(src).parts)))
-                n += 1
-            except OSError:
-                continue
+        if not (f.is_file() and f.suffix.lower() in SUPPORTED_EXT):
+            continue
+        rel_parts = list(f.relative_to(src).parts)
+        if wanted is not None and "/".join(rel_parts) not in wanted:
+            continue
+        try:
+            shutil.copy2(f, up / _flat(rel_parts))
+            n += 1
+        except OSError:
+            continue
     return n
 
 
