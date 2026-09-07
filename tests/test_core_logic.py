@@ -818,6 +818,18 @@ def test_gui_service_endpoints(tmp_path, monkeypatch):
         assert get("/api/meta")["model"] == "deepseek · deepseek-chat"
         assert get("/api/ai_options")["current"] == "deepseek"
         assert "error" in post("/api/ai_select", {"mode": "manual", "provider": ""})
+        # 07.09.2026: мёртвый фоновый процесс со статусом running «висел» вечно
+        # («останавливаюсь после пакета…») — pid не жив → paused с причиной
+        from pmoos.pipeline.block1_answers import write_answers_state, read_answers_state
+        write_answers_state("Серв", {"status": "running", "pid": 999999,
+                                     "message": "⏹ Останавливаюсь после текущего пакета…",
+                                     "total": 75, "done": 0})
+        s = get("/api/answers_state?project=" + q("Серв"))
+        assert s["status"] == "paused" and "завершился" in s["message"]
+        assert read_answers_state("Серв")["status"] == "paused"
+        import os as _os
+        write_answers_state("Серв", {"status": "running", "pid": _os.getpid(), "total": 1, "done": 0})
+        assert get("/api/answers_state?project=" + q("Серв"))["status"] == "running"
         # тип объекта меняется свободно до индексации (06.09: «не поменять тип»)
         r = post("/api/object_type", {"project": "Серв", "value": "линейный"})
         assert r["ok"] and r["applied"] == "к базе"

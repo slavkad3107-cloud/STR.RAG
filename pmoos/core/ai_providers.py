@@ -319,12 +319,23 @@ def chat(cfg: Config, messages: list[Message], *, module: str | None = None,
                       f"повтор через '{fbp}'" + (f" ({alt})" if alt else ""), flush=True)
                 try:
                     # модель основного к резервному неприменима — берёт свою (role)
-                    return _chat_once(cfg, messages, provider=fbp, role=role, model=alt,
-                                      temperature=temperature, max_tokens=max_tokens,
-                                      json_mode=json_mode, use_cache=use_cache)
+                    out = _chat_once(cfg, messages, provider=fbp, role=role, model=alt,
+                                     temperature=temperature, max_tokens=max_tokens,
+                                     json_mode=json_mode, use_cache=use_cache)
                 except Exception as e2:  # noqa: BLE001
                     last_err = e2
                     continue
+                if fbp == provider and alt and not model:
+                    # проверенная модель сработала у ОСНОВНОГО провайдера —
+                    # запоминаем в конфиге, чтобы не ловить 404 на каждом вызове
+                    try:
+                        cfg.set(f"ai.providers.{provider}.{role}", alt)
+                        cfg.save()
+                        print(f"[ai] модель роли {role} у '{provider}' обновлена: {alt}",
+                              flush=True)
+                    except Exception:  # noqa: BLE001
+                        pass
+                return out
         # в сообщении СНАЧАЛА причина основного провайдера (аудит: раньше
         # пользователь видел только ошибку последнего запасного)
         raise LLMError(f"{provider}: {first_err} | последний запасной: {last_err}")

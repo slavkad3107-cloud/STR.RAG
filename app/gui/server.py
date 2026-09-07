@@ -199,8 +199,9 @@ def api_index(q, body):
 
 
 def api_index_state(q, body):
-    from pmoos.index.indexer import read_state
-    st = read_state(q["project"])
+    from pmoos.index.indexer import read_state, write_state
+    p = q["project"]
+    st = _stale_fix(read_state(p), lambda s: write_state(p, s), "Индексация")
     return {k: st.get(k) for k in ("status", "message", "total_files", "done_files",
                                    "total_chunks", "object_type", "current_file")}
 
@@ -333,9 +334,44 @@ def api_answers_ctl(q, body):
     return {"ok": True}
 
 
+def _stale_fix(st: dict, write, label: str) -> dict:
+    """ЗАВИСШИЙ СТАТУС (07.09.2026): фоновый процесс умер (перезапуск сервера,
+    закрытое окно), а state остался «running» — интерфейс вечно показывал
+    «останавливаюсь после пакета…». Признак смерти — pid процесса не жив
+    (точная проверка WinAPI); без pid — нет пульса дольше 15 мин."""
+    if st.get("status") not in ("running", "starting"):
+        return st
+    from datetime import datetime
+    from pmoos.index.indexer import _pid_alive
+    pid = int(st.get("pid") or 0)
+    if pid:
+        if _pid_alive(pid):
+            return st
+        why = f"процесс {pid} завершился"
+    else:
+        hb = st.get("heartbeat") or st.get("updated_at") or ""
+        try:
+            age = (datetime.now() - datetime.fromisoformat(hb)).total_seconds()
+        except (ValueError, TypeError):
+            age = 1e9
+        if age < 900:
+            return st
+        why = f"нет пульса {int(age // 60)} мин"
+    st.update({"status": "paused", "pid": 0,
+               "message": f"⏹ {label} прервался ({why}) — готовое сохранено, "
+                          f"повторный запуск продолжит с места остановки."})
+    try:
+        write(st)
+    except Exception:  # noqa: BLE001
+        pass
+    return st
+
+
 def api_answers_state(q, body):
-    from pmoos.pipeline.block1_answers import read_answers_state
-    st = read_answers_state(q["project"])
+    from pmoos.pipeline.block1_answers import read_answers_state, write_answers_state
+    p = q["project"]
+    st = _stale_fix(read_answers_state(p), lambda s: write_answers_state(p, s),
+                    "Поиск ответов")
     return {k: st.get(k) for k in ("status", "message", "total", "done")}
 
 
@@ -658,11 +694,11 @@ def api_ai_select(q, body):
         raise ValueError("не указан провайдер")
     cfg.set("ai.default_provider", provider)
     if model:
-        for role in ("answer", "review"):
+        # «одна модель во всех местах»: ВСЕ роли, включая extract/expand —
+        # иначе там оставался снятый провайдером слаг (qwen3-32b:free → 404
+        # на каждом расширении запроса, 07.09.2026)
+        for role in ("answer", "review", "extract", "expand"):
             cfg.set(f"ai.providers.{provider}.{role}", model)
-        for role in ("extract", "expand"):
-            if not cfg.model_for(provider, role):
-                cfg.set(f"ai.providers.{provider}.{role}", model)
     if "single_model" in body:
         cfg.set("ai.single_model", bool(body["single_model"]))
     cfg.save()
@@ -683,8 +719,9 @@ def api_gen(q, body):
 
 
 def api_gen_state(q, body):
-    from pmoos.pipeline.section_gen import read_state
-    st = read_state(q["project"])
+    from pmoos.pipeline.section_gen import read_state, write_state
+    p = q["project"]
+    st = _stale_fix(read_state(p), lambda s: write_state(p, s), "Генерация раздела")
     return {k: st.get(k) for k in ("status", "message", "total", "done", "target", "output")}
 
 

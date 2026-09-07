@@ -446,7 +446,10 @@ def auto_select(cfg, health: dict | None = None, *, force: bool = False) -> tupl
     for role in ("answer", "review"):
         cfg.set(f"ai.providers.{provider}.{role}", model)
     for role in ("extract", "expand"):
-        if not cfg.model_for(provider, role):
+        # force (кнопка «Выбрать лучшую») — ставим проверенную модель и сюда:
+        # снятый провайдером слаг во вспомогательной роли давал 404 на каждом
+        # расширении запроса (07.09.2026, openrouter qwen3-32b:free)
+        if force or not cfg.model_for(provider, role):
             cfg.set(f"ai.providers.{provider}.{role}", model)
     if provider == "ollama":  # генерация должна идти на ТОТ ЖЕ адрес, где нашли
         host = res.get("host")

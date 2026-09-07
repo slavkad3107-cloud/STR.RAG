@@ -493,7 +493,8 @@ async function renderAnswers() {
     <span class="msg" id="remName">${remarksPath ? "файл: " + esc(remarksPath.split(/[\\/]/).pop()) :
       ((window._info||{}).remarks||[]).length ? "ранее загружено: " + esc((window._info.remarks||[]).join(", ")) : "файл не выбран"}</span><br>
     <button class="act" onclick="ansCtl('start')">① Найти ответы (фоном)</button>
-    <button class="sec" onclick="ansCtl('stop')">⏹ Стоп</button>
+    <button class="sec" onclick="ansCtl('stop')" title="после текущего пакета, всё готовое сохранится">⏹ Стоп</button>
+    <button class="sec" onclick="ansCtl('stop', true)" title="немедленно: текущий пакет не сохранится">✋ Прервать</button>
     <button class="sec" onclick="decideAll('accepted')">Принять все непустые</button>
     ${(() => { const n = d.answers.filter(a => a.needs_ai || !(a.answer||"").trim()).length; return n
       ? `<div class="warn">⚠ Без ответа ИИ: ${n} (показаны варианты-заглушки). Проверьте модель во вкладке СЕРВИС и нажмите
@@ -535,10 +536,13 @@ async function upRemarks(f) {
     toast("Файл замечаний загружен.");
   } catch (e) { err(e); }
 }
-async function ansCtl(action) {
+async function ansCtl(action, hard) {
+  if (hard && !confirm("Прервать немедленно? Текущий пакет ответов не сохранится.")) return;
   try {
-    const r = await api("answers_ctl", {project: P, action, remarks_path: remarksPath});
-    toast(action === "start" ? (r.pid ? "Поиск ответов запущен." : "Уже идёт.") : "Останавливаю…");
+    const r = await api("answers_ctl", {project: P, action, hard: !!hard, remarks_path: remarksPath});
+    toast(action === "start" ? (r.pid ? "Поиск ответов запущен." : "Уже идёт.")
+                             : (hard ? "Прервано." : "Остановлюсь после текущего пакета…"));
+    pollStates();
   } catch (e) { err(e); }
 }
 async function saveTask() {
