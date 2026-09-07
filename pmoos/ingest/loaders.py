@@ -96,6 +96,13 @@ def _ocr_page(pix_bytes: bytes, lang: str) -> str:
     return txt
 
 
+def decode_garbled_text(text: str) -> str:
+    """Восстановить кириллицу из «ɡɚɤɚɡɱɢɤ» (шрифт PDF без кодировки) —
+    та же таблица, что в output.docx_writer.decode_garbled."""
+    from ..output.docx_writer import decode_garbled
+    return decode_garbled(text)
+
+
 def is_garbled(text: str, *, min_len: int = 80) -> bool:
     """Текстовый слой PDF ИСПОРЧЕН (нужен OCR, хотя текст формально есть).
 
@@ -112,7 +119,11 @@ def is_garbled(text: str, *, min_len: int = 80) -> bool:
         return False
     if t.count("(cid:") >= 3:
         return True
-    ext = len(_re.findall(r"[ƀ-ɏʰ-˿]", t))   # latin extended
+    # latin extended-B + IPA + модификаторы (U+0180–U+02FF): битый шрифт
+    # сдвигает кириллицу на 0x1D6 — строчные буквы «ɚɧɤɬ» попадают в IPA
+    # (U+0250–U+02AF), который прежний диапазон [ƀ-ɏ] НЕ покрывал: тома
+    # ОПОЧКИ с 80 % мусора проходили как «нормальный текст» (06.09.2026)
+    ext = len(_re.findall(r"[ƀ-˿]", t))
     cyr = len(_re.findall(r"[а-яА-ЯёЁ]", t))
     letters = len(_re.findall(r"[^\W\d_]", t, _re.UNICODE)) or 1
     if ext / letters > 0.08 and ext > cyr * 0.5:
@@ -149,6 +160,12 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
             text = page.get_text("text") or ""
             if not text.strip():
                 empty_text_pages.add(i)
+            if len(text.strip()) >= min_text_chars and is_garbled(text):
+                # битая кодировка шрифта — сначала пробуем ВОССТАНОВИТЬ текст
+                # (сдвиг 0x1D6 детерминирован, точнее и в сотни раз быстрее OCR)
+                dec = decode_garbled_text(text)
+                if not is_garbled(dec):
+                    text = dec
             page_text[i] = text
             if ocr and (len(text.strip()) < min_text_chars or is_garbled(text)):
                 try:

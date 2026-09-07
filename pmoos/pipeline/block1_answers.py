@@ -319,6 +319,7 @@ def run_block1(project: str, cfg: Config | None = None, *,
             continue  # текст замечания сменился → переспросить
         if a.get("status") in ("accepted", "edited") or (
                 a.get("status") != "rejected"           # ✗ отклонён → переспросить
+                and not a.get("needs_ai")               # заглушка «ИИ не ответил» → переспросить
                 and (a.get("user_answer") or a.get("answer") or "").strip()):
             done_prev[n] = a
     pending = [r for r in remarks if str(r.number) not in done_prev]
@@ -346,9 +347,22 @@ def run_block1(project: str, cfg: Config | None = None, *,
         _ans_progress(project, total, len(by_num),
                       f"Пакет {p0 // pack_size + 1}: замечания "
                       f"{pack[0].number}–{pack[-1].number}…")
-        for a in _answer_pack(project, cfg, object_type, pack, src_codes, progress):
+        pack_ans = _answer_pack(project, cfg, object_type, pack, src_codes, progress)
+        for a in pack_ans:
             by_num[str(a["number"])] = a
         _save_merged(project, remarks, by_num, cfg, object_type, partial=True)
+        # ИИ МЁРТВ ЦЕЛИКОМ (все провайдеры упали на всём пакете) — дальше идти
+        # бессмысленно: 06.09.2026 так «успешно» получились 39 пустых ответов
+        # из 75. Останавливаемся с понятной причиной; готовое сохранено.
+        if pack_ans and all(a.get("needs_ai") for a in pack_ans):
+            err = next((a.get("error") for a in pack_ans if a.get("error")), "") \
+                or "провайдер не вернул ответ"
+            _ans_progress(project, total, len(by_num),
+                          f"⛔ ИИ недоступен — остановлено после пакета "
+                          f"{p0 // pack_size + 1}: {str(err)[:220]}. Откройте СЕРВИС, "
+                          f"выберите рабочую модель и снова нажмите «① Найти ответы» — "
+                          f"ответы без ИИ переспросятся.", status="error")
+            return load_answers(project)
         _ans_progress(project, total, len(by_num),
                       f"Готово ответов: {len(by_num)}/{total}")
 
@@ -484,14 +498,24 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
         affected_codes = sorted({s["section"] for s in (used_sources or srcs) if s.get("section")})
         cascade = downstream(project, affected_codes) if affected_codes else {"changed": [], "affected": []}
 
+        # №10-6: категория из файла замечаний (если была колонка), иначе —
+        # автоматическая классификация по тексту замечания
+        category = (getattr(r, "category", "") or _classify_remark(r.text))
+        # ПУСТОГО ОТВЕТА НЕ БЫВАЕТ (замечание юзера 06.09.2026: «(пусто) — так
+        # быть не должно ни по одному замечанию: указывать, что данных нет, или
+        # предложить варианты»). Если ИИ не ответил — заглушка с причиной,
+        # найденными материалами и вариантами ответа; needs_ai=True — при
+        # следующем запуске «Найти ответы» такое замечание переспрашивается.
+        needs_ai = not answer_text
+        if needs_ai:
+            answer_text = _stub_answer(category, srcs, res.get("error"))
         answers.append({
             "number": r.number,
             "remark": r.text,
             "oos_volume": oos_by_num.get(str(r.number), ""),  # №10-5
-            # №10-6: категория из файла замечаний (если была колонка), иначе —
-            # автоматическая классификация по тексту замечания
-            "category": (getattr(r, "category", "") or _classify_remark(r.text)),
+            "category": category,
             "answer": answer_text,
+            "needs_ai": needs_ai,
             "correction": data.get("correction", ""),
             # структурированная правка: где / было / стало / что приложить
             "edit_location": data.get("edit_location", ""),
@@ -519,6 +543,54 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
     return answers
     # Примечание: прежний kept-merge «не затирать принятые» теперь живёт выше —
     # в резюм-логике run_block1 (готовые ответы вообще не переспрашиваются).
+
+
+_STUB_VARIANTS = {
+    "Ввести данные": [
+        "внести запрошенные данные в указанный пункт/таблицу тома по данным "
+        "раздела-источника (ПОС, ПЗ, ИОС, изыскания) — см. материалы выше;",
+        "если данных в ПД нет — запросить у заказчика / смежного раздела, до "
+        "получения пометить место «◈ ВНЕСТИ» и отразить в ведомости недостающих данных.",
+    ],
+    "Доп. документы": [
+        "приложить запрошенный документ (протокол, договор, справку, лицензию) и "
+        "сослаться на него в томе;",
+        "если документа нет — запросить у заказчика, указать срок представления;",
+        "если документ не требуется — дать мотивированное пояснение со ссылкой на НПА.",
+    ],
+    "Нормативы": [
+        "привести формулировку / расчёт в соответствие с указанным нормативом "
+        "(проверить действующую редакцию);",
+        "если норматив утратил силу — сослаться на действующий документ-замену.",
+    ],
+    "Правка по источникам": [
+        "исправить указанное место тома по данным материалов выше;",
+        "при расхождении данных между разделами — согласовать с разделом-источником "
+        "(ПОС / ИОС / ПЗ) и внести единое значение во все тома;",
+        "если замечание не подтверждается — дать мотивированное пояснение со ссылкой "
+        "на лист тома.",
+    ],
+}
+
+
+def _stub_answer(category: str, srcs: list[dict], error: str | None) -> str:
+    """Текст вместо пустого ответа: причина, что найдено в базе, варианты."""
+    reason = "ИИ не вернул ответ"
+    if error:
+        reason += f" ({str(error)[:220]})"
+    L = [f"⚠ АВТОМАТИЧЕСКИЙ ОТВЕТ НЕ СФОРМИРОВАН: {reason}."]
+    if srcs:
+        L.append("По базе проекта найдены материалы по теме замечания:")
+        L += [f"  — {s.get('file', '')} {s.get('loc', '')}".rstrip() for s in srcs[:5]]
+    else:
+        L.append("Данных по теме замечания в базе проекта НЕ НАЙДЕНО.")
+    L.append("Варианты ответа (выберите и отредактируйте):")
+    for i, v in enumerate(_STUB_VARIANTS.get(category) or _STUB_VARIANTS["Правка по источникам"],
+                          start=1):
+        L.append(f"  {i}) {v}")
+    L.append("Повторить запрос к ИИ: вкладка СЕРВИС → выбрать рабочую модель → "
+             "ОТВЕТЫ → «① Найти ответы» (такие ответы переспрашиваются).")
+    return "\n".join(L)
 
 
 def _save_merged(project: str, remarks: list, by_num: dict[str, dict],

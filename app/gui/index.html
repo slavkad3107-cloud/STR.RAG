@@ -140,8 +140,8 @@ async function refreshHeader() {
   try {
     const i = await api("info");
     $("hdrInfo").innerHTML =
-      `🏢 ${esc(i.organization || "организация не указана")} · ` +
-      `📐 тип: <b>${esc(i.object_type)}</b> (зафиксирован) · ` +
+      `<a href="#" onclick="editOrg();return false" title="изменить организацию">🏢 ${esc(i.organization || "организация не указана")}</a> · ` +
+      `<a href="#" onclick="showTab(1);return false" title="тип меняется во вкладке БАЗА">📐 тип: <b>${esc(i.object_type)}</b></a> · ` +
       `🤖 единая модель: ${esc(i.model || META.model)} · ${esc(META.version)}`;
     window._info = i;
   } catch (e) { err(e); }
@@ -172,6 +172,20 @@ async function newProject() {
 async function setTarget() {
   try { await api("target", {code: $("tgt").value}); toast("Раздел переключён."); }
   catch (e) { err(e); }
+}
+async function editOrg() {
+  if (!P) return;
+  const v = prompt("Организация (заказчик / проектировщик):", (window._info||{}).organization || "");
+  if (v === null) return;
+  try { await api("org", {project: P, organization: v.trim()}); toast("Организация сохранена."); await refreshHeader(); }
+  catch (e) { err(e); }
+}
+async function setObjectType(v) {
+  try {
+    const r = await api("object_type", {project: P, value: v});
+    toast(`Тип объекта «${r.object_type}» — применится ${r.applied}.`);
+    await refreshHeader();
+  } catch (e) { err(e); }
 }
 async function reloadProjects(selectName) {
   META = await api("meta");
@@ -321,8 +335,16 @@ async function saveOrg() {
 
 /* ── БАЗА (индексация) ── */
 function renderIndex() {
+  const ot = (window._info||{}).object_type || "площадной";
   $("tab1").innerHTML = `
   <div class="card"><h3>RAG-база: индексация документов</h3>
+    <div style="margin-bottom:6px">
+      <label>Тип объекта: <select id="otSel" onchange="setObjectType(this.value)">
+        <option ${ot==="площадной"?"selected":""}>площадной</option>
+        <option ${ot==="линейный"?"selected":""}>линейный</option></select></label>
+      <span class="msg">влияет на распознавание разделов (ППО/ТКР у линейных);
+        для уже собранной базы новый тип применится при «♻ Переиндексировать заново»</span>
+    </div>
     <button class="act" onclick="idx('start')">▶ Индексировать</button>
     <button class="sec" onclick="idxReindex()">♻ Переиндексировать заново</button>
     <button class="sec" onclick="idx('pause')">⏸ Пауза</button>
@@ -336,7 +358,9 @@ function renderIndex() {
   pollStates();
 }
 async function idx(action) {
-  try { await api("index", {project: P, action}); toast("Команда отправлена."); }
+  const body = {project: P, action};
+  if ($("otSel") && (action === "start" || action === "reindex")) body.object_type = $("otSel").value;
+  try { await api("index", body); toast("Команда отправлена."); }
   catch (e) { err(e); }
 }
 function idxReindex() {
@@ -432,6 +456,9 @@ async function renderAnswers() {
     <button class="act" onclick="ansCtl('start')">① Найти ответы (фоном)</button>
     <button class="sec" onclick="ansCtl('stop')">⏹ Стоп</button>
     <button class="sec" onclick="decideAll('accepted')">Принять все непустые</button>
+    ${(() => { const n = d.answers.filter(a => a.needs_ai || !(a.answer||"").trim()).length; return n
+      ? `<div class="warn">⚠ Без ответа ИИ: ${n} (показаны варианты-заглушки). Проверьте модель во вкладке СЕРВИС и нажмите
+         <button class="act" onclick="ansCtl('start')">🔁 Дозаполнить ${n} ответов</button></div>` : ""; })()}
     <div class="bar"><i id="ansBar"></i></div>
     <div class="msg" id="ansMsg">—</div>
     <details style="margin-top:6px"><summary>📝 Доп. задание ИИ (необязательно)</summary>
@@ -445,7 +472,7 @@ async function renderAnswers() {
       <tbody>${d.answers.map((a,i) => `
         <tr id="ansRow${i}" onclick="showAns(${i})" style="cursor:pointer">
           <td>${esc(a.number)}</td><td>${esc((a.remark||"").slice(0,90))}</td>
-          <td><span class="badge ${a.status==="accepted"?"g":a.status==="proposed"?"w":""}">${stRu[a.status]||"?"}</span></td>
+          <td><span class="badge ${a.status==="accepted"?"g":a.status==="proposed"?"w":""}">${(a.needs_ai || !(a.answer||"").trim()) ? "⚠ без ИИ" : (stRu[a.status]||"?")}</span></td>
         </tr>`).join("") || "<tr><td colspan=3>ответов пока нет — загрузите файл замечаний и нажмите «① Найти ответы»</td></tr>"}
       </tbody></table>
     </div>
@@ -486,7 +513,8 @@ function showAns(i) {
   $("ansRow"+i).classList.add("sel");
   const L = [];
   L.push(`ЗАМЕЧАНИЕ №${a.number}${a.oos_volume ? "  ·  том: " + a.oos_volume : ""}`);
-  L.push(a.remark, "", "ОТВЕТ:", a.answer || "(пусто)");
+  L.push(a.remark, "", "ОТВЕТ:", a.answer || "⚠ ответ не сформирован — нажмите «① Найти ответы»");
+  if (a.needs_ai && a.error) L.push("", "ПРИЧИНА ОТКАЗА ИИ: " + a.error);
   if (a.edit_location) L.push("", "ГДЕ ПРАВИТЬ: " + a.edit_location);
   if (a.edit_was)   L.push("БЫЛО: «" + a.edit_was + "»");
   if (a.edit_shall) L.push("СТАЛО: «" + a.edit_shall + "»");
@@ -505,7 +533,7 @@ async function decideSel(status) {
   } catch (e) { err(e); }
 }
 async function decideAll(status) {
-  const nums = (window._ans||[]).filter(a => (a.answer||"").trim() && a.status === "proposed")
+  const nums = (window._ans||[]).filter(a => (a.answer||"").trim() && a.status === "proposed" && !a.needs_ai)
                                 .map(a => a.number);
   if (!nums.length) return toast("Непустых непринятых ответов нет.");
   if (!confirm(`Принять ${nums.length} ответов?`)) return;
@@ -526,7 +554,7 @@ async function renderExport() {
     <button class="sec" onclick="$('corrInp').click()">📄 Загрузить исходные тома (docx / doc / pdf / rtf / odt)…</button>
     <input type="file" id="corrInp" hidden multiple accept=".docx,.doc,.pdf,.rtf,.odt,.docm" onchange="corrUpload(this.files)">
     <table style="margin:6px 0"><tbody>${cv.volumes.map(v =>
-      `<tr><td>${esc(v.name)}</td><td style="width:80px">${v.kb} КБ</td>
+      `<tr><td>${esc(v.name)}${v.note ? ` <span class="msg">· ${esc(v.note)}</span>` : ""}</td><td style="width:80px">${v.kb} КБ</td>
        <td style="width:60px"><button class="sec" data-cdel="${esc(v.name)}">✖</button></td></tr>`).join("") ||
       "<tr><td class='msg'>исходные тома не загружены</td></tr>"}</tbody></table>
     <button class="sec" onclick="corrPreview()" ${cv.volumes.length ? "" : "disabled"}>👀 Предпросмотр правок</button>
@@ -638,7 +666,7 @@ async function pollGen() {
   const running = s.status === "running";
   if ($("genStart")) $("genStart").disabled = running;
   if ($("genStop")) $("genStop").disabled = !running;
-  if (!s.status) { box.textContent = ""; return; }
+  if (!s.status || s.status === "idle") { box.textContent = ""; return; }
   const prog = s.total ? ` ${s.done || 0}/${s.total} глав` : "";
   const ru = {running: "⏳ идёт", done: "✅ готово", stopped: "⏹ остановлено", error: "⚠ ошибка"}[s.status] || s.status;
   box.innerHTML = `${ru}${prog}: ${esc(s.message || "")}` +

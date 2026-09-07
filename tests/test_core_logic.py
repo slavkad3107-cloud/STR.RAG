@@ -546,6 +546,61 @@ def test_docx_text_len_counts_textboxes(tmp_path):
     assert _docx_text_len(f) > 300                                       # но текст есть
 
 
+def test_garbled_lowercase_detected_and_repaired(tmp_path):
+    # 06.09.2026: тома ООС ОПОЧКИ («ɋɚɧɤɬ-ɉɟɬɟɪɛɭɪɝ» = Санкт-Петербург) на 80 %
+    # из строчных IPA-символов проходили как нормальный текст (диапазон
+    # [ƀ-ɏ] их не покрывал) → нечитаемый откорректированный том
+    from pmoos.ingest.loaders import is_garbled, decode_garbled_text
+    from pmoos.ingest.convert import repair_garbled_docx
+    bad = ("ɋɚɧɤɬ-ɉɟɬɟɪɛɭɪɝ 2024 ɉɪɨɟɤɬɧɚɹ ɞɨɤɭɦɟɧɬɚɰɢɹ ɪɚɡɞɟɥ ɨɯɪɚɧɚ ɨɤɪɭɠɚɸɳɟɣ ɫɪɟɞɵ "
+           "ɬɨɦ 6.1 ɩɨɹɫɧɢɬɟɥɶɧɚɹ ɡɚɩɢɫɤɚ ") * 3 + "Регистрационный номер СРО-И-028"
+    assert is_garbled(bad) is True
+    dec = decode_garbled_text(bad)
+    assert "Санкт-Петербург" in dec and "охрана окружающей среды" in dec
+    assert is_garbled(dec) is False
+    from docx import Document
+    d = Document()
+    d.add_paragraph("ɋɚɧɤɬ-ɉɟɬɟɪɛɭɪɝ")
+    t = d.add_table(rows=1, cols=1)
+    t.cell(0, 0).text = "ɨɯɪɚɧɚ ɨɤɪɭɠɚɸɳɟɣ ɫɪɟɞɵ"
+    d.add_paragraph("обычный текст 2.1.4")
+    p = tmp_path / "том.docx"
+    d.save(str(p))
+    ratio = repair_garbled_docx(p)
+    assert ratio > 0.3
+    d2 = Document(str(p))
+    assert d2.paragraphs[0].text == "Санкт-Петербург"
+    assert d2.tables[0].cell(0, 0).text == "охрана окружающей среды"
+    assert d2.paragraphs[1].text == "обычный текст 2.1.4"
+    assert repair_garbled_docx(p) == 0.0            # второй раз чинить нечего
+
+
+def test_empty_answer_replaced_by_stub_and_reasked(tmp_path, monkeypatch):
+    # 06.09.2026: «(пусто) — так быть не должно ни по одному замечанию»
+    from pmoos.pipeline.block1_answers import _stub_answer
+    s = _stub_answer("Ввести данные",
+                     [{"file": "ПОС1.pdf", "loc": "стр. 126"}],
+                     "mistral: 403 tier_not_allowed | последний запасной: пусто")
+    assert "НЕ СФОРМИРОВАН" in s and "ПОС1.pdf стр. 126" in s
+    assert "1)" in s and "2)" in s and "СЕРВИС" in s and "403" in s
+    s2 = _stub_answer("Доп. документы", [], None)
+    assert "НЕ НАЙДЕНО" in s2 and "приложить" in s2
+    # заглушка не считается готовым ответом при возобновлении
+    import json as _json
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.paths import project_paths
+    pp = project_paths("Заг")
+    pp["answers"].write_text(_json.dumps({"answers": [
+        {"number": "1", "remark": "А", "answer": s, "needs_ai": True, "status": "proposed"},
+        {"number": "2", "remark": "Б", "answer": "готовый ответ", "status": "proposed"},
+        {"number": "3", "remark": "В", "answer": s, "needs_ai": True, "status": "accepted"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    from pmoos.pipeline import block1_answers as B
+    src = open(B.__file__, encoding="utf-8").read()
+    assert 'not a.get("needs_ai")' in src, "резюм должен переспрашивать заглушки"
+    assert 'all(a.get("needs_ai") for a in pack_ans)' in src, "мёртвый ИИ должен останавливать прогон"
+
+
 def test_project_export_import_delete(tmp_path, monkeypatch):
     # ТЗ 05.09: «добавить удалить/загрузить объект»
     import json as _json
@@ -689,6 +744,11 @@ def test_gui_service_endpoints(tmp_path, monkeypatch):
         assert get("/api/meta")["model"] == "deepseek · deepseek-chat"
         assert get("/api/ai_options")["current"] == "deepseek"
         assert "error" in post("/api/ai_select", {"mode": "manual", "provider": ""})
+        # тип объекта меняется свободно до индексации (06.09: «не поменять тип»)
+        r = post("/api/object_type", {"project": "Серв", "value": "линейный"})
+        assert r["ok"] and r["applied"] == "к базе"
+        assert get("/api/info?project=" + q("Серв"))["object_type"] == "линейный"
+        assert "error" in post("/api/object_type", {"project": "Серв", "value": "круглый"})
         # версии документов (пусто до индексации) и состояние генерации
         v = get("/api/versions?project=" + q("Серв"))
         assert v["groups"] == [] and v["inactive"] == []
@@ -909,6 +969,10 @@ def test_gui_server_api(tmp_path, monkeypatch):
                 data=_json.dumps(obj).encode(), method="POST")
             with urllib.request.urlopen(req, timeout=10) as r:
                 return _json.loads(r.read())
+        # 06.09.2026: под cp866-консолью bat print(«→») ронял обработчик —
+        # консоль сервера обязана быть utf-8 с заменой
+        src = open(S.__file__, encoding="utf-8").read()
+        assert 'reconfigure(encoding="utf-8", errors="replace")' in src
         # страница — ванильный HTML без CDN и фреймворков
         ct, html = get("/")
         assert ct == "text/html"

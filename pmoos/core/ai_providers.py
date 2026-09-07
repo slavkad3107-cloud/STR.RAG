@@ -291,20 +291,40 @@ def chat(cfg: Config, messages: list[Message], *, module: str | None = None,
         seen = {provider}
         first_err = e          # причина падения ОСНОВНОГО провайдера — важнее
         last_err = e
-        for fbp in chain:
-            if fbp in seen or not (cfg.has_key(fbp) or fbp == "ollama"):
+        # ПРОВЕРЕННАЯ МОДЕЛЬ ИЗ HEALTH (06.09.2026): у запасного провайдера в
+        # конфиге могла остаться устаревшая модель (openrouter: free-слаг снят →
+        # 404), хотя проверка знает рабочую (minimax). Пробуем свою модель роли,
+        # затем best_model из health — иначе вся цепочка «падала» впустую.
+        try:
+            from .health import read_health
+            _health = read_health() or {}
+        except Exception:  # noqa: BLE001
+            _health = {}
+
+        def _models_for(p: str) -> list[str | None]:
+            out: list[str | None] = [None] if p != provider else []
+            bm = str((_health.get(p) or {}).get("best_model") or "").strip()
+            if bm and bm != cfg.model_for(p, role) and bm != (model or ""):
+                out.append(bm)
+            return out
+
+        for fbp in [provider] + list(chain):
+            alts = _models_for(fbp)
+            if not alts or (fbp != provider and (
+                    fbp in seen or not (cfg.has_key(fbp) or fbp == "ollama"))):
                 continue
             seen.add(fbp)
-            print(f"[ai] провайдер '{provider}' недоступен ({last_err}) — "
-                  f"повтор через '{fbp}'", flush=True)
-            try:
-                # модель основного к резервному неприменима — берёт свою (role)
-                return _chat_once(cfg, messages, provider=fbp, role=role, model=None,
-                                  temperature=temperature, max_tokens=max_tokens,
-                                  json_mode=json_mode, use_cache=use_cache)
-            except Exception as e2:  # noqa: BLE001
-                last_err = e2
-                continue
+            for alt in alts:
+                print(f"[ai] провайдер '{provider}' недоступен ({last_err}) — "
+                      f"повтор через '{fbp}'" + (f" ({alt})" if alt else ""), flush=True)
+                try:
+                    # модель основного к резервному неприменима — берёт свою (role)
+                    return _chat_once(cfg, messages, provider=fbp, role=role, model=alt,
+                                      temperature=temperature, max_tokens=max_tokens,
+                                      json_mode=json_mode, use_cache=use_cache)
+                except Exception as e2:  # noqa: BLE001
+                    last_err = e2
+                    continue
         # в сообщении СНАЧАЛА причина основного провайдера (аудит: раньше
         # пользователь видел только ошибку последнего запасного)
         raise LLMError(f"{provider}: {first_err} | последний запасной: {last_err}")

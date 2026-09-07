@@ -1,6 +1,7 @@
 @echo off
 chcp 866 >nul
 cd /d "%~dp0"
+set "PYTHONIOENCODING=utf-8"
 set "PMOOS_DATA=%PMOOS_DATA_DIR%"
 if "%PMOOS_DATA%"=="" set "PMOOS_DATA=%USERPROFILE%\.pmoos-rag"
 set "PYC=%PMOOS_DATA%\venv\Scripts\python.exe"

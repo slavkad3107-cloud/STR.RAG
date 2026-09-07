@@ -25,6 +25,16 @@ if str(APP_ROOT) not in sys.path:
 HOST, PORT = "127.0.0.1", 8747
 _HTML = Path(__file__).with_name("index.html")
 
+# КОНСОЛЬ СЕРВЕРА — UTF-8 С ЗАМЕНОЙ (06.09.2026): под СТРОЙРАГ.bat (cp866) любой
+# print() со стрелкой «→»/эмодзи из pmoos/* падал UnicodeEncodeError прямо
+# внутри обработчика — «Сформировать откорректированный раздел» обрывался на
+# втором томе с ошибкой «'charmap' codec can't encode character '→'».
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — pythonw без консоли / не-TextIOWrapper
+        pass
+
 
 def _log(msg: str) -> None:
     """Диагностика старта: в консоль (если есть) И в файл gui_server.log в
@@ -328,8 +338,9 @@ def api_answers(q, body):
         out.append({k: a.get(k, "") for k in (
             "number", "remark", "answer", "status", "category", "oos_volume",
             "edit_location", "edit_was", "edit_shall", "missing_data",
-            "correction")}
-            | {"attachments": a.get("attachments") or [],
+            "correction", "error")}
+            | {"needs_ai": bool(a.get("needs_ai")),
+               "attachments": a.get("attachments") or [],
                "sources": [{"file": s.get("file", ""), "loc": s.get("loc", "")}
                            for s in (a.get("sources") or [])[:6]]})
     return {"answers": out}
@@ -400,8 +411,54 @@ def api_corr_upload(q, body_bytes):
 
 def api_corr_list(q, body):
     d = _corr_dir(q["project"])
-    return {"volumes": [{"name": f.name, "kb": f.stat().st_size // 1024}
-                        for f in sorted(d.glob("*.docx"))]}
+    vols = []
+    for f in sorted(d.glob("*.docx")):
+        note = ""
+        # тома, сконвертированные из PDF с битым шрифтом ДО v0.49 («ɋɚɧɤɬ-
+        # ɉɟɬɟɪɛɭɪɝ»), чинятся на месте один раз — иначе результат нечитаем
+        try:
+            from pmoos.ingest.convert import repair_garbled_docx
+            fixed = repair_garbled_docx(f)
+            if fixed:
+                note = f"кодировка восстановлена ({fixed:.0%} символов)"
+                _log(f"corr: {f.name} — восстановлена кодировка ({fixed:.0%})")
+        except Exception as e:  # noqa: BLE001
+            note = f"не удалось проверить кодировку: {str(e)[:80]}"
+        vols.append({"name": f.name, "kb": f.stat().st_size // 1024, "note": note})
+    return {"volumes": vols}
+
+
+def api_object_type(q, body):
+    """Тип объекта (площадной / линейный) — влияет на распознавание разделов
+    ПД. Меняется свободно до индексации; для проиндексированной базы новый
+    тип применится при «♻ Переиндексировать заново» (замечание 06.09.2026:
+    «опять не поменять тип объекта»)."""
+    from pmoos.ingest.inventory import load_inventory
+    from pmoos.paths import project_paths
+    p = body["project"]
+    value = str(body.get("value", "")).strip()
+    if value not in ("площадной", "линейный"):
+        raise ValueError("тип объекта: «площадной» или «линейный»")
+    inv = load_inventory(p) or {}
+    inv["object_type"] = value
+    pp = project_paths(p)["inventory"]
+    pp.parent.mkdir(parents=True, exist_ok=True)
+    pp.write_text(json.dumps(inv, ensure_ascii=False, indent=2), encoding="utf-8")
+    applied = "к базе"
+    try:
+        from pmoos.index.indexer import read_state, write_state
+        st = read_state(p)
+        if st.get("status") in ("running", "starting"):
+            applied = "после индексации (сейчас идёт)"
+        elif int(st.get("total_chunks") or 0) == 0:
+            st["object_type"] = value
+            write_state(p, st)
+        else:
+            applied = ("при «♻ Переиндексировать заново» (база уже собрана с типом "
+                       f"«{st.get('object_type') or '?'}»)")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "object_type": value, "applied": applied}
 
 
 def api_corr_preview(q, body):
@@ -641,7 +698,7 @@ ROUTES_JSON = {
     "project_delete": api_project_delete, "project_export": api_project_export,
     "versions": api_versions, "version_set": api_version_set,
     "ai_options": api_ai_options, "ai_probe": api_ai_probe, "ai_select": api_ai_select,
-    "gen": api_gen, "gen_state": api_gen_state,
+    "gen": api_gen, "gen_state": api_gen_state, "object_type": api_object_type,
 }
 ROUTES_RAW = {"upload": api_upload, "remarks_upload": api_remarks_upload,
               "uprza_import": api_uprza_import, "corr_upload": api_corr_upload,

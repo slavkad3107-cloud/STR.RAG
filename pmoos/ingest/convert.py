@@ -86,12 +86,36 @@ def _convert_via_word(src: Path, dst: Path, timeout: int = 900) -> None:
         raise RuntimeError((r.stderr or r.stdout or "Word не вернул результат")[:300])
 
 
-def _convert_pdf_fallback(src: Path, dst: Path) -> str:
+def repair_garbled_docx(path: Path, *, threshold: float = 0.02) -> float:
+    """Восстановить кириллицу битой PDF-кодировки («ɋɚɧɤɬ-ɉɟɬɟɪɛɭɪɝ») во
+    ВСЕХ w:t документа на месте. Возвращает долю испорченных символов ДО
+    починки (0 — чинить было нечего). Реальный случай 06.09.2026: тома ООС
+    ОПОЧКИ после конверсии из PDF были на 80 % из таких символов —
+    «нечитаемый результат» у откорректированного раздела."""
+    from docx import Document
+    from docx.oxml.ns import qn
+    from ..output.docx_writer import decode_garbled, garble_ratio
+    d = Document(str(path))
+    nodes = list(d.element.body.iter(qn("w:t")))
+    sample = "".join((t.text or "") for t in nodes[:4000])
+    ratio = garble_ratio(sample)
+    if ratio < threshold:
+        return ratio
+    for t in nodes:
+        if t.text:
+            t.text = decode_garbled(t.text)
+    d.save(str(path))
+    return ratio
+
+
+def _convert_pdf_fallback(src: Path, dst: Path, *, decode: bool = False) -> str:
     """PDF → простой .docx через pymupdf: текст постранично, заголовок «стр. N».
-    Возвращает извлечённый текст (для проверки «скан / битый шрифт»)."""
+    Возвращает извлечённый текст (для проверки «скан / битый шрифт»).
+    decode=True — восстанавливать кириллицу битого шрифта построчно."""
     import fitz  # PyMuPDF
     from docx import Document
     from docx.shared import Pt
+    from ..output.docx_writer import decode_garbled
     doc = Document()
     pdf = fitz.open(str(src))
     chunks: list[str] = []
@@ -102,6 +126,8 @@ def _convert_pdf_fallback(src: Path, dst: Path) -> str:
             rh.bold = True
             rh.font.size = Pt(9)
             txt = page.get_text("text") or ""
+            if decode:
+                txt = decode_garbled(txt)
             chunks.append(txt)
             for line in txt.splitlines():
                 if line.strip():
@@ -201,8 +227,11 @@ def to_docx(src: str | Path, dst_dir: str | Path, *,
                     if ext == ".pdf" and _docx_text_len(out) < 200:
                         # LibreOffice «успешно» делает пустой docx из скана
                         raise RuntimeError("LibreOffice не извлёк текст из PDF (скан?)")
+                    fixed = repair_garbled_docx(out) if ext == ".pdf" else 0.0
                     return _done("soffice", "сконвертировано LibreOffice"
-                                 + (" (PDF → текст постранично)" if ext == ".pdf" else ""),
+                                 + (" (PDF → текст постранично)" if ext == ".pdf" else "")
+                                 + (f"; кодировка шрифта восстановлена ({fixed:.0%} символов)"
+                                    if fixed else ""),
                                  out)
                 if method == "word":
                     ver = word_version()
@@ -215,14 +244,21 @@ def to_docx(src: str | Path, dst_dir: str | Path, *,
                 if method == "pdf-text" and ext == ".pdf":
                     text = _convert_pdf_fallback(src, tmp)
                     from .loaders import is_garbled
+                    from ..output.docx_writer import decode_garbled
                     if _docx_text_len(tmp) < 200:
                         raise RuntimeError("в PDF нет текстового слоя (скан)")
+                    note = ("PDF переведён в текст без оформления — правки "
+                            "встанут по тексту; для точного результата лучше Word-том")
                     if is_garbled(text) or text.count("(cid:") >= 3:
-                        # испорченный текстовый слой — как скан, нужен OCR
-                        raise RuntimeError("текстовый слой PDF испорчен (шрифт без кодировки)")
-                    return _done("pdf-text",
-                                 "PDF переведён в текст без оформления — правки "
-                                 "встанут по тексту; для точного результата лучше Word-том")
+                        # испорченный текстовый слой: сначала ВОССТАНОВЛЕНИЕ
+                        # кодировки (сдвиг шрифта детерминирован), OCR — если не помогло
+                        if text.count("(cid:") < 3 and not is_garbled(decode_garbled(text)):
+                            tmp.unlink()
+                            _convert_pdf_fallback(src, tmp, decode=True)
+                            note += "; кодировка шрифта PDF восстановлена"
+                        else:
+                            raise RuntimeError("текстовый слой PDF испорчен (шрифт без кодировки)")
+                    return _done("pdf-text", note)
                 if method == "ocr-text" and ext == ".pdf":
                     n = _convert_ocr_text(src, tmp)
                     if n < 200:

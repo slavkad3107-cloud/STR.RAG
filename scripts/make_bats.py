@@ -27,6 +27,7 @@ def build() -> str:
         "@echo off",
         "chcp 866 >nul",
         'cd /d "%~dp0"',
+        'set "PYTHONIOENCODING=utf-8"',
         'set "PMOOS_DATA=%PMOOS_DATA_DIR%"',
         f'if "%PMOOS_DATA%"=="" set "PMOOS_DATA=%USERPROFILE%{_p("", ".pmoos-rag")}"',
         f'set "PYC={venv_py_con}"',
