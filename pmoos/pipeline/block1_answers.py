@@ -381,7 +381,14 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
         queries = [r.text for r in remarks]
         if progress:
             progress(0, len(remarks), "Поиск источников по замечаниям…")
-        hits_per = retr.batch_search(project, queries, sections=src_codes or None,
+        # ПОИСК ПО ВСЕЙ БАЗЕ (07.09.2026, замечание юзера: «план был — RAG по
+        # ВСЕМ разделам ПД, а потом искать ответы»). Раньше фильтр src_codes
+        # оставлял только разделы с флагом is_source: на ОПОЧКЕ невидимыми были
+        # 14 520 из 44 067 фрагментов (ППО, ТКР-как-АР, ОДИ, ПБ, ИОС.СС) — треть
+        # базы. Ограничить набор можно только осознанно: answers.search_all_sections: false.
+        all_sections = bool(cfg.get("answers.search_all_sections", True))
+        hits_per = retr.batch_search(project, queries,
+                                     sections=(None if all_sections else (src_codes or None)),
                                      top=int(cfg.get("retrieval.top_k", 8)))
         # №10-5: к какому ТОМУ ООС относится замечание — лёгкий поиск top-1
         # только по разделу OOS (томов может быть несколько). Расширение запроса

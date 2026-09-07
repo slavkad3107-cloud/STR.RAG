@@ -601,6 +601,39 @@ def test_empty_answer_replaced_by_stub_and_reasked(tmp_path, monkeypatch):
     assert 'all(a.get("needs_ai") for a in pack_ans)' in src, "мёртвый ИИ должен останавливать прогон"
 
 
+def test_answers_search_whole_base(monkeypatch):
+    # 07.09.2026: «план был — RAG по ВСЕМ разделам ПД, потом искать ответы».
+    # Фильтр разделов-источников прятал треть базы (ППО/ТКР/ОДИ/ПБ).
+    from pmoos.ingest.sections import source_section_codes, required_sections
+    allc = {s["code"] for s in required_sections("площадной")}
+    assert allc - set(source_section_codes("площадной", "OOS")), \
+        "фильтр источников действительно уже базы — значит, поиск обязан быть по всей базе"
+    from pmoos.pipeline import block1_answers as B
+    src = open(B.__file__, encoding="utf-8").read()
+    assert 'cfg.get("answers.search_all_sections", True)' in src
+    assert "sections=(None if all_sections else" in src
+    # генерация раздела: вся база, исключён только сам целевой раздел
+    from pmoos.pipeline import section_gen as G
+    calls = []
+
+    class _Retr:
+        def __init__(self, cfg):
+            pass
+
+        def batch_search(self, project, queries, **kw):
+            calls.append(kw)
+            return [[]]
+
+        def close(self):
+            pass
+    import pmoos.retrieval.hybrid as H
+    monkeypatch.setattr(H, "HybridRetriever", _Retr)
+    from pmoos.config import load_config
+    run = G.default_retriever(load_config(), "П", "площадной", "OOS")
+    run("что-то")
+    assert calls and calls[0]["sections"] is None and calls[0]["exclude_sections"] == ["OOS"]
+
+
 def test_copy_folder_only_selected_files(tmp_path, monkeypatch):
     # 07.09.2026: «попадают не выбранные файлы, если загружаешь из папки» —
     # сначала список с выбором, копируются только отмеченные

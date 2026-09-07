@@ -149,13 +149,15 @@ def default_retriever(cfg, project: str, object_type: str, target: str) -> Calla
     """Поиск по базе проекта по разделам-источникам целевого раздела.
     Возвращает функцию query → hits и объект для close()."""
     from ..retrieval.hybrid import HybridRetriever
-    from ..ingest.sections import source_section_codes
     retr = HybridRetriever(cfg)
-    srcs = [c for c in source_section_codes(object_type, target) if c != target]
+    # ВСЯ база проекта, кроме самого генерируемого раздела (07.09.2026: не
+    # только разделы с флагом is_source — ППО/ТКР/ОДИ/ПБ тоже исходные данные)
+    exclude = [target] if target else None
 
     def run(query: str) -> list[dict]:
         try:
-            return retr.batch_search(project, [query], sections=srcs or None,
+            return retr.batch_search(project, [query], sections=None,
+                                     exclude_sections=exclude,
                                      top=int(cfg.get("gen.top_k", 12)))[0]
         except Exception as e:  # noqa: BLE001
             print(f"[gen] поиск: {e}", flush=True)
