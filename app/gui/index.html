@@ -200,11 +200,15 @@ async function delProject() {
   const typed = prompt(`Удалить объект «${P}»?\nПапка объекта уйдёт в _trash (можно вернуть вручную), база поиска будет удалена.\n\nДля подтверждения введите имя объекта:`);
   if (typed === null) return;
   if (typed.trim() !== P) return toast("Имя не совпало — удаление отменено.", true);
+  const victim = P;
+  // опрос вкладок (каждые 2,5 с) пересоздавал папку удаляемого объекта —
+  // на время удаления текущий объект снимаем
+  P = ""; localStorage.removeItem("strrag_prj");
   try {
-    const r = await api("project_delete", {name: P, confirm: typed.trim()});
+    const r = await api("project_delete", {name: victim, confirm: typed.trim()});
     toast("Объект удалён" + (r.trashed ? " (копия в _trash)" : ""));
-    await reloadProjects("");
   } catch (e) { err(e); }
+  await reloadProjects("");
 }
 async function exportProject() {
   if (!P) return toast("Объект не выбран.", true);

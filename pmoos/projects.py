@@ -36,14 +36,35 @@ def register_project(name: str) -> str:
     return name
 
 
+_GHOST_FILES = {"versions.json"}
+
+
+def _is_ghost_dir(d) -> bool:
+    """Папка-«призрак»: создана автоматически (paths.project_dir делает mkdir
+    при любом чтении состояния — опрос вкладок каждые 2,5 с) уже ПОСЛЕ
+    удаления объекта. В ней нет ничего, кроме служебной versions.json /
+    пустых подпапок. 07.09.2026: «не работает удаление объекта» — объект
+    уезжал в _trash, а через секунду «воскресал» пустым из такого призрака."""
+    for p in d.rglob("*"):
+        if p.is_file() and p.name not in _GHOST_FILES:
+            return False
+    return True
+
+
 def list_projects() -> list[str]:
-    """Имена проектов: из реестра + досканируем каталог projects/ (на всякий случай)."""
+    """Имена проектов: из реестра + досканируем каталог projects/ (на всякий случай).
+    Незарегистрированные папки-призраки (см. _is_ghost_dir) не показываются и
+    подчищаются."""
+    import shutil
     data = _read()
     names = set(data.values())
     proj_root = data_root() / "projects"
     if proj_root.exists():
         known_slugs = set(data.keys())
         for d in proj_root.iterdir():
+            if d.is_dir() and d.name not in known_slugs and _is_ghost_dir(d):
+                shutil.rmtree(d, ignore_errors=True)
+                continue
             if d.is_dir() and d.name not in known_slugs:
                 # пробуем восстановить настоящее имя из inventory.json
                 inv = d / "inventory.json"
@@ -96,6 +117,11 @@ def delete_project(name: str) -> dict:
     except Exception:  # noqa: BLE001 — базы могло и не быть
         pass
     forget_project(name)
+    # пока шло удаление, опрос интерфейса мог пересоздать пустую папку —
+    # подчищаем призрак сразу (и list_projects его тоже не покажет)
+    if d.exists() and _is_ghost_dir(d):
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
     return {"ok": True, "trashed": trashed}
 
 

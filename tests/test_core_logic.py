@@ -627,6 +627,19 @@ def test_project_export_import_delete(tmp_path, monkeypatch):
     assert r["ok"] and "Экспорт" not in PR.list_projects() and not pp["root"].exists()
     assert list((data_root() / "_trash").iterdir()), "удалённый объект уходит в _trash"
     assert new in PR.list_projects()
+    # 07.09.2026 «не работает удаление»: опрос интерфейса после удаления
+    # пересоздавал папку (project_paths → mkdir, versions.json) — объект
+    # «воскресал» пустым. Призрак не показывается и подчищается.
+    from pmoos.index.indexer import read_state
+    read_state("Экспорт")                       # как опрос index_state
+    project_paths("Экспорт")["versions"].write_text("{}", encoding="utf-8")
+    assert pp["root"].exists()
+    assert "Экспорт" not in PR.list_projects()
+    assert not pp["root"].exists(), "папка-призрак должна быть подчищена"
+    # а настоящий незарегистрированный объект (с данными) по-прежнему виден
+    ghost = project_paths("Живой")
+    ghost["inventory"].write_text(_json.dumps({"project": "Живой"}), encoding="utf-8")
+    assert "Живой" in PR.list_projects()
 
 
 def test_inactive_versions_excluded_from_search(tmp_path, monkeypatch):

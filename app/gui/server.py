@@ -560,7 +560,13 @@ def api_project_import(q, body_bytes):
 # ───────────── ВЕРСИИ ДОКУМЕНТОВ (ТЗ: видно и выбрано, что использовать) ─────────────
 def api_versions(q, body):
     from pmoos.versioning.versions import analyze_versions, inactive_files
+    from pmoos.paths import data_root, slugify
     p = q["project"]
+    pdir = data_root() / "projects" / slugify(p)
+    if not (pdir / "inventory.json").exists() and not (pdir / "index_state.json").exists():
+        # объекта нет / ещё ничего не загружено — не создаём versions.json
+        # (иначе удалённый объект «воскресает» папкой-призраком)
+        return {"groups": [], "warnings": [], "inactive": []}
     data = analyze_versions(p, object_type=_ot(p))
     groups = []
     for gkey, g in (data.get("groups") or {}).items():
