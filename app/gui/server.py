@@ -379,15 +379,47 @@ def api_answers(q, body):
     from pmoos.pipeline.block1_answers import load_answers
     out = []
     for a in (load_answers(q["project"]) or {}).get("answers", []):
+        srcs = a.get("sources") or []
+        unverified = False
+        if not srcs:
+            # ИИ не атрибутировал фрагменты — показываем найденные поиском,
+            # честно помечая, что они не подтверждены ответом
+            srcs = (a.get("retrieved_sources") or [])[:4]
+            unverified = bool(srcs)
         out.append({k: a.get(k, "") for k in (
             "number", "remark", "answer", "status", "category", "oos_volume",
             "edit_location", "edit_was", "edit_shall", "missing_data",
-            "correction", "error")}
+            "correction", "error", "confidence")}
             | {"needs_ai": bool(a.get("needs_ai")),
+               "low_support": bool(a.get("low_support")),
+               "sources_unverified": unverified,
                "attachments": a.get("attachments") or [],
-               "sources": [{"file": s.get("file", ""), "loc": s.get("loc", "")}
-                           for s in (a.get("sources") or [])[:6]]})
+               "edit_was_src": a.get("edit_was_src") or {},
+               "sources": [{"file": s.get("file", ""), "loc": s.get("loc", ""),
+                            "section": s.get("section", ""),
+                            "snippet": s.get("snippet", "")}
+                           for s in srcs[:6]]})
     return {"answers": out}
+
+
+def api_answer_edit(q, body):
+    """Ручная правка ответа: ответ / где / было / стало / приложить / не хватает."""
+    from pmoos.pipeline.block1_answers import edit_answer
+    a = edit_answer(body["project"], str(body.get("number", "")),
+                    body.get("fields") or {})
+    return {"ok": True, "status": a.get("status")}
+
+
+def api_page_scan(q, body):
+    """PNG страницы-источника по файлу и месту (для ИСТОЧНИКОВ ответа и «как
+    было»). Исходники после индексации удаляются — тогда доступен только текст."""
+    from pmoos.data import registry as R
+    png = R.render_source_page(q["project"], urllib.parse.unquote(q.get("file", "")),
+                               urllib.parse.unquote(q.get("loc", "")))
+    if not png:
+        raise FileNotFoundError("лист недоступен: исходник удалён после индексации "
+                                "(доступен текст фрагмента)")
+    return ("image/png", png)
 
 
 def api_decide(q, body):
@@ -523,8 +555,10 @@ def api_corr_write(q, body):
     if not srcs:
         raise FileNotFoundError("сначала загрузите исходные тома (.docx)")
     outs, failed = write_corrected_volumes(p, [str(s) for s in srcs])
+    from pmoos.output.docx_writer import last_report
     return {"outputs": [str(o) for o in outs],
-            "names": [o.name for o in outs], "failed": failed}
+            "names": [o.name for o in outs], "failed": failed,
+            "report": last_report(p)}
 
 
 def api_corr_delete(q, body):
@@ -757,7 +791,8 @@ ROUTES_JSON = {
 ROUTES_RAW = {"upload": api_upload, "remarks_upload": api_remarks_upload,
               "uprza_import": api_uprza_import, "corr_upload": api_corr_upload,
               "project_import": api_project_import}
-ROUTES_BIN = {"scan": api_scan}
+ROUTES_BIN = {"scan": api_scan, "page_scan": api_page_scan}
+ROUTES_JSON["answer_edit"] = api_answer_edit
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -799,7 +834,7 @@ class Handler(BaseHTTPRequestHandler):
             if name in ("info", "index_state", "registry", "answers",
                         "answers_state", "uprza", "scan", "upload",
                         "remarks_upload", "uprza_import", "corr_upload",
-                        "corr_list", "versions", "gen_state"):
+                        "corr_list", "versions", "gen_state", "page_scan"):
                 if not q.get("project", "").strip():
                     raise ValueError("не выбран объект/проект — создайте его "
                                      "кнопкой «+ Новый»")

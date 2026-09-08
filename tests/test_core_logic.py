@@ -427,8 +427,12 @@ def test_corrections_placement_rules(tmp_path, monkeypatch):
                                                       "таблице 5.4 по ФККО."}])
     e3 = plan3[0]
     assert len(ix3.heads) == 2
-    assert e3["mode"] == "insert" and "ОТХОДОВ" in e3["par_text"], e3
-    assert "по теме" in e3["via"]
+    # 08.09.2026 «опять куда попало»: угадывание раздела «по теме» без цитаты
+    # больше НЕ вставляет в текст — правка идёт в раздел ручного размещения с
+    # подсказкой, какой раздел вероятен (пункт 5.1 в томе-конверсии не найден)
+    assert e3["mode"] == "manual" and "ОТХОДОВ" in e3.get("hint", ""), e3
+    from pmoos.output.docx_writer import STRICT_PLACEMENT as _strict
+    assert _strict is True
 
 
 def test_apply_safety_rules(tmp_path, monkeypatch):
@@ -599,6 +603,124 @@ def test_empty_answer_replaced_by_stub_and_reasked(tmp_path, monkeypatch):
     src = open(B.__file__, encoding="utf-8").read()
     assert 'not a.get("needs_ai")' in src, "резюм должен переспрашивать заглушки"
     assert 'all(a.get("needs_ai") for a in pack_ans)' in src, "мёртвый ИИ должен останавливать прогон"
+
+
+def test_answer_edit_and_was_source(tmp_path, monkeypatch):
+    # ТЗ 08.09: таблица ответов с ручной правкой; «как было» — с томом/страницей/текстом
+    import json as _json
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.pipeline import block1_answers as B
+    hits = [{"text": "Численность работающих в период строительства составляет 82 человека "
+                     "согласно календарному графику.", "payload": {"file": "ПОС1.pdf",
+                     "loc": "стр. 93", "section": "POS"}},
+            {"text": "Прочий текст про отходы", "payload": {"file": "ООС.pdf", "loc": "стр. 5"}}]
+    src = B._locate_in_hits("численность работающих в период строительства составляет 82 человека", hits)
+    assert src and src["file"] == "ПОС1.pdf" and src["loc"] == "стр. 93" and "82 человека" in src["snippet"]
+    assert B._locate_in_hits("совершенно другой текст про климат региона", hits) is None
+    assert B._locate_in_hits("короткий", hits) is None
+    from pmoos.paths import project_paths
+    pp = project_paths("Ред")
+    pp["answers"].write_text(_json.dumps({"answers": [
+        {"number": "1", "remark": "А", "answer": "старый", "status": "proposed", "needs_ai": True,
+         "edit_shall": "", "attachments": []}]}, ensure_ascii=False), encoding="utf-8")
+    a = B.edit_answer("Ред", "1", {"answer": "новый ответ", "edit_was": "было так",
+                                   "edit_shall": "стало так", "edit_location": "Том 6.1, п. 2",
+                                   "attachments": "договор; справка ЦГМС", "missing_data": ""})
+    assert a["status"] == "edited" and a["user_answer"] == "новый ответ" and a["needs_ai"] is False
+    assert a["attachments"] == ["договор", "справка ЦГМС"]
+    saved = B.load_answers("Ред")["answers"][0]
+    assert saved["edit_shall"] == "стало так" and saved["status"] == "edited"
+    assert pp["decisions"].exists() and "edited" in pp["decisions"].read_text(encoding="utf-8")
+    import pytest as _pt
+    with _pt.raises(KeyError):
+        B.edit_answer("Ред", "99", {"answer": "x"})
+
+
+def test_strict_placement_reserved_appendix_and_final_check(tmp_path, monkeypatch):
+    # ТЗ 08.09: «опять куда попало» → правка только по подтверждённому месту;
+    # недостающие документы → зарезервированные листы; финал-проверка
+    import json as _json
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from docx import Document
+    from pmoos.paths import project_paths
+    from pmoos.output import docx_writer as DW
+    assert DW.STRICT_PLACEMENT is True
+    d = Document()
+    d.add_paragraph("1. Введение")
+    d.add_paragraph("Проектом предусмотрено строительство автодороги.")
+    d.add_paragraph("2. Охрана атмосферного воздуха")
+    d.add_paragraph("Расчёт выбросов выполнен по методике 2015 года для 12 источников.")
+    d.add_paragraph("3. Отходы")
+    d.add_paragraph("Отходы строительства вывозятся на полигон.")
+    src = tmp_path / "Том 6.1.docx"
+    d.save(str(src))
+    pp = project_paths("Стр")
+    pp["answers"].write_text(_json.dumps({"answers": [
+        {"number": "1", "status": "accepted", "remark": "Уточнить методику расчёта выбросов",
+         "edit_location": "Том 6.1, п. 2", "edit_was": "Расчёт выбросов выполнен по методике 2015 года для 12 источников",
+         "edit_shall": "Расчёт выбросов выполнен по методике 2020 года для 14 источников.",
+         "attachments": ["Справка о фоновых концентрациях"]},
+        {"number": "2", "status": "accepted", "remark": "Представить сведения о шумозащитных экранах",
+         "edit_location": "Том 6.1, раздел о шуме", "edit_was": "",
+         "edit_shall": "Предусмотрены шумозащитные экраны высотой 3 м.", "attachments": ["Расчёт шума"]},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    outs, failed = DW.write_corrected_volumes("Стр", [str(src)])
+    assert outs and not failed
+    txt = "\n".join(p.text for p in Document(str(outs[0])).paragraphs)
+    assert "методике 2020 года" in txt and "[изм. по замечанию №1]" in txt
+    # №2 без подтверждённого места — НЕ вставлен «по теме», а ушёл в ручной раздел
+    assert "ТРЕБУЮЩИЕ РУЧНОГО РАЗМЕЩЕНИЯ" in txt and "№2. " in txt
+    assert txt.count("[изм. по замечанию №2]") == 0
+    assert "ЗАРЕЗЕРВИРОВАНО" in txt and "Справка о фоновых концентрациях" in txt and "Расчёт шума" in txt
+    rep = DW.last_report("Стр")
+    rows = {r["number"]: r for r in rep["volumes"][0]["rows"]}
+    assert rows["1"]["status"] == "✓ по месту" and rows["2"]["status"] == "вручную"
+    assert rep["stats"]["reserved"] == 2 and rep["stats"]["missing"] == 0
+    assert (project_paths("Стр")["out"] / "КОРР_финал-проверка.docx").exists()
+
+
+def test_section_gen_form_and_empty_subsections(tmp_path, monkeypatch):
+    # ТЗ 08.09: генерация ООС по форме эталона, по подразделам; где данных нет —
+    # подраздел пустой с перечнем, что добавить; приложения зарезервированы
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.pipeline import section_gen as G
+    units = G.form_units("OOS")
+    assert len(units) >= 25 and units[0]["n"] == "1"
+    assert any(u["n"] == "5.4" for u in units) and any(u["n"] == "11.2" for u in units)
+    assert len(G.form_units("IEI")) == 8
+    ok, need, rest = G._parse_status("СТАТУС: НЕДОСТАТОЧНО — нужно: расчёт выбросов\nтекст")
+    assert ok is False and "расчёт выбросов" in need
+    ok, need, rest = G._parse_status("СТАТУС: ДОСТАТОЧНО\nАбзац [ПЗ.docx, с. 1]")
+    assert ok is True and rest.startswith("Абзац")
+    from pmoos.projects import register_project
+    register_project("Форма")
+    calls = []
+
+    def retrieve(q):
+        if "Введение" in q or "Проектные решения" in q:
+            return [{"payload": {"file": "ПЗ.docx", "loc": "с. 1", "text": "Объект: автодорога, заказчик ООО Т"}}]
+        if "Климат" in q:
+            return [{"payload": {"file": "ИЭИ.pdf", "loc": "с. 9", "text": "климат умеренный"}}]
+        return []
+
+    def chat(cfg, msgs, **kw):
+        calls.append(msgs[1]["content"])
+        if "Климат" in msgs[1]["content"]:
+            return "СТАТУС: НЕДОСТАТОЧНО — нужно: справка ЦГМС с розой ветров"
+        return "СТАТУС: ДОСТАТОЧНО\nТекст по данным [ПЗ.docx, с. 1]."
+    out = G.run_section_gen("Форма", "OOS", retrieve=retrieve, chat=chat, object_type="площадной")
+    from docx import Document
+    doc = Document(str(out))
+    txt = "\n".join(p.text for p in doc.paragraphs)
+    assert "Текст по данным [ПЗ.docx, с. 1]" in txt
+    assert "ПОДРАЗДЕЛ НЕ СФОРМИРОВАН" in txt and "справка ЦГМС" in txt
+    assert "Для генерации добавьте" in txt and "Приложения (текстовая часть)" in txt
+    assert "ЗАРЕЗЕРВИРОВАНО" in txt and "Ситуационный план" in txt
+    assert "что добавить, чтобы сформировать пустые подразделы" in txt
+    # ИИ вызывался только там, где были фрагменты (3 подраздела), не на пустых
+    assert len(calls) == 3 and all("ЧТО ДОЛЖЕН СОДЕРЖАТЬ" in c for c in calls)
+    st = G.read_state("Форма")
+    assert st["status"] == "done" and st["done"] == st["total"] == len(G.form_units("OOS"))
 
 
 def test_answers_search_whole_base(monkeypatch):

@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -681,6 +682,12 @@ class _Index:
         return -1
 
 
+# СТРОГАЯ РАСКЛАДКА (08.09.2026): правка встаёт в том ТОЛЬКО по подтверждённому
+# месту — найденное «было», цитата замечания или явный заголовок пункта/таблицы
+# из «где править». Тематическое угадывание раздела выключено.
+STRICT_PLACEMENT = True
+
+
 def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
     """ПЛАН правок для одного тома: где и что менять. Общий для preview и записи.
     Элемент: {number, mode: replace|insert|manual|skip, idx, k, score,
@@ -698,7 +705,10 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
         remark = decode_garbled((a.get("remark") or "").strip())
         e = {"number": num, "mode": "manual", "idx": -1, "k": 0, "score": 0.0,
              "par_text": "", "shall": shall, "location": loc,
-             "is_table": _is_md_table(shall), "via": ""}
+             "is_table": _is_md_table(shall), "via": "",
+             # документы, которых не хватает, — под них резервируется место
+             # в конце тома (ТЗ 08.09: «оставить пустое место и выделить»)
+             "attachments": [str(x) for x in (a.get("attachments") or []) if str(x).strip()]}
         if not shall:
             e["mode"] = "skip"
             plan.append(e)
@@ -754,8 +764,10 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
                 # самый точный ориентир, пробуем его первым
                 quoted = " ".join(_re2.findall(r"[«\"„]([^»\"“]{4,80})[»\"“]", loc))
                 ti = -1
+                explicit = False      # раздел НАЗВАН в «где править» (в кавычках)
                 if quoted:
                     ti, tend, ts, ttitle = ix.find_topic_heading(_sig_words(quoted), strict=True)
+                    explicit = ti >= 0
                 if ti < 0:
                     topic = _sig_words(loc) | _sig_words(remark)
                     ti, tend, ts, ttitle = ix.find_topic_heading(topic)
@@ -779,11 +791,19 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
                                      via=f"цитата замечания в разделе «{ttitle[:40]}»",
                                      par_text=decode_garbled(" ".join(ix.text[i5:i5 + k5]))[:160])
                             placed = True
-                    if not placed and ti not in used:
+                    if not placed and ti not in used and (explicit or not STRICT_PLACEMENT):
+                        # после заголовка раздела: если раздел НАЗВАН в «где
+                        # править» — это явный якорь; угадывание «по теме» без
+                        # подтверждения цитатой ОТКЛЮЧЕНО (08.09.2026: «опять
+                        # куда попало») — такие правки идут в раздел ручного
+                        # размещения с указанием раздела-кандидата
                         used.add(ti)
                         e.update(mode="insert", idx=ti, k=1, score=round(ts, 2),
-                                 via=f"в раздел «{ttitle[:40]}» (по теме)",
+                                 via=(f"в раздел «{ttitle[:40]}» (назван в «где править»)"
+                                      if explicit else f"в раздел «{ttitle[:40]}» (по теме)"),
                                  par_text=ttitle)
+                    elif not placed:
+                        e["hint"] = f"вероятный раздел: «{ttitle[:60]}»"
             # 5) по ТЕКСТУ ЗАМЕЧАНИЯ по всему тому — только при высоком сходстве
             if e["mode"] == "manual" and remark:
                 i3, k3, s3 = ix.find(remark, used)
@@ -954,9 +974,12 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
         stats[mode] += 1
 
     if manual:
+        from docx.enum.text import WD_BREAK
+        doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
         h = doc.add_paragraph()
-        hr = h.add_run("ПРАВКИ ПО ЗАМЕЧАНИЯМ, ТРЕБУЮЩИЕ РУЧНОГО ВНЕСЕНИЯ "
-                       "(место в томе автоматически не найдено)")
+        hr = h.add_run("ПРАВКИ ПО ЗАМЕЧАНИЯМ, ТРЕБУЮЩИЕ РУЧНОГО РАЗМЕЩЕНИЯ "
+                       "(подтверждённое место в томе не найдено — перенести в "
+                       "указанный пункт и удалить этот раздел)")
         _std_run(hr)
         hr.bold = True
         for e in manual:
@@ -964,14 +987,137 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
             r1 = p.add_run(f"№{e['number']}. ")
             _std_run(r1)
             r1.bold = True
-            if e["location"]:
-                r2 = p.add_run(f"Где: {e['location']}. ")
-                _std_run(r2)
-                r2.italic = True
+            where = e["location"] or "место в замечании не указано"
+            if e.get("hint"):
+                where += f" ({e['hint']})"
+            r2 = p.add_run(f"Куда: {where}. ")
+            _std_run(r2)
+            r2.italic = True
             r3 = p.add_run(e["shall"])
             _std_run(r3)
             _yellow(r3)
+    # ЗАРЕЗЕРВИРОВАННЫЕ ПРИЛОЖЕНИЯ: под каждый недостающий документ — отдельный
+    # лист с выделенной пустой рамкой-заглушкой (ТЗ 08.09)
+    reserved = [(e["number"], att) for e in plan if e["mode"] != "skip"
+                for att in (e.get("attachments") or [])]
+    stats["reserved"] = len(reserved)
+    if reserved:
+        from docx.enum.text import WD_BREAK
+        seen = set()
+        n = 0
+        for num, att in reserved:
+            key = att.strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            n += 1
+            doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+            h = doc.add_paragraph()
+            hr = h.add_run(f"ПРИЛОЖЕНИЕ (ЗАРЕЗЕРВИРОВАНО) №{n} — по замечанию №{num}")
+            _std_run(hr)
+            hr.bold = True
+            _yellow(hr)
+            p = doc.add_paragraph()
+            r = p.add_run(f"Документ: {att}")
+            _std_run(r)
+            r.bold = True
+            p2 = doc.add_paragraph()
+            r2 = p2.add_run("МЕСТО ДЛЯ ВСТАВКИ ДОКУМЕНТА ПОСЛЕ ЕГО ПОЛУЧЕНИЯ. "
+                            "Заглушку удалить, документ вложить сюда, ссылку в тексте "
+                            "тома сохранить.")
+            _std_run(r2)
+            r2.italic = True
+            _yellow(r2)
+            for _ in range(3):
+                pe = doc.add_paragraph()
+                re_ = pe.add_run("_" * 70)
+                _std_run(re_)
+                _yellow(re_)
     return stats
+
+
+_REPORT_NAME = "КОРР_финал-проверка"
+
+
+def verify_corrected(out_path, plan: list[dict]) -> list[dict]:
+    """ФИНАЛ-ПРОВЕРКА тома после записи (ТЗ 08.09): по каждому ответу — встала
+    ли правка (метка «[изм. по замечанию №N]» ровно один раз), ушла ли в раздел
+    ручного размещения, зарезервированы ли приложения."""
+    from docx import Document
+    d = Document(str(out_path))
+    texts = [p.text for p in _all_paragraphs(d)]
+    full = "\n".join(texts)
+    rows = []
+    for e in plan:
+        num = str(e["number"])
+        mark = f"[изм. по замечанию №{num}]"
+        cnt = full.count(mark)
+        if e["mode"] == "skip":
+            status, note = "пропуск", "у ответа нет текста правки («стало»)"
+        elif e["mode"] == "manual":
+            ok = f"№{num}. " in full
+            status = "вручную" if ok else "✗ НЕ ВНЕСЕНО"
+            note = ("в разделе ручного размещения" + (f"; {e['hint']}" if e.get("hint") else "")
+                    if ok else "запись не найдена")
+        else:
+            if cnt == 1:
+                status, note = "✓ по месту", f"{e['mode']}: {e.get('via', '')}"
+            elif cnt == 0:
+                status, note = "✗ НЕ ВНЕСЕНО", "метка правки в томе не найдена"
+            else:
+                status, note = "⚠ дубль", f"метка встречается {cnt} раз"
+        rows.append({"number": num, "mode": e["mode"], "status": status, "note": note,
+                     "where": (e.get("par_text") or e.get("location") or "")[:120],
+                     "attachments": list(e.get("attachments") or [])})
+    return rows
+
+
+def _write_report(project: str, report: dict) -> Path:
+    """Отчёт финал-проверки: JSON (для интерфейса) + docx-таблица (для папки out)."""
+    out_dir = project_paths(project)["out"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"{_REPORT_NAME}.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    doc = Document()
+    from .common import set_default_font, add_title, add_heading
+    set_default_font(doc)
+    add_title(doc, "Финал-проверка откорректированного раздела")
+    doc.add_paragraph(f"Объект: {project}. Сформировано: {report.get('at', '')}. "
+                      f"Итог: по месту {report['stats'].get('replace', 0) + report['stats'].get('insert', 0)}, "
+                      f"вручную {report['stats'].get('manual', 0)}, "
+                      f"не внесено {report['stats'].get('missing', 0)}, "
+                      f"приложений зарезервировано {report['stats'].get('reserved', 0)}.")
+    for vol in report.get("volumes", []):
+        add_heading(doc, vol["volume"], level=1)
+        rows = vol.get("rows") or []
+        if not rows:
+            doc.add_paragraph("Правок для этого тома нет.")
+            continue
+        tbl = doc.add_table(rows=1, cols=4)
+        try:
+            tbl.style = "Table Grid"
+        except KeyError:
+            pass
+        for j, hdr in enumerate(("№", "Статус", "Куда / способ", "Приложения")):
+            tbl.rows[0].cells[j].text = hdr
+        for r in rows:
+            c = tbl.add_row().cells
+            c[0].text, c[1].text = r["number"], r["status"]
+            c[2].text = (r["note"] + (f"\n{r['where']}" if r["where"] else "")).strip()
+            c[3].text = "; ".join(r["attachments"])
+    p = out_dir / f"{_REPORT_NAME}.docx"
+    doc.save(str(p))
+    return p
+
+
+def last_report(project: str) -> dict:
+    p = project_paths(project)["out"] / f"{_REPORT_NAME}.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def repair_structure(doc) -> int:
@@ -1111,6 +1257,9 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
     out_dir.mkdir(parents=True, exist_ok=True)
     outs: list[Path] = []
     failed: list[str] = []
+    report: dict = {"at": datetime.now().isoformat(timespec="seconds"), "volumes": [],
+                    "stats": {"replace": 0, "insert": 0, "manual": 0, "skip": 0,
+                              "missing": 0, "reserved": 0}}
     for si, src in enumerate(srcs):
         mine = _volume_answers(answers, srcs, si, src)
         try:
@@ -1119,6 +1268,7 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
             raise
         except Exception as e:  # noqa: BLE001
             failed.append(f"{src.name}: {e}")
+            report["volumes"].append({"volume": src.name, "error": str(e)[:200], "rows": []})
             print(f"[m5] ПРОПУЩЕН {src.name}: {e}", flush=True)
             continue
         # документ сейчас будет МУТИРОВАН — из кэша вон ДО применения (ревью:
@@ -1138,9 +1288,27 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
         for k in [k for k in _PLAN_CACHE if k[0] == str(src)]:
             _PLAN_CACHE.pop(k, None)
         outs.append(out)
+        # ФИНАЛ-ПРОВЕРКА записанного тома (ТЗ 08.09)
+        try:
+            rows = verify_corrected(out, plan)
+        except Exception as e:  # noqa: BLE001
+            rows = [{"number": "—", "mode": "", "status": "⚠ проверка не выполнена",
+                     "note": str(e)[:160], "where": "", "attachments": []}]
+        for r in rows:
+            if r["status"].startswith("✗"):
+                report["stats"]["missing"] += 1
+        for k in ("replace", "insert", "manual", "skip", "reserved"):
+            report["stats"][k] += int(stats.get(k, 0))
+        report["volumes"].append({"volume": src.name, "output": out.name, "rows": rows,
+                                  "stats": stats})
         print(f"[m5] {src.name}: замен {stats['replace']}, вставок {stats['insert']}, "
-              f"вручную {stats['manual']} → {out.name}", flush=True)
+              f"вручную {stats['manual']}, приложений зарезервировано "
+              f"{stats.get('reserved', 0)} → {out.name}", flush=True)
     if failed and not outs:
         raise RuntimeError("Ни один том не удалось открыть: " + "; ".join(failed)
                            + ". Откройте файлы в Word и пересохраните как .docx.")
+    try:
+        report["report_docx"] = str(_write_report(project, report))
+    except Exception as e:  # noqa: BLE001
+        print(f"[m5] отчёт финал-проверки не записан: {e}", flush=True)
     return outs, failed

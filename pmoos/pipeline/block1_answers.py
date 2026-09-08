@@ -528,6 +528,9 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
             "edit_location": data.get("edit_location", ""),
             "edit_was": data.get("edit_was", ""),
             "edit_shall": data.get("edit_shall", ""),
+            # ГДЕ НАЙДЕНО «БЫЛО» (ТЗ 08.09: «как было — том, страница, текст
+            # страницы»): фрагмент контекста, в котором цитата действительно есть
+            "edit_was_src": _locate_in_hits(data.get("edit_was", ""), hits) or {},
             "attachments": data.get("attachments", []),
             "confidence": confidence,
             "missing_data": data.get("missing_data", ""),
@@ -703,6 +706,73 @@ def _memorize(project: str, data: dict, number: str) -> None:
                        project=project, number=number)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _locate_in_hits(text: str, hits: list[dict], limit: int = 8) -> dict | None:
+    """В каком фрагменте контекста встречается цитата «было»: файл, место,
+    выдержка страницы вокруг найденного. Точное вхождение — 1.0; иначе доля
+    совпавших значимых слов (порог 0.5)."""
+    import re as _re
+    t = _re.sub(r"\s+", " ", (text or "")).strip().lower()
+    if len(t) < 12:
+        return None
+    words = set(_re.findall(r"[а-яёa-z0-9]{4,}", t))
+    best, best_score, best_pos = None, 0.0, 0
+    for h in hits[:limit]:
+        ht = _re.sub(r"\s+", " ", (h.get("text") or ""))
+        htl = ht.lower()
+        pos = htl.find(t[:80])
+        if pos >= 0:
+            score = 1.0
+        else:
+            hw = set(_re.findall(r"[а-яёa-z0-9]{4,}", htl))
+            score = len(words & hw) / max(1, len(words))
+            first = next((w for w in _re.findall(r"[а-яёa-z0-9]{4,}", t) if w in hw), "")
+            pos = htl.find(first) if first else 0
+        if score > best_score:
+            best, best_score, best_pos = h, score, max(0, pos)
+    if not best or best_score < 0.5:
+        return None
+    pl = best.get("payload") or {}
+    ht = _re.sub(r"\s+", " ", (best.get("text") or ""))
+    lo = max(0, best_pos - 160)
+    return {"file": pl.get("file", ""), "loc": pl.get("loc", ""),
+            "section": pl.get("section", ""), "score": round(best_score, 2),
+            "snippet": ht[lo:lo + 600]}
+
+
+_EDIT_FIELDS = ("answer", "correction", "edit_location", "edit_was", "edit_shall",
+                "missing_data")
+
+
+def edit_answer(project: str, number: str, fields: dict) -> dict:
+    """РУЧНАЯ ПРАВКА ответа (ТЗ 08.09: таблица с возможностью редактирования):
+    ответ / где / было / стало / приложить / не хватает. Статус → edited,
+    user_answer = ответ; заглушка «без ИИ» снимается. След — в decisions.jsonl."""
+    import re as _re
+    data = load_answers(project)
+    by_num = {str(a.get("number")): a for a in data.get("answers", [])}
+    a = by_num.get(str(number))
+    if a is None:
+        raise KeyError(f"замечание №{number} не найдено")
+    for k in _EDIT_FIELDS:
+        if k in fields:
+            a[k] = str(fields.get(k) or "").strip()
+    if "attachments" in fields:
+        att = fields.get("attachments") or []
+        if isinstance(att, str):
+            att = [x.strip() for x in _re.split(r"[;\n]", att) if x.strip()]
+        a["attachments"] = [str(x) for x in att]
+    a["status"] = "edited"
+    a["user_answer"] = a.get("answer", "")
+    a["needs_ai"] = False
+    a["edited_at"] = datetime.now().isoformat(timespec="seconds")
+    _save(project, data)
+    dec = project_paths(project)["decisions"]
+    with dec.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(_audit_entry(data, str(number), "edited", a["user_answer"]),
+                           ensure_ascii=False) + "\n")
+    return a
 
 
 def set_decisions(project: str, decisions: list[dict]) -> dict:

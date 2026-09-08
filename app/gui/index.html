@@ -486,6 +486,7 @@ async function renderAnswers() {
   try { d = await api("answers"); } catch (e) { err(e); return; }
   const stRu = {proposed:"⚠ новый", accepted:"принят", edited:"правка", rejected:"отклонён"};
   const task = await api("ai_task").catch(() => ({value: ""}));
+  const noAi = d.answers.filter(a => a.needs_ai || !(a.answer||"").trim()).length;
   $("tab3").innerHTML = `
   <div class="card"><h3>Ответы на замечания экспертизы</h3>
     <button class="sec" onclick="$('remInp').click()">📄 Файл замечаний…</button>
@@ -496,9 +497,9 @@ async function renderAnswers() {
     <button class="sec" onclick="ansCtl('stop')" title="после текущего пакета, всё готовое сохранится">⏹ Стоп</button>
     <button class="sec" onclick="ansCtl('stop', true)" title="немедленно: текущий пакет не сохранится">✋ Прервать</button>
     <button class="sec" onclick="decideAll('accepted')">Принять все непустые</button>
-    ${(() => { const n = d.answers.filter(a => a.needs_ai || !(a.answer||"").trim()).length; return n
-      ? `<div class="warn">⚠ Без ответа ИИ: ${n} (показаны варианты-заглушки). Проверьте модель во вкладке СЕРВИС и нажмите
-         <button class="act" onclick="ansCtl('start')">🔁 Дозаполнить ${n} ответов</button></div>` : ""; })()}
+    <button class="sec" onclick="checkPlacement()" title="куда встанет каждая правка в загруженных томах (ВЫГРУЗКА)">🔎 Проверить размещение правок</button>
+    ${noAi ? `<div class="warn">⚠ Без ответа ИИ: ${noAi} (показаны варианты-заглушки). Проверьте модель во вкладке СЕРВИС и нажмите
+         <button class="act" onclick="ansCtl('start')">🔁 Дозаполнить ${noAi} ответов</button></div>` : ""}
     <div class="bar"><i id="ansBar"></i></div>
     <div class="msg" id="ansMsg">—</div>
     <details style="margin-top:6px"><summary>📝 Доп. задание ИИ (необязательно)</summary>
@@ -507,25 +508,92 @@ async function renderAnswers() {
     </details>
   </div>
   <div class="split">
-    <div class="l card" style="max-height:72vh;overflow:auto">
-      <table><thead><tr><th>№</th><th>Замечание</th><th style="width:90px">Статус</th></tr></thead>
+    <div class="l card" style="max-height:78vh;overflow:auto;flex:1">
+      <table><thead><tr><th>№</th><th>Замечание</th><th>Ответ</th><th style="width:86px">Статус</th><th style="width:110px">Правка</th></tr></thead>
       <tbody>${d.answers.map((a,i) => `
         <tr id="ansRow${i}" onclick="showAns(${i})" style="cursor:pointer">
-          <td>${esc(a.number)}</td><td>${esc((a.remark||"").slice(0,90))}</td>
+          <td>${esc(a.number)}</td><td class="msg">${esc((a.remark||"").slice(0,110))}</td>
+          <td class="msg">${esc((a.answer||"").slice(0,110))}</td>
           <td><span class="badge ${a.status==="accepted"?"g":a.status==="proposed"?"w":""}">${(a.needs_ai || !(a.answer||"").trim()) ? "⚠ без ИИ" : (stRu[a.status]||"?")}</span></td>
-        </tr>`).join("") || "<tr><td colspan=3>ответов пока нет — загрузите файл замечаний и нажмите «① Найти ответы»</td></tr>"}
+          <td class="msg" id="ansPl${i}">${a.edit_shall ? (a.edit_location ? esc(a.edit_location.slice(0,40)) : "есть") : "—"}</td>
+        </tr>`).join("") || "<tr><td colspan=5>ответов пока нет — загрузите файл замечаний и нажмите «① Найти ответы»</td></tr>"}
       </tbody></table>
     </div>
-    <div class="r">
+    <div class="r card" style="max-height:78vh;overflow:auto;flex:1.5">
       <div id="ansDetail">выберите замечание слева</div>
-      <div style="margin-top:6px">
-        <button class="act" onclick="decideSel('accepted')">✅ Принять</button>
-        <button class="sec" onclick="decideSel('rejected')">✖ Отклонить</button>
-      </div>
     </div>
   </div>`;
-  window._ans = d.answers; window._ansSel = -1;
+  window._ans = d.answers; window._ansSel = -1; window._placement = window._placement || {};
   pollStates();
+}
+function srcLine(s, unverified) {
+  const img = `/api/page_scan?project=${encodeURIComponent(P)}&file=${encodeURIComponent(s.file||"")}&loc=${encodeURIComponent(s.loc||"")}`;
+  return `<div style="margin:4px 0;padding:4px 6px;border-left:3px solid var(--line)">
+    <b>${esc(s.file||"—")}</b> ${esc(s.loc||"")}${s.section ? ` <span class="mut">(${esc(s.section)})</span>` : ""}
+    ${unverified ? ' <span class="badge w">найдено поиском, ИИ не подтвердил</span>' : ""}
+    <button class="sec" data-scan="${esc(img)}" style="padding:1px 6px">🖼 лист</button>
+    ${s.snippet ? `<div class="msg" style="white-space:pre-wrap">${esc(s.snippet)}</div>` : ""}
+  </div>`;
+}
+function showAns(i) {
+  const a = window._ans[i];
+  window._ansSel = i;
+  document.querySelectorAll("[id^=ansRow]").forEach(r => r.classList.remove("sel"));
+  $("ansRow"+i).classList.add("sel");
+  const pl = (window._placement||{})[String(a.number)];
+  const ws = a.edit_was_src || {};
+  const ta = (id, v, rows) => `<textarea id="${id}" rows="${rows}" style="width:100%">${esc(v||"")}</textarea>`;
+  $("ansDetail").innerHTML = `
+    <h3>ЗАМЕЧАНИЕ №${esc(a.number)}${a.oos_volume ? ` <span class="mut">· том: ${esc(a.oos_volume)}</span>` : ""}
+      <span class="badge ${a.status==="accepted"?"g":a.status==="proposed"?"w":""}">${esc(a.status)}</span></h3>
+    <div style="white-space:pre-wrap;background:#f6f8fb;padding:6px;border-radius:6px">${esc(a.remark)}</div>
+    ${a.needs_ai && a.error ? `<div class="warn">ПРИЧИНА ОТКАЗА ИИ: ${esc(a.error)}</div>` : ""}
+    ${a.low_support ? `<div class="warn">⚠ Поиск не нашёл опоры в ПД — ответ проверить особенно внимательно.</div>` : ""}
+    <h3>ОТВЕТ</h3>${ta("edAnswer", a.answer, 6)}
+    <div class="mut">ИСТОЧНИКИ ответа (том · место · текст фрагмента; «🖼 лист» — страница, если исходник ещё в объекте):</div>
+    ${(a.sources||[]).map(s => srcLine(s, a.sources_unverified)).join("") || "<div class='msg'>источники не указаны</div>"}
+    <h3>КАК БЫЛО</h3>${ta("edWas", a.edit_was, 3)}
+    <div class="mut">где найдено «было»:</div>
+    ${ws.file ? srcLine(ws, false) : "<div class='msg'>цитата в фрагментах контекста не найдена — проверьте текст «было» по тому</div>"}
+    <label>ГДЕ ПРАВИТЬ (том, пункт, таблица): <input type="text" id="edLoc" value="${esc(a.edit_location)}" style="width:100%"></label>
+    <h3>КАК ДОЛЖНО БЫТЬ</h3>${ta("edShall", a.edit_shall, 5)}
+    <div class="mut">встанет в том: ${pl ? esc(pl) : "нажмите «🔎 Проверить размещение правок» (нужны загруженные тома во ВЫГРУЗКЕ)"}</div>
+    <label>ПРИЛОЖИТЬ (документы через «;»): <input type="text" id="edAtt" value="${esc((a.attachments||[]).join("; "))}" style="width:100%"></label>
+    <label>НЕ ХВАТАЕТ ДАННЫХ: <input type="text" id="edMiss" value="${esc(a.missing_data)}" style="width:100%"></label>
+    <div style="margin-top:8px">
+      <button class="act" onclick="saveAnsEdit()">💾 Сохранить правку</button>
+      <button class="act" onclick="decideSel('accepted')">✅ Принять</button>
+      <button class="sec" onclick="decideSel('rejected')">✖ Отклонить</button>
+    </div>
+    <div id="scanBox2"></div>`;
+  $("ansDetail").querySelectorAll("[data-scan]").forEach(b => b.onclick = () => {
+    $("scanBox2").innerHTML = `<img class="scan" src="${b.dataset.scan}&t=${Date.now()}"
+      onerror="this.outerHTML='<div class=warn>Лист недоступен: исходник удалён после индексации — доступен текст фрагмента выше.</div>'">`;
+    $("scanBox2").scrollIntoView({behavior: "smooth"});
+  });
+}
+async function saveAnsEdit() {
+  if (window._ansSel < 0) return;
+  const a = window._ans[window._ansSel];
+  const fields = {answer: $("edAnswer").value, edit_was: $("edWas").value, edit_location: $("edLoc").value,
+                  edit_shall: $("edShall").value, attachments: $("edAtt").value, missing_data: $("edMiss").value};
+  try {
+    await api("answer_edit", {project: P, number: a.number, fields});
+    toast("Правка сохранена (статус: правка).");
+    const sel = window._ansSel; await renderAnswers(); showAns(sel);
+  } catch (e) { err(e); }
+}
+async function checkPlacement() {
+  toast("Анализ томов (десятки секунд)…");
+  try {
+    const r = await api("corr_preview", {project: P});
+    const map = {};
+    for (const v of r.volumes) for (const c of v.changes) map[String(c.number)] = `${v.volume}: ${c.placed}`;
+    window._placement = map;
+    (window._ans||[]).forEach((a, i) => { const el = $("ansPl"+i); if (el && map[String(a.number)]) el.textContent = map[String(a.number)].slice(0, 60); });
+    toast(`Размещение: по месту ${(r.stats.replace||0)+(r.stats.insert||0)}, вручную ${r.stats.manual||0}. Только ПРИНЯТЫЕ ответы.`);
+    if (window._ansSel >= 0) showAns(window._ansSel);
+  } catch (e) { err(e); }
 }
 async function upRemarks(f) {
   if (!f) return;
@@ -549,30 +617,12 @@ async function saveTask() {
   try { await api("ai_task", {value: $("aiTask").value}); toast("Задание сохранено."); }
   catch (e) { err(e); }
 }
-function showAns(i) {
-  const a = window._ans[i];
-  window._ansSel = i;
-  document.querySelectorAll("[id^=ansRow]").forEach(r => r.classList.remove("sel"));
-  $("ansRow"+i).classList.add("sel");
-  const L = [];
-  L.push(`ЗАМЕЧАНИЕ №${a.number}${a.oos_volume ? "  ·  том: " + a.oos_volume : ""}`);
-  L.push(a.remark, "", "ОТВЕТ:", a.answer || "⚠ ответ не сформирован — нажмите «① Найти ответы»");
-  if (a.needs_ai && a.error) L.push("", "ПРИЧИНА ОТКАЗА ИИ: " + a.error);
-  if (a.edit_location) L.push("", "ГДЕ ПРАВИТЬ: " + a.edit_location);
-  if (a.edit_was)   L.push("БЫЛО: «" + a.edit_was + "»");
-  if (a.edit_shall) L.push("СТАЛО: «" + a.edit_shall + "»");
-  if ((a.attachments||[]).length) L.push("ПРИЛОЖИТЬ: " + a.attachments.join("; "));
-  if (a.missing_data) L.push("НЕ ХВАТАЕТ ДАННЫХ: " + a.missing_data);
-  if ((a.sources||[]).length)
-    L.push("", "ИСТОЧНИКИ:", ...a.sources.map(s => `  ${s.file} ${s.loc}`));
-  $("ansDetail").textContent = L.join("\n");
-}
 async function decideSel(status) {
   if (window._ansSel < 0) return toast("Сначала выберите замечание.", true);
   const a = window._ans[window._ansSel];
   try {
     await api("decide", {project: P, numbers: [a.number], status});
-    renderAnswers();
+    const sel = window._ansSel; await renderAnswers(); showAns(sel);
   } catch (e) { err(e); }
 }
 async function decideAll(status) {
@@ -600,9 +650,12 @@ async function renderExport() {
       `<tr><td>${esc(v.name)}${v.note ? ` <span class="msg">· ${esc(v.note)}</span>` : ""}</td><td style="width:80px">${v.kb} КБ</td>
        <td style="width:60px"><button class="sec" data-cdel="${esc(v.name)}">✖</button></td></tr>`).join("") ||
       "<tr><td class='msg'>исходные тома не загружены</td></tr>"}</tbody></table>
-    <button class="sec" onclick="corrPreview()" ${cv.volumes.length ? "" : "disabled"}>👀 Предпросмотр правок</button>
+    <div class="msg">Куда встанет каждая правка — во вкладке ОТВЕТЫ («🔎 Проверить размещение правок»), там же правки редактируются.
+      Правка вносится в том только по подтверждённому месту; остальные — в раздел «требуют ручного размещения» в конце тома;
+      под недостающие документы резервируются выделенные листы-приложения. После записи — финал-проверка.</div>
     <button class="act" onclick="corrWrite()" ${cv.volumes.length ? "" : "disabled"}>📝 Сформировать откорректированный раздел</button>
     <div id="corrBox" class="msg"></div>
+    <div id="corrReport"></div>
   </div>
   <div class="card"><h3>🤖 ГЕНЕРАЦИЯ РАЗДЕЛА ИИ по исходным данным других разделов ПД</h3>
     <div class="msg">Раздел (ООС / ИЭИ / ОЦЕНКА — выбран в шапке) пишется главами по
@@ -642,23 +695,18 @@ async function corrUpload(files) {
   $("corrBox").textContent = notes.join("\n");
   toast(`Загружено томов: ${n}`); renderExport();
 }
-async function corrPreview() {
-  $("corrBox").textContent = "Анализ томов…";
-  try {
-    const r = await api("corr_preview", {project: P});
-    const st = r.stats || {};
-    const L = [`Принятых ответов: ${r.accepted}. Правок к внесению: ${r.total} — ` +
-               `замен по месту ${st.replace||0}, вставок рядом ${st.insert||0}, ` +
-               `в раздел «вручную» ${st.manual||0}.`];
-    for (const v of r.volumes) {
-      L.push(`\n▼ ${v.volume} (ответов: ${v.answers ?? "?"})${v.error ? "  ⚠ " + v.error : ""}`);
-      if (v.warning) L.push(`  ⚠ ${v.warning}`);
-      for (const c of v.changes.slice(0, 40))
-        L.push(`  №${c.number}: ${c.placed}`);
-      if (v.changes.length > 40) L.push(`  … и ещё ${v.changes.length - 40}`);
-    }
-    $("corrBox").textContent = L.join("\n");
-  } catch (e) { $("corrBox").textContent = ""; err(e); }
+function renderCorrReport(rep) {
+  const box = $("corrReport"); if (!box) return;
+  if (!rep.volumes) { box.innerHTML = ""; return; }
+  const st = rep.stats || {};
+  box.innerHTML = `<h3>Финал-проверка откорректированного раздела</h3>
+    <div class="msg">по месту ${(st.replace||0)+(st.insert||0)} · вручную ${st.manual||0} · не внесено ${st.missing||0} ·
+      приложений зарезервировано ${st.reserved||0} ${rep.report_docx ? `<button class="sec" onclick="openPath(${JSON.stringify(rep.report_docx)})">Открыть отчёт</button>` : ""}</div>
+    ${rep.volumes.map(v => `<b>${esc(v.volume)}</b>${v.error ? ` <span class="warn">⚠ ${esc(v.error)}</span>` : ""}
+      <table><thead><tr><th>№</th><th>Статус</th><th>Куда / способ</th><th>Приложения</th></tr></thead>
+      <tbody>${(v.rows||[]).map(r => `<tr><td>${esc(r.number)}</td><td>${esc(r.status)}</td>
+        <td class="msg">${esc(r.note)}${r.where ? "<br>" + esc(r.where) : ""}</td><td class="msg">${esc((r.attachments||[]).join("; "))}</td></tr>`).join("") ||
+        "<tr><td colspan=4 class='msg'>правок нет</td></tr>"}</tbody></table>`).join("")}`;
 }
 async function corrWrite() {
   $("corrBox").textContent = "Внесение правок в тома…";
@@ -667,6 +715,7 @@ async function corrWrite() {
     let t = "✅ Готово: " + r.names.join(", ");
     if ((r.failed || []).length) t += "\n⚠ НЕ обработаны: " + r.failed.join("; ");
     $("corrBox").textContent = t;
+    renderCorrReport(r.report || {});
     if (r.outputs[0]) {
       const b = document.createElement("button");
       b.className = "sec"; b.textContent = "Открыть папку результатов";
