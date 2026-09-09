@@ -952,6 +952,29 @@ def test_gui_service_endpoints(tmp_path, monkeypatch):
         import os as _os
         write_answers_state("Серв", {"status": "running", "pid": _os.getpid(), "total": 1, "done": 0})
         assert get("/api/answers_state?project=" + q("Серв"))["status"] == "running"
+        # 09.09.2026: как в ЭКО.DOC — при каждом запуске проверка всех моделей и
+        # применение лучшей; снятая галочка закрепляет ручной выбор
+        calls = []
+
+        def _probe(cfg):
+            return {"cohere": {"ok": True, "best_model": "command-a"},
+                    "mistral": {"ok": False, "error": "429"}}
+
+        def _select(cfg, h, force=False):
+            calls.append(force)
+            cfg.set("ai.default_provider", "cohere")
+            cfg.set("ai.providers.cohere.answer", "command-a")
+            cfg.save()
+            return "cohere", "command-a"
+        st = S.startup_pick(S._cfg(), probe=_probe, select=_select)
+        assert calls == [True] and st["chosen"] == "cohere · command-a" and st["auto"] is True
+        assert get("/api/ai_state")["done_at"] and get("/api/ai_options")["auto_pick"] is True
+        assert post("/api/ai_select", {"mode": "auto_pick", "auto_pick": False})["auto_pick"] is False
+        calls.clear()
+        st = S.startup_pick(S._cfg(), probe=_probe, select=_select)
+        assert calls == [] and st["auto"] is False and "закреплён" in st["note"]
+        assert get("/api/ai_options")["startup"]["auto"] is False
+        post("/api/ai_select", {"mode": "auto_pick", "auto_pick": True})
         # тип объекта меняется свободно до индексации (06.09: «не поменять тип»)
         r = post("/api/object_type", {"project": "Серв", "value": "линейный"})
         assert r["ok"] and r["applied"] == "к базе"

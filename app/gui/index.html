@@ -828,6 +828,12 @@ async function renderService() {
       генерация). Ранжирование по ТЗ: большие бесплатные → локальные → DeepSeek.
       Ключи берутся из общих настроек (.env / config).
       ${d.checked_at ? "Последняя проверка: " + esc(d.checked_at) : "Проверка ещё не выполнялась."}</div>
+    <label style="display:block;margin:6px 0"><input type="checkbox" id="aiAutoPick" ${d.auto_pick ? "checked" : ""}
+      onchange="aiAutoPickToggle(this.checked)"> <b>При каждом запуске проверять все модели и применять лучшую</b>
+      (как в ЭКО.DOC); снятая галочка закрепляет выбранную вручную модель</label>
+    <div class="msg">${d.startup && d.startup.done_at
+      ? `Проверка при запуске (${esc(d.startup.done_at.replace("T"," "))}): ${esc(d.startup.chosen || "—")} — ${esc(d.startup.note || "")}`
+      : (d.startup && d.startup.running ? "⏳ идёт проверка при запуске…" : "")}</div>
     <button class="act" onclick="aiProbe()" ${probing ? "disabled" : ""}>🔍 Проверить все модели</button>
     <button class="act" onclick="aiAuto()">⭐ Выбрать лучшую автоматически</button>
     <span class="msg" id="aiMsg">${probing ? "⏳ идёт проверка провайдеров…" : (d.probe && d.probe.error ? "⚠ " + esc(d.probe.error) : "")}</span>
@@ -841,6 +847,7 @@ async function renderService() {
     <label>Модель: <select id="aiModel"></select></label>
     <input type="text" id="aiModelTxt" placeholder="…или имя модели вручную" style="width:36%">
     <label><input type="checkbox" id="aiSingle" ${d.single_model ? "checked" : ""}> одна модель во всех местах</label>
+    <label><input type="checkbox" id="aiPin" ${d.auto_pick ? "" : "checked"}> закрепить этот выбор (не менять при запуске)</label>
     <button class="act" onclick="aiSet()">💾 Применить</button>
   </div>`;
   aiFillModels();
@@ -854,6 +861,12 @@ function aiFillModels() {
   $("aiModel").innerHTML = list.map(m =>
     `<option ${m === p.current_model ? "selected" : ""}>${esc(m)}</option>`).join("") ||
     "<option value=''>— список появится после проверки —</option>";
+}
+async function aiAutoPickToggle(on) {
+  try {
+    await api("ai_select", {mode: "auto_pick", auto_pick: on});
+    toast(on ? "При запуске будет выбираться лучшая модель." : "Выбор модели закреплён — при запуске не меняется.");
+  } catch (e) { err(e); }
 }
 async function aiProbe() {
   try { await api("ai_probe", {}); toast("Проверка запущена (до минуты)…"); renderService(); }
@@ -870,14 +883,35 @@ async function aiSet() {
   const model = ($("aiModelTxt").value || "").trim() || $("aiModel").value;
   try {
     const r = await api("ai_select", {mode: "manual", provider: $("aiProv").value, model,
-                                      single_model: $("aiSingle").checked});
+                                      single_model: $("aiSingle").checked,
+                                      auto_pick: !$("aiPin").checked});
     toast(`Применено: ${r.provider} · ${r.model}`);
     META = await api("meta"); await refreshHeader(); renderService();
   } catch (e) { err(e); }
 }
 
 /* ── опрос фоновых процессов ── */
+async function pollStartup() {
+  // проверка моделей при запуске (как в ЭКО.DOC): пока идёт — подсказка в шапке,
+  // по завершении — обновить шапку и сообщить, что выбрано
+  if (window._startupDone) return;
+  try {
+    const s = await api("ai_state");
+    if (s.running) {
+      if (!$("hdrStartup")) $("hdrInfo").insertAdjacentHTML("beforeend",
+        ' <span id="hdrStartup">· ⏳ проверка моделей при запуске…</span>');
+      return;
+    }
+    if (s.done_at) {
+      window._startupDone = true;
+      await refreshHeader();
+      toast(`Модели проверены: ${s.chosen || "—"}. ${s.note || ""}`, !s.chosen);
+      if ($("tab6") && $("tab6").classList.contains("on")) renderService();
+    }
+  } catch (e) {}
+}
 async function pollStates() {
+  pollStartup();
   if (!P) return;
   try {
     const s = await api("index_state");

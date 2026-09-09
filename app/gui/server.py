@@ -685,6 +685,7 @@ def api_ai_options(q, body):
         job = dict(_JOBS.get("__probe__") or {})
     return {"providers": provs, "current": cur, "current_model": cfg.model_for(cur, "answer"),
             "ranked": ranked, "single_model": bool(cfg.get("ai.single_model", True)),
+            "auto_pick": bool(cfg.get("ai.auto_pick", True)), "startup": dict(_STARTUP),
             "probe": job,
             # время проверки хранится у каждого провайдера — берём самое свежее
             "checked_at": max((str(v.get("checked_at") or "") for v in h.values()
@@ -717,6 +718,12 @@ def api_ai_select(q, body):
     from pmoos.core.health import auto_select, read_health
     cfg = _cfg()
     mode = body.get("mode", "auto")
+    if mode == "auto_pick":
+        # галочка «проверять при каждом запуске и применять лучшую» (как в ЭКО.DOC);
+        # снятая галочка закрепляет текущий выбор
+        cfg.set("ai.auto_pick", bool(body.get("auto_pick", True)))
+        cfg.save()
+        return {"auto_pick": bool(cfg.get("ai.auto_pick", True))}
     if mode == "auto":
         p, m = auto_select(cfg, read_health() or None, force=True)
         if not p:
@@ -735,6 +742,8 @@ def api_ai_select(q, body):
             cfg.set(f"ai.providers.{provider}.{role}", model)
     if "single_model" in body:
         cfg.set("ai.single_model", bool(body["single_model"]))
+    if "auto_pick" in body:
+        cfg.set("ai.auto_pick", bool(body["auto_pick"]))
     cfg.save()
     return {"provider": provider, "model": model or cfg.model_for(provider, "answer")}
 
@@ -890,18 +899,62 @@ def startup_background():
     except Exception:  # noqa: BLE001
         pass
     try:
-        # как в прежнем hub (ревью: auto_select потерялся при переезде):
-        # свежий кэш → авто-выбор живого провайдера сразу; иначе — проверка
-        # всех и авто-выбор по её итогам
-        from pmoos.core.health import auto_select, probe_all, read_health
-        cfg = _cfg()
-        h = read_health(max_age_h=24)
-        if not h:
-            h = probe_all(cfg)
-        if h and bool(cfg.get("ai.auto_select", True)):
-            auto_select(cfg, h)      # не force: живой выбор пользователя уважается
+        startup_pick(_cfg())
     except Exception:  # noqa: BLE001
         pass
+
+
+# СОСТОЯНИЕ ПРОВЕРКИ ПРИ ЗАПУСКЕ (для шапки и вкладки СЕРВИС)
+_STARTUP: dict = {"running": False, "done_at": "", "chosen": "", "note": "", "auto": True}
+
+
+def startup_pick(cfg, *, probe=None, select=None) -> dict:
+    """КАК В ЭКО.DOC (09.09.2026): при КАЖДОМ запуске — свежая проверка всех
+    моделей и применение лучшей (ранжирование ТЗ: большие бесплатные →
+    локальные → DeepSeek). Галочка «выбирать при запуске» снята
+    (ai.auto_pick=false) — закреплённый вручную выбор не трогаем, только
+    проверяем и предупреждаем, если он не работает."""
+    from datetime import datetime
+    from pmoos.core.health import auto_select, probe_all
+    probe = probe or probe_all
+    select = select or auto_select
+    auto = bool(cfg.get("ai.auto_pick", True))
+    _STARTUP.update(running=True, note="проверка моделей при запуске…", auto=auto, chosen="")
+    _log("проверка моделей при запуске…")
+    chosen, note = "", ""
+    try:
+        h = probe(cfg) or {}
+        if auto:
+            p, m = select(cfg, h, force=True)
+            chosen = f"{p} · {m}" if p else ""
+            note = ("лучшая рабочая модель применена во всех местах" if p
+                    else "рабочих провайдеров не найдено — проверьте ключи и сеть")
+        else:
+            p = cfg.default_provider()
+            chosen = f"{p} · {cfg.model_for(p, 'answer') or '—'}"
+            if (h.get(p) or {}).get("ok"):
+                note = "выбор закреплён вручную (галочка «при запуске» снята), провайдер работает"
+            else:
+                note = (f"закреплённый провайдер «{p}» сейчас НЕ работает "
+                        f"({(h.get(p) or {}).get('error', '')[:80] or 'нет ответа'}) — "
+                        "при вызовах сработает цепочка запасных; включите галочку или "
+                        "выберите другой в СЕРВИСе")
+    except Exception as e:  # noqa: BLE001
+        note = f"проверка при запуске не удалась: {str(e)[:160]}"
+    _STARTUP.update(running=False, done_at=datetime.now().isoformat(timespec="seconds"),
+                    chosen=chosen, note=note)
+    _log(f"модели проверены: {chosen or '—'} — {note}")
+    return dict(_STARTUP)
+
+
+def api_ai_state(q, body):
+    """Состояние проверки моделей при запуске (шапка опрашивает до завершения)."""
+    with _JOBS_LOCK:
+        job = dict(_JOBS.get("__probe__") or {})
+    return dict(_STARTUP) | {"probe_running": bool(job.get("running"))}
+
+
+ROUTES_JSON["ai_state"] = api_ai_state
 
 
 def _ours_on(port: int) -> bool:
