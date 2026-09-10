@@ -76,7 +76,14 @@ ENV_KEYS: dict[str, tuple[str, ...]] = {
     "groq": ("GROQ_API_KEY", "GROQ"),
     "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER"),
     "cohere": ("COHERE_API_KEY", "COHERE"),
+    # v0.54: Z.ai GLM (бесплатные glm-4.7-flash / glm-4.5-flash)
+    "zai": ("ZAI_API_KEY", "ZAI"),
+    # Cloudflare Workers AI: токен; ID аккаунта — CLOUDFLARE_ACCOUNT_ID (или
+    # ключ вида «ID_аккаунта:токен»)
+    "cloudflare": ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE"),
     "ollama": (),  # локально, ключ не нужен
+    # облако ollama.com через локальную Ollama: в аккаунт входит сама Ollama
+    "ollama_cloud": (),
 }
 
 # ВАЖНО: имена моделей — это значения по умолчанию, их можно (нужно) править
@@ -133,37 +140,44 @@ DEFAULT_AI: dict[str, Any] = {
         },
         "mistral": {
             "base_url": "https://api.mistral.ai/v1",
-            "answer": "mistral-large-latest",
-            "review": "mistral-large-latest",
-            "extract": "mistral-small-latest",
-            "expand": "mistral-small-latest",
+            # 10.09.2026: в бесплатный тариф Mistral входят только ministral-
+            # 14b/8b/3b и codestral; large/medium/small — 0 запросов/мин
+            "answer": "ministral-14b-latest",
+            "review": "ministral-14b-latest",
+            "extract": "ministral-8b-latest",
+            "expand": "ministral-8b-latest",
             "supports_json_mode": True,
         },
         # ── бесплатные / быстрые (v0.34) — все OpenAI-совместимые ──
         "cerebras": {
             # очень быстрый инференс, щедрый free tier
             "base_url": "https://api.cerebras.ai/v1",
-            "answer": "qwen-3-235b-a22b-instruct-2507",
-            "review": "qwen-3-235b-a22b-instruct-2507",
-            "extract": "llama-3.3-70b",
-            "expand": "llama-3.3-70b",
+            # 10.09.2026: остались gpt-oss-120b, qwen-3.8-27b, gemma-4-31b;
+            # без оплаты в кабинете Cerebras отвечает 402
+            "answer": "gpt-oss-120b",
+            "review": "gpt-oss-120b",
+            "extract": "gpt-oss-120b",
+            "expand": "gpt-oss-120b",
             "supports_json_mode": True,
         },
         "groq": {
             "base_url": "https://api.groq.com/openai/v1",
-            "answer": "moonshotai/kimi-k2-instruct",
-            "review": "moonshotai/kimi-k2-instruct",
-            "extract": "llama-3.3-70b-versatile",
-            "expand": "llama-3.3-70b-versatile",
+            # 10.09.2026: kimi-k2 и llama-3.3-70b у Groq сняты (404); лимит
+            # бесплатного — 1000 запросов/сутки, 8000 токенов/мин
+            "answer": "openai/gpt-oss-120b",
+            "review": "openai/gpt-oss-120b",
+            "extract": "openai/gpt-oss-20b",
+            "expand": "openai/gpt-oss-20b",
             "supports_json_mode": True,
         },
         "openrouter": {
             # витрина десятков моделей, есть бесплатные (суффикс «:free»)
             "base_url": "https://openrouter.ai/api/v1",
-            "answer": "deepseek/deepseek-chat-v3.1:free",
-            "review": "deepseek/deepseek-chat-v3.1:free",
-            "extract": "qwen/qwen3-32b:free",
-            "expand": "qwen/qwen3-32b:free",
+            # бесплатные модели меняются; 10.09.2026 работает nemotron-3-super
+            "answer": "nvidia/nemotron-3-super-120b-a12b:free",
+            "review": "nvidia/nemotron-3-super-120b-a12b:free",
+            "extract": "nvidia/nemotron-3-super-120b-a12b:free",
+            "expand": "nvidia/nemotron-3-super-120b-a12b:free",
             "supports_json_mode": True,
         },
         "cohere": {
@@ -173,6 +187,30 @@ DEFAULT_AI: dict[str, Any] = {
             "review": "command-a-03-2025",
             "extract": "command-r7b-12-2024",
             "expand": "command-r7b-12-2024",
+            "supports_json_mode": True,
+        },
+        # ── v0.54: ещё бесплатные облачные ──
+        "zai": {
+            # Z.ai (Zhipu) GLM: из РФ без VPN; бесплатный тариф часто 429 «перегружен»
+            "base_url": "https://api.z.ai/api/paas/v4",
+            "answer": "glm-4.7-flash", "review": "glm-4.7-flash",
+            "extract": "glm-4.5-flash", "expand": "glm-4.5-flash",
+            "supports_json_mode": True,
+        },
+        "cloudflare": {
+            # Workers AI: адрес собирается из ID аккаунта (CLOUDFLARE_ACCOUNT_ID);
+            # 10 000 «нейронов» в сутки бесплатно ≈ 60 запросов к gpt-oss-120b
+            "base_url": "",
+            "answer": "@cf/openai/gpt-oss-120b", "review": "@cf/openai/gpt-oss-120b",
+            "extract": "@cf/openai/gpt-oss-120b", "expand": "@cf/openai/gpt-oss-120b",
+            "supports_json_mode": False,
+        },
+        "ollama_cloud": {
+            # облачные модели ollama.com через ЛОКАЛЬНУЮ Ollama (ollama signin);
+            # бесплатный объём раз в неделю, 1 запрос одновременно
+            "base_url": "http://localhost:11434",
+            "answer": "gpt-oss:120b-cloud", "review": "gpt-oss:120b-cloud",
+            "extract": "gemma4:31b-cloud", "expand": "gemma4:31b-cloud",
             "supports_json_mode": True,
         },
         "ollama": {
@@ -351,7 +389,7 @@ class Config:
         return ""
 
     def has_key(self, provider: str) -> bool:
-        return provider == "ollama" or bool(self.api_key(provider))
+        return provider in ("ollama", "ollama_cloud") or bool(self.api_key(provider))
 
     def save(self, path: Path | None = None) -> None:
         path = path or (data_root() / "config.yaml")

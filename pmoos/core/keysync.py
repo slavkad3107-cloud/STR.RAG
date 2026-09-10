@@ -22,7 +22,7 @@ from ..paths import data_root
 # переносим только ключи/настройки провайдеров — пути и служебное не трогаем
 _SYNC_PREFIXES = ("DEEPSEEK", "OPENAI", "GEMINI", "GOOGLE", "ANTHROPIC", "MOONSHOT",
                   "KIMI", "MISTRAL", "CEREBRAS", "CELEBR", "GROQ", "OPENROUTER",
-                  "COHERE", "HF_TOKEN", "OLLAMA")
+                  "COHERE", "HF_TOKEN", "OLLAMA", "ZAI", "CLOUDFLARE")
 
 
 def _parse_env(text: str) -> dict[str, str]:

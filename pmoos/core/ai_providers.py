@@ -1,6 +1,8 @@
 """Единый интерфейс к разным провайдерам ИИ.
 
-Поддержка: deepseek, openai (gpt), gemini, anthropic (claude), ollama (локально).
+Поддержка: deepseek, openai (gpt), gemini, anthropic (claude), mistral, groq,
+cerebras, openrouter, cohere, zai (GLM), cloudflare (Workers AI), ollama
+(локально) и ollama_cloud (облачные модели ollama.com через локальную Ollama).
 Тяжёлые SDK импортируются лениво (внутри функций) — чтобы приложение стартовало
 быстро и не падало, если какой-то SDK не установлен.
 
@@ -86,7 +88,8 @@ class LLMError(RuntimeError):
 
 # --- вызовы провайдеров -----------------------------------------------------
 def _openai_like(base_url: str, api_key: str, model: str, messages: list[Message],
-                 temperature: float, max_tokens: int, json_mode: bool) -> str:
+                 temperature: float, max_tokens: int, json_mode: bool,
+                 extra_body: dict | None = None) -> str:
     """DeepSeek и OpenAI используют один и тот же протокол (openai SDK)."""
     try:
         from openai import OpenAI
@@ -110,6 +113,8 @@ def _openai_like(base_url: str, api_key: str, model: str, messages: list[Message
         kwargs["max_tokens"] = max(max_tokens, 4096) * 2
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
+    if extra_body:
+        kwargs["extra_body"] = extra_body
     resp = client.chat.completions.create(**kwargs)
     out = resp.choices[0].message.content or ""
     if not out.strip():
@@ -177,6 +182,32 @@ def _ollama(base_url: str, model: str, messages: list[Message],
     return (data.get("message") or {}).get("content", "") or ""
 
 
+_SIGNIN = "Ollama на этом компьютере не вошла в аккаунт ollama.com — выполните «ollama signin»"
+
+
+def _ollama_cloud(base_url: str, model: str, messages: list[Message],
+                  temperature: float, max_tokens: int, json_mode: bool) -> str:
+    """Облачная модель ollama.com через локальную Ollama (вход в аккаунт делает
+    сама Ollama — `ollama signin`). Если ярлык модели ещё не скачан (404) —
+    скачиваем его (килобайты) и повторяем."""
+    import requests
+    base = (base_url or "http://localhost:11434").rstrip("/")
+    try:
+        return _ollama(base, model, messages, temperature, max_tokens, json_mode)
+    except requests.HTTPError as e:
+        code = getattr(e.response, "status_code", 0)
+        if code in (401, 403):
+            raise LLMError(_SIGNIN) from e
+        if code != 404:
+            raise
+    r = requests.post(base + "/api/pull", json={"model": model, "stream": False},
+                      timeout=120)
+    if r.status_code in (401, 403):
+        raise LLMError(_SIGNIN)
+    r.raise_for_status()
+    return _ollama(base, model, messages, temperature, max_tokens, json_mode)
+
+
 # DeepSeek переименовал модели (июль 2026): API принимает ТОЛЬКО
 # deepseek-v4-pro / deepseek-v4-flash. Старые имена из конфига мапим тихо —
 # иначе каждый запрос падал бы 400 invalid_request_error («поиск ответов
@@ -221,15 +252,27 @@ def _chat_once(cfg: Config, messages: list[Message], *, provider: str, role: str
         # остаться пустым — не полагаемся на него (v0.34).
         if not base or "generativelanguage" not in base:
             base = "https://generativelanguage.googleapis.com/v1beta/openai"
+    if provider == "cloudflare":
+        from .health import cloudflare_base
+        base, api_key = cloudflare_base(api_key)
+        if not base:
+            raise LLMError("Cloudflare: не задан ID аккаунта (CLOUDFLARE_ACCOUNT_ID "
+                           "или ключ вида «ID_аккаунта:токен»)")
     if provider in ("deepseek", "openai", "kimi", "mistral", "gemini",
-                    "groq", "cerebras", "openrouter", "cohere"):
-        out = _openai_like(base, api_key, model, messages, temperature, max_tokens, json_mode)
+                    "groq", "cerebras", "openrouter", "cohere", "zai", "cloudflare"):
+        # у GLM «размышления» включены по умолчанию — выключаем: 2,7 с вместо
+        # 11,4 с при том же качестве (замер в ЭКО.DOC 10.09.2026)
+        extra = {"thinking": {"type": "disabled"}} if provider == "zai" else None
+        out = _openai_like(base, api_key, model, messages, temperature, max_tokens,
+                           json_mode, extra_body=extra)
     elif provider == "gemini_sdk_legacy":  # прежний путь через SDK — не используется
         out = _gemini(api_key, model, messages, temperature, max_tokens, json_mode)
     elif provider == "anthropic":
         out = _anthropic(api_key, model, messages, temperature, max_tokens, json_mode)
     elif provider == "ollama":
         out = _ollama(base, model, messages, temperature, max_tokens, json_mode)
+    elif provider == "ollama_cloud":
+        out = _ollama_cloud(base, model, messages, temperature, max_tokens, json_mode)
     else:
         raise LLMError(f"Неизвестный провайдер: {provider}")
 
@@ -378,6 +421,9 @@ def batch_chat(cfg: Config, jobs: Iterable[list[Message]], *, processor: Callabl
     результатов В ТОМ ЖЕ ПОРЯДКЕ, что и входные задания."""
     jobs = list(jobs)
     workers = max(1, int(cfg.get("ai.concurrency", 4)))
+    # бесплатный ollama.com пускает 1 запрос одновременно — облако по очереди
+    if (kw.get("provider") or cfg.resolve_provider(kw.get("module"))) == "ollama_cloud":
+        workers = 1
     results: list[Any] = [None] * len(jobs)
 
     def _run(idx: int, msgs: list[Message]):

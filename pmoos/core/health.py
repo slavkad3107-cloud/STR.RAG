@@ -29,7 +29,15 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any
 
+from .. import __version__
 from ..paths import data_root
+
+# Groq и Cerebras стоят за Cloudflare, который отбивает подпись urllib по
+# умолчанию («Python-urllib/3.x») ошибкой 403 «error code: 1010» — это бан по
+# подписи клиента, а НЕ блок по стране: 10.09.2026 тот же GET /models у Groq
+# через тот же VPN с подписью urllib давал 403, со своей — 200. Из-за этого
+# проверка считала Groq «недоступным из вашей страны» и не выбирала никогда.
+USER_AGENT = f"StroyRAG/{__version__}"
 
 # Порядок по ТЗ 27.07.2026: «сначала большие бесплатные, потом локальные и уже
 # потом DeepSeek (только он платный)». Замеры это подтверждают: облачная
@@ -37,6 +45,9 @@ from ..paths import data_root
 TIERS: dict[str, int] = {
     "mistral": 0, "cohere": 0, "gemini": 0, "openrouter": 0,
     "cerebras": 0, "groq": 0,
+    # v0.54: облако ollama.com через локальную Ollama, Z.ai GLM, Cloudflare
+    # Workers AI — тоже бесплатные облачные
+    "ollama_cloud": 0, "zai": 0, "cloudflare": 0,
     "ollama": 1,
     "deepseek": 2,
     "openai": 3, "anthropic": 3, "kimi": 3,
@@ -58,11 +69,17 @@ QUALITY: dict[str, int] = {
     # mistral-large 2858 символов и лучшая структура; cohere command-a 2230;
     # gemini через совместимый эндпоинт обрывает ответ (12 токенов из 300);
     # openrouter на бесплатных моделях вернул пустоту.
-    "mistral": 0,
-    "cohere": 1,
-    "gemini": 2,
-    "openrouter": 3,
-    "cerebras": 0, "groq": 1,
+    # v0.54 (10.09.2026): mistral-large в бесплатный тариф Mistral больше НЕ
+    # входит (бесплатны только ministral-14b/8b/3b и codestral), поэтому первым
+    # идёт замеренный Cohere command-a, за ним бесплатная ministral-14b и
+    # облачная gpt-oss-120b (Ollama Cloud, Groq). Новые облачные на замечаниях
+    # не замерены — поднимать после замера (М7 / eval_golden).
+    "cohere": 0,
+    "mistral": 1, "ollama_cloud": 1,
+    "groq": 2, "cerebras": 2,
+    "zai": 3, "openrouter": 3,
+    "cloudflare": 4,
+    "gemini": 5,
     "deepseek": 0, "anthropic": 0, "openai": 1, "kimi": 2, "ollama": 0,
 }
 
@@ -83,22 +100,32 @@ def _model_size_b(name: str) -> float:
 PREFERRED: dict[str, list[str]] = {
     "ollama":     [r"qwen3.*(30|32|14)b", r"qwen2\.5.*(14|32)b", r"qwen", r"llama3\.[13]",
                    r"gemma", r"mistral", r"."],
-    "cerebras":   [r"qwen-3-235b", r"qwen-3-32b", r"gpt-oss-120b", r"llama-3\.3-70b", r"."],
-    "groq":       [r"kimi-k2", r"llama-3\.3-70b", r"qwen3?-32b", r"gpt-oss-120b", r"."],
+    "cerebras":   [r"gpt-oss-120b", r"qwen-3", r"gemma-4", r"."],
+    # 10.09.2026 у Groq остались gpt-oss-120b/20b и qwen3.x-27b; kimi-k2 и
+    # llama-3.3-70b сняты (404)
+    "groq":       [r"gpt-oss-120b", r"gpt-oss-20b", r"qwen", r"."],
     # у OpenRouter мелкие бесплатные модели молчат — сначала крупные
-    "openrouter": [r"deepseek.*(v3|chat).*:free", r"qwen.*235b.*:free",
+    "openrouter": [r"nemotron-3-super.*:free", r"gemma-4-31b.*:free",
+                   r"deepseek.*(v3|chat).*:free", r"qwen.*235b.*:free",
                    r"llama-3\.3-70b.*:free", r"qwen.*(32|30)b.*:free",
-                   r"mistral.*:free", r":free", r"."],
+                   r"nemotron.*:free", r"mistral.*:free", r":free", r"."],
     # ВАЖНО: «gemini-2.5-flash» новым ключам отдаёт 404, поэтому первым идёт
     # проверенный алиас gemini-flash-latest (v0.34)
     "gemini":     [r"gemini-flash-latest", r"gemini-pro-latest", r"gemini-2\.0-flash",
                    r"flash", r"."],
     "cohere":     [r"command-a", r"command-r-plus", r"command-r", r"."],
-    "mistral":    [r"mistral-large", r"mistral-medium", r"mistral-small", r"."],
+    # бесплатный тариф Mistral (10.09.2026, по заголовкам лимитов): только
+    # ministral-14b/8b/3b и codestral; large/medium/small — 0 запросов/мин
+    "mistral":    [r"ministral-14b", r"codestral", r"ministral-8b", r"ministral-3b",
+                   r"mistral-large", r"mistral-medium", r"mistral-small", r"."],
     "deepseek":   [r"v4-pro", r"reasoner", r"v4-flash", r"chat", r"."],
     "openai":     [r"gpt-4\.1$", r"gpt-4o$", r"gpt-4\.1-mini", r"gpt-4o-mini", r"."],
     "anthropic":  [r"sonnet", r"haiku", r"."],
     "kimi":       [r"128k", r"32k", r"."],
+    "ollama_cloud": [r"gpt-oss:120b", r"gemma4", r"nemotron-3-super", r"nemotron-3-nano",
+                     r"."],
+    "zai":        [r"glm-4\.7-flash$", r"glm-4\.5-flash$", r"flash$", r"."],
+    "cloudflare": [r"gpt-oss-120b", r"llama-3\.3-70b", r"."],
 }
 
 # OpenAI-совместимые: (базовый URL, путь списка моделей)
@@ -112,17 +139,78 @@ _OPENAI_LIKE = {
     "cerebras":   "https://api.cerebras.ai/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "cohere":     "https://api.cohere.ai/compatibility/v1",
+    "zai":        "https://api.z.ai/api/paas/v4",
 }
+
+# бесплатные облачные модели ollama.com тарифа пользователя (10.09.2026)
+OLLAMA_CLOUD_FREE = ["gpt-oss:120b-cloud", "gemma4:31b-cloud",
+                     "nemotron-3-super:cloud", "nemotron-3-nano:30b-cloud"]
+# у Cloudflare Workers AI нет OpenAI-списка моделей — кандидаты задаём сами
+CLOUDFLARE_MODELS = ["@cf/openai/gpt-oss-120b",
+                     "@cf/meta/llama-3.3-70b-instruct-fp8-fast"]
+# бесплатные модели Z.ai: в его /models их НЕТ (там только платные glm-4.5…5.3),
+# и проверка по списку попадала на платные — «нет средств» (10.09.2026)
+ZAI_FREE_MODELS = ["glm-4.7-flash", "glm-4.5-flash"]
+
+
+def cloudflare_base(api_key: str) -> tuple[str, str]:
+    """(базовый URL, токен) Cloudflare Workers AI. ID аккаунта входит в адрес:
+    из CLOUDFLARE_ACCOUNT_ID или из ключа вида «ID_аккаунта:токен»."""
+    import os
+    acc, sep, token = (api_key or "").partition(":")
+    if not sep:
+        acc, token = "", api_key or ""
+    acc = acc or (os.environ.get("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+    if not acc:
+        return "", token
+    return f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/v1", token
+
+
+def explain_http(code: int, body: str, headers: Any = None) -> str:
+    """Человеческая причина отказа провайдера — по коду, телу и заголовкам.
+
+    Разбор 10.09.2026: «403 — недоступно из вашей страны» писалось на всё
+    подряд, а это разные вещи с разным лечением."""
+    low = (body or "").lower()
+    try:
+        zero = str((headers or {}).get("x-ratelimit-limit-req-minute", "")) == "0"
+    except Exception:  # noqa: BLE001
+        zero = False
+    if code == 429 and zero:
+        # Mistral: модель вне бесплатного тарифа отвечает обычным 429
+        return "модель не входит в бесплатный тариф (лимит 0 запросов/мин)"
+    if "error code: 1010" in low:
+        return "Cloudflare отклонил подпись клиента (1010) — это не блок по стране"
+    if ("location is not supported" in low or "unsupported_country" in low
+            or "security policy" in low or "error code: 1009" in low
+            or (code == 403 and '"forbidden"' in low)):
+        return "недоступно из вашей страны (нужен VPN)"
+    if "expired" in low:
+        return "срок ключа истёк"
+    if code == 402 or "payment required" in low:
+        return "нужна оплата (бесплатный доступ закрыт)"
+    if "tier_not_allowed" in low or "not available in your subscription" in low:
+        return "модель недоступна на вашем тарифе"
+    if "credit balance" in low or "insufficient" in low or "billing" in low:
+        return "нет средств на балансе провайдера"
+    if "overloaded" in low:
+        return "сервис перегружен (бесплатный тариф) — позже заработает"
+    if "quota" in low or "rate limit" in low or "resource_exhausted" in low:
+        return "исчерпан лимит запросов"
+    return {401: "ключ недействителен",
+            403: "403: доступ запрещён (ключ отозван или нет прав)",
+            404: "модель недоступна этому ключу",
+            429: "исчерпан лимит запросов"}.get(code, f"HTTP {code}")
 
 
 def _get_json(url: str, headers: dict[str, str], timeout: float = 12.0) -> Any:
-    req = urllib.request.Request(url, headers=headers)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **headers})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 
 
 def _try_generate(provider: str, base: str, api_key: str, model: str,
-                  timeout: float = 12.0) -> tuple[bool, str]:
+                  timeout: float = 12.0, _retry: bool = True) -> tuple[bool, str]:
     """РЕАЛЬНАЯ мини-генерация (1-5 токенов): единственная честная проверка.
 
     Список моделей врёт: реальный случай — gemini-2.5-flash есть в /models, но
@@ -130,7 +218,7 @@ def _try_generate(provider: str, base: str, api_key: str, model: str,
     «лимит». Без этой проверки автовыбор ставил бы мёртвую модель, и все 75
     ответов падали бы (ровно то, что и произошло у пользователя с DeepSeek)."""
     try:
-        if provider == "ollama":
+        if provider in ("ollama", "ollama_cloud"):
             body = json.dumps({"model": model, "stream": False,
                                "messages": [{"role": "user", "content": "ок"}],
                                "options": {"num_predict": 1}}).encode()
@@ -150,23 +238,36 @@ def _try_generate(provider: str, base: str, api_key: str, model: str,
                 f"{base.rstrip('/')}/chat/completions", data=body,
                 headers={"Authorization": f"Bearer {api_key}",
                          "Content-Type": "application/json"})
+        req.add_header("User-Agent", USER_AGENT)
         with urllib.request.urlopen(req, timeout=timeout):
             return True, ""
     except urllib.error.HTTPError as e:
-        code = e.code
         try:  # тело ответа объясняет причину точнее кода (баланс, квота, регион)
-            body = e.read()[:400].decode("utf-8", "replace").lower()
+            body = e.read()[:400].decode("utf-8", "replace")
         except Exception:  # noqa: BLE001
             body = ""
-        if "credit balance" in body or "insufficient" in body or "billing" in body:
-            return False, "нет средств на балансе провайдера"
-        if "quota" in body or "rate limit" in body or "resource_exhausted" in body:
-            return False, "исчерпан лимит запросов"
-        return False, {401: "ключ недействителен",
-                       403: "403: недоступно из вашей страны или ключ отозван",
-                       404: "модель недоступна этому ключу",
-                       429: "исчерпан лимит запросов"}.get(code, f"HTTP {code}")
+        if provider == "ollama_cloud" and e.code == 404 and _retry:
+            # ярлыка облачной модели ещё нет в Ollama — скачать (килобайты) и повторить
+            try:
+                pull = urllib.request.Request(
+                    f"{base.rstrip('/')}/api/pull",
+                    data=json.dumps({"model": model, "stream": False}).encode(),
+                    headers={"Content-Type": "application/json", "User-Agent": USER_AGENT})
+                with urllib.request.urlopen(pull, timeout=60):
+                    pass
+            except Exception as pe:  # noqa: BLE001
+                code = getattr(pe, "code", 0)
+                return False, ("Ollama не вошла в аккаунт ollama.com (ollama signin)"
+                               if code in (401, 403) else f"ярлык не скачался ({pe})")
+            return _try_generate(provider, base, api_key, model, timeout, _retry=False)
+        if provider == "ollama_cloud" and e.code in (401, 403):
+            return False, "Ollama не вошла в аккаунт ollama.com (ollama signin)"
+        return False, explain_http(e.code, body, e.headers)
     except Exception as e:  # noqa: BLE001
+        # таймаут — это «медлит/перегружен», а не «нет связи» (Z.ai на бесплатном
+        # тарифе 10.09.2026 не укладывался в 12 с при живом соединении)
+        if isinstance(e, TimeoutError) or "timed out" in str(e).lower():
+            return False, f"не ответил за {int(timeout)} с (перегружен или медленный)"
         return False, f"нет связи ({type(e).__name__})"
 
 
@@ -217,8 +318,12 @@ def pick_model(provider: str, models: list[str]) -> str:
     return cands[0] if cands else ""
 
 
-def probe_ollama(hosts: list[str]) -> dict:
-    """Ollama: перебираем адреса (свой компьютер, затем второй по имени)."""
+def probe_ollama(hosts: list[str], cloud: bool = False) -> dict:
+    """Ollama: перебираем адреса (свой компьютер, затем второй по имени).
+
+    cloud=False — только локальные модели, cloud=True — только облачные ярлыки
+    ollama.com (…-cloud): это разные провайдеры, данные облачных уходят в сеть."""
+    from .ollama_utils import is_ollama_cloud
     for host in hosts:
         host = host.strip().rstrip("/")
         if not host:
@@ -226,9 +331,9 @@ def probe_ollama(hosts: list[str]) -> dict:
         t0 = time.time()
         try:
             data = _get_json(f"{host}/api/tags", {}, timeout=4.0)
-            models = _models_from(data)
-            if models:
-                return {"ok": True, "models": models, "host": host,
+            models = [m for m in _models_from(data) if is_ollama_cloud(m) == cloud]
+            if models or cloud:
+                return {"ok": bool(models), "models": models, "host": host,
                         "ms": int((time.time() - t0) * 1000)}
         except Exception:  # noqa: BLE001 — просто следующий адрес
             continue
@@ -240,8 +345,22 @@ def probe_provider(provider: str, api_key: str, base_url: str = "",
     """Один провайдер: жив ли ключ, какие модели, не упёрлись ли в лимит."""
     if provider == "ollama":
         return probe_ollama(ollama_hosts or ["http://localhost:11434"])
+    if provider == "ollama_cloud":
+        # облако ollama.com через ЛОКАЛЬНУЮ Ollama: ключ не нужен (в аккаунт
+        # входит сама Ollama); кандидаты — уже подключённые облачные ярлыки, а
+        # если их нет — бесплатные модели тарифа (ярлык скачается сам)
+        res = probe_ollama(ollama_hosts or ["http://localhost:11434"], cloud=True)
+        if res.get("host") and not res.get("models"):
+            res.update(ok=True, models=list(OLLAMA_CLOUD_FREE), error="")
+        return res
     if not api_key:
         return {"ok": False, "error": "нет ключа"}
+    if provider == "cloudflare":
+        if not cloudflare_base(api_key)[0]:
+            return {"ok": False, "error": "нет ID аккаунта Cloudflare (CLOUDFLARE_ACCOUNT_ID)"}
+        return {"ok": True, "models": list(CLOUDFLARE_MODELS), "ms": 0, "error": ""}
+    if provider == "zai":
+        return {"ok": True, "models": list(ZAI_FREE_MODELS), "ms": 0, "error": ""}
     t0 = time.time()
     try:
         if provider == "gemini":
@@ -264,12 +383,13 @@ def probe_provider(provider: str, api_key: str, base_url: str = "",
                 "error": "" if models else "пустой список моделей"}
     except urllib.error.HTTPError as e:
         code = e.code
-        msg = {401: "ключ недействителен",
-               403: "403: провайдер не работает из вашей страны (нужен VPN) "
-                    "или ключ отозван",
-               429: "исчерпан лимит запросов"}.get(code, f"HTTP {code}")
+        try:
+            body = e.read()[:400].decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            body = ""
+        msg = explain_http(code, body, e.headers)
         return {"ok": False, "error": msg, "http": code,
-                "limited": code == 429}
+                "limited": code == 429 and "бесплатный тариф" not in msg}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"нет связи ({type(e).__name__})"}
 
@@ -359,10 +479,15 @@ def probe_all(cfg, providers: list[str] | None = None) -> dict:
             # ЖИВАЯ ПРОВЕРКА: перебираем кандидатов, пока какой-то реально не
             # ответит (список моделей врёт — см. _try_generate)
             gen_base = (base or _OPENAI_LIKE.get(p, ""))
+            gen_key = key
+            if p == "ollama_cloud":
+                gen_base = res.get("host") or gen_base or "http://localhost:11434"
+            elif p == "cloudflare":
+                gen_base, gen_key = cloudflare_base(key)
             last = ""
             # top=2: каждый лишний кандидат — ещё один таймаут в бюджете старта
             for cand in rank_models(p, res.get("models") or [], top=2):
-                ok_gen, err = _try_generate(p, gen_base or "", key, cand)
+                ok_gen, err = _try_generate(p, gen_base or "", gen_key, cand)
                 if ok_gen:
                     res["best_model"] = cand
                     break

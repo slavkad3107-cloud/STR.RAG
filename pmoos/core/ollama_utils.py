@@ -23,6 +23,15 @@ _PROBE_TTL = 15.0
 _PROBE_CACHE: dict[tuple, tuple[float, object]] = {}
 
 
+def is_ollama_cloud(name: str) -> bool:
+    """Облачная модель ollama.com (ярлык «…-cloud» / «…:cloud»): считается на
+    сервере ollama.com, данные уходят в облако — это НЕ локальная модель
+    (10.09.2026: после подключения облака такие ярлыки появились в списке
+    Ollama рядом с локальными)."""
+    n = (name or "").lower()
+    return n.endswith("-cloud") or n.endswith(":cloud")
+
+
 def _cached(key: tuple, compute):
     now = time.monotonic()
     hit = _PROBE_CACHE.get(key)
@@ -81,8 +90,19 @@ def _ollama_available_raw(base_url: str | None = None) -> bool:
 
 
 def list_installed_models(base_url: str | None = None) -> list[str]:
-    """Список установленных моделей (TTL-кэш 15 с). Сначала HTTP API, затем CLI."""
-    return _cached(("models", base_url), lambda: _list_installed_models_raw(base_url))
+    """ЛОКАЛЬНЫЕ модели Ollama (TTL-кэш 15 с). Сначала HTTP API, затем CLI.
+
+    Облачные ярлыки ollama.com в этот список не попадают — у них отдельный
+    провайдер ollama_cloud: данные уходят в облако, выдавать их за локальные
+    нельзя."""
+    names = _cached(("models", base_url), lambda: _list_installed_models_raw(base_url))
+    return [n for n in names if not is_ollama_cloud(n)]
+
+
+def list_cloud_models(base_url: str | None = None) -> list[str]:
+    """Облачные модели ollama.com, уже подключённые в Ollama этого компьютера."""
+    names = _cached(("models", base_url), lambda: _list_installed_models_raw(base_url))
+    return [n for n in names if is_ollama_cloud(n)]
 
 
 def _list_installed_models_raw(base_url: str | None = None) -> list[str]:
