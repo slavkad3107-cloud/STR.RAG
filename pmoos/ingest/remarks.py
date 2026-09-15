@@ -216,6 +216,31 @@ def _split_numbered(text: str) -> list[Remark]:
     for i, (s, e, num) in enumerate(filt):
         end = filt[i + 1][0] if i + 1 < len(filt) else len(text)
         body = re.sub(r"\s*\n\s*", " ", text[e:end]).strip()
+        body = _cut_trailing_table(body)
         if len(body) >= 10:
             out.append(Remark(number=num, text=body))
     return out
+
+
+# ХВОСТ ПОСЛЕДНЕГО ЗАМЕЧАНИЯ (15.09.2026, ОПОЧКА): за списком в PDF шла сводная
+# таблица тех же замечаний («№ | Вывод о несоответствии | Ссылка на материалы |
+# Основание»), и вся она приклеивалась к последнему пункту (№75 — 25 000 знаков,
+# ответ ИИ уезжал в тему №1). Режем по заголовку таблицы / по «| N |»-строкам.
+_TABLE_HEAD_RX = re.compile(
+    r"(?i)(?:№\s*(?:п/п|\d{1,3})?\s*\|?\s*)?Вывод\s+о\s+несоответстви|№\s*п/п\s*\|"
+)
+_TABLE_ROW_RX = re.compile(r"\|\s*\d{1,3}\s*\|\s*[А-ЯЁ]")
+
+
+def _cut_trailing_table(body: str) -> str:
+    cut = None
+    m = _TABLE_HEAD_RX.search(body)
+    if m and m.start() > 20:
+        cut = body[:m.start()]
+    else:
+        rows = list(_TABLE_ROW_RX.finditer(body))
+        if len(rows) >= 3:
+            cut = body[:rows[0].start()]
+    if cut is None:
+        return body
+    return re.sub(r"[\s|]*№\s*\d{0,3}\s*$", "", cut).rstrip(" |.;") + "."

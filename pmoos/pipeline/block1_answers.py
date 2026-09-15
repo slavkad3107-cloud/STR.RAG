@@ -49,7 +49,23 @@ def _sys_for(target: str) -> str:
 
 _USER_TMPL = (
     "ЗАМЕЧАНИЕ ЭКСПЕРТА №{num}:\n«{remark}»\n\n"
-    "НАЙДЕННЫЕ ФРАГМЕНТЫ ПРОЕКТНОЙ ДОКУМЕНТАЦИИ (источники):\n{context}\n\n"
+    "{volumes_block}"
+    "НАЙДЕННЫЕ ФРАГМЕНТЫ ПРОЕКТНОЙ ДОКУМЕНТАЦИИ (источники; фрагменты с меткой "
+    "{{ТОМ-АДРЕСАТ …}} — из самого тома, который правим):\n{context}\n\n"
+    "ПРАВИЛА (нарушение = брак):\n"
+    "1) edit_was — ТОЛЬКО дословная копия фрагмента с меткой {{ТОМ-АДРЕСАТ}} (без "
+    "пересказа и без текста замечания); если такого фрагмента нет — оставь edit_was "
+    "пустым и напиши в missing_data, какой пункт тома нужен.\n"
+    "2) Реквизиты (номера лицензий/договоров/писем/справок, названия организаций, "
+    "даты, марки оборудования) — ТОЛЬКО из фрагментов; иначе плейсхолдер «№ ___ от "
+    "___» и документ в attachments.\n"
+    "3) Если замечание требует документ/пересчёт, которых нет в фрагментах (договор, "
+    "лицензия, справка ЦГМС, СЭЗ, отчёт, согласование, расчёт в УПРЗА/акустике) — "
+    "ответ начинается со слов «Требуется:» с перечнем, что запросить/пересчитать; "
+    "не пиши «представлен/приложен/выполнен».\n"
+    "4) Числа по пусковым комплексам — только из паспорта проекта и фрагментов того "
+    "же ПК; числа другого ПК в том не переносить.\n"
+    "5) edit_location — существующий пункт/таблица тома-адресата (как во фрагментах).\n\n"
     "Сформируй ответ строго в формате JSON:\n"
     "{{\n"
     '  "answer": "текст ответа эксперту (что сделано/уточнено в ПМООС)",\n'
@@ -68,7 +84,10 @@ _USER_TMPL = (
     '  "confidence": "high|medium|low",\n'
     '  "missing_data": "какие ИСХОДНЫЕ ДАННЫЕ отсутствуют в документации '
     '(конкретно: что за данные и в каком томе/разделе их не хватает); пусто, '
-    'если всё есть"\n'
+    'если всё есть",\n'
+    '  "volume_edits": {{"6.1": {{"edit_location": "…", "edit_was": "…", '
+    '"edit_shall": "…"}}, "6.2": {{…}}}} — ТОЛЬКО если томов-адресатов несколько: '
+    'правка ДЛЯ КАЖДОГО тома со своими числами; иначе пустой объект {{}}\n'
     "}}\n"
     "ВАЖНО: edit_was/edit_shall — это то, что инженер скопирует в том, поэтому "
     "пиши формулировками документа, а не «необходимо уточнить». "
@@ -105,7 +124,8 @@ def _format_context(hits: list[dict], limit: int = 8,
         # таблица выбросов со склеенным заголовком в 900 символов не влезала
         snippet = _center_snippet(h.get("text", "") or "", max_chars,
                                   (pl.get("match") or ""))
-        lines.append(f"[{i}] (раздел: {sec}; файл: {file}; место: {loc})\n{snippet}")
+        tag = pl.get("_tag") or ""
+        lines.append(f"[{i}] {('{' + tag + '} ') if tag else ''}(раздел: {sec}; файл: {file}; место: {loc})\n{snippet}")
         srcs.append({"n": i, "file": file, "loc": loc, "section": sec,
                      "score": round(float(h.get("rerank_score", h.get("rrf_score", h.get("score", 0.0)))), 4),
                      "snippet": snippet[:300]})
@@ -131,17 +151,22 @@ def _classify_remark(text: str) -> str:
     def has(*ws: str) -> bool:
         return any(w in t for w in ws)
 
-    if has("перерасч", "пересчит"):
+    if has("перерасч", "пересчит", "упрза", "рассеиван", "высот источник", "высоты источник",
+           "объем газовоздушн", "объём газовоздушн", "акустическ"):
         return "Перерасчёт"
-    if has("расчёт", "расчет", "рассеиван") and has("уточн", "выполн", "привести",
-                                                    "откоррект", "провести", "повтор"):
+    if has("расчёт", "расчет") and has("уточн", "выполн", "привести",
+                                        "откоррект", "провести", "повтор"):
         return "Перерасчёт"
+    # документы — РАНЬШЕ нормативов (проверка 15.09: 31 замечание про договоры/
+    # справки/СЭЗ уходило в «Нормативы» из-за слов «в соответствии с требованиями»)
+    if has("приложить", "представить", "предоставить", "лиценз", "договор", "справк",
+           "письм", "протокол", "паспорт отход", "сертификат", "выписк", "согласован",
+           "санитарно-эпидемиологическ", "сэз", "заключени", "отчет по", "отчёт по",
+           "актуальн", "неактуальн", "устаревш"):
+        return "Доп. документы"
     if has("гост", "санпин", "снип", "гн 2", "сп 2", "сп 5", "норматив", "методик",
            "приказ", "постановлен", "-фз", "фз-", "в соответствии с требованиями"):
         return "Нормативы"
-    if has("приложить", "представить", "предоставить", "лиценз", "договор", "справк",
-           "письмо", "протокол", "паспорт отход", "сертификат"):
-        return "Доп. документы"
     if has("указать", "заполнить", "внести данные", "привести данные", "добавить данные",
            "отсутствуют данные", "не указан", "не приведен", "не приведён", "не представлены данные"):
         return "Ввести данные"
@@ -411,6 +436,52 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
         _hit = (oos_per[_k][0] if _k < len(oos_per) and oos_per[_k] else None)
         oos_by_num[str(_r.number)] = ((_hit.get("payload") or {}).get("file", "")
                                       if _hit else "")
+    # ТОМ-АДРЕСАТ И ПУСКОВОЙ КОМПЛЕКС (v0.55, проверка на ОПОЧКЕ): том берётся из
+    # текста замечания (не из первого чанка), фрагменты чужого ПК — вон/в конец,
+    # плюс отдельный поиск ПО САМОМУ ТОМУ для дословного «было».
+    from .volumes import (oos_volumes, target_volumes, pk_of, pk_filter,
+                          passport_text)
+    oos_map = oos_volumes(project, target)
+    oos_files = set(oos_map.values())
+    tv_by_idx: dict[int, list[str]] = {}
+    vol_hits_by_idx: dict[int, dict[str, list[dict]]] = {}
+    if oos_map:
+        for _k, _r in enumerate(remarks):
+            tv = target_volumes(_r.text, oos_map)
+            tv_by_idx[_k] = tv
+            if len(tv) == 1:
+                oos_by_num[str(_r.number)] = oos_map[tv[0]]
+            pk = pk_of(tv[0]) if len(tv) == 1 else None
+            hits_per[_k] = pk_filter(hits_per[_k], pk, oos_files)
+        # фрагменты тома-адресата: по одному запросу на (замечание, том)
+        per_file: dict[str, list[int]] = {}
+        for _k, tv in tv_by_idx.items():
+            for tok in tv[:3]:
+                per_file.setdefault(oos_map[tok], []).append(_k)
+        retr2 = HybridRetriever(cfg)
+        try:
+            for fname, idxs in per_file.items():
+                tok = next(t for t, f in oos_map.items() if f == fname)
+                try:
+                    res = retr2.batch_search(project, [remarks[i].text for i in idxs],
+                                             files=[fname], top=3, candidates=24,
+                                             use_expansion=False)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[block1] поиск по тому {tok}: {e}", flush=True)
+                    res = [[] for _ in idxs]
+                for i, hs in zip(idxs, res):
+                    for h in hs:
+                        h["payload"] = dict(h.get("payload") or {}, _tag=f"ТОМ-АДРЕСАТ {tok}")
+                    vol_hits_by_idx.setdefault(i, {})[tok] = hs
+        finally:
+            retr2.close()
+        # том-адресат первым в контексте; дубли по id убираем
+        for _k in range(len(remarks)):
+            vh = [h for hs in (vol_hits_by_idx.get(_k) or {}).values() for h in hs]
+            if vh:
+                seen_ids = {str(h.get("id")) for h in vh}
+                hits_per[_k] = vh + [h for h in hits_per[_k] if str(h.get("id")) not in seen_ids]
+    passport = passport_text(project, oos_map)
 
     # 3) формируем задания для ИИ (с few-shot из памяти прошлых проектов)
     use_mem = bool(cfg.get("memory.enabled", True))
@@ -420,7 +491,18 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
         ctx, srcs = _format_context(hits, limit=int(cfg.get("retrieval.top_k", 8)),
                                     max_chars=int(cfg.get("retrieval.snippet_chars", 3000)))
         ctx_sources.append((srcs, hits))
-        user_msg = _USER_TMPL.format(num=r.number, remark=r.text, context=ctx or "(не найдено)")
+        _tv = tv_by_idx.get(len(jobs), [])
+        _vb = ""
+        if _tv:
+            _vb = ("ТОМА-АДРЕСАТЫ ПРАВКИ: " + ", ".join(f"том {t} ({oos_map[t]})" for t in _tv)
+                   + (" — правка нужна В КАЖДОМ томе (заполни volume_edits)" if len(_tv) > 1 else "")
+                   + "\n")
+        if passport:
+            _vb += "ПАСПОРТ ПРОЕКТА ПО ПУСКОВЫМ КОМПЛЕКСАМ (значение · источник):\n" + passport + "\n"
+        if _vb:
+            _vb += "\n"
+        user_msg = _USER_TMPL.format(num=r.number, remark=r.text, context=ctx or "(не найдено)",
+                                     volumes_block=_vb)
         if use_mem:
             try:
                 from ..memory import fewshot_block
@@ -480,6 +562,41 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
         sources_unverified = not matched
 
         answer_text = data.get("answer", "").strip()
+        # КОНТРАКТ «БЫЛО» (v0.55): цитата обязана встречаться в томе-адресате;
+        # ИИ переставил слова — подставляем дословный фрагмент; нет — «место не
+        # подтверждено» (такой ответ не станет заменой в томе)
+        from .volumes import verify_was, unsupported_requisites
+        _vh_all = vol_hits_by_idx.get(idx) or {}
+        _pool = [h for hs in _vh_all.values() for h in hs] or [
+            h for h in hits if (h.get("payload") or {}).get("file") in oos_files] or hits
+        was_verified, was_score = False, 0.0
+        if (data.get("edit_was") or "").strip():
+            vw = verify_was(data["edit_was"], _pool)
+            was_verified, was_score = vw["verified"], vw["score"]
+            if vw["verified"] and vw["quote"]:
+                data["edit_was"] = vw["quote"]
+            elif not vw["verified"]:
+                data["edit_was_unverified"] = data["edit_was"]
+                data["edit_was"] = ""
+        vol_edits = data.get("volume_edits") if isinstance(data.get("volume_edits"), dict) else {}
+        clean_vol_edits: dict[str, dict] = {}
+        for _tok, _ed in vol_edits.items():
+            if not isinstance(_ed, dict):
+                continue
+            _e = {k: str(_ed.get(k) or "").strip() for k in ("edit_location", "edit_was", "edit_shall")}
+            if _e["edit_was"]:
+                _vw = verify_was(_e["edit_was"], _vh_all.get(str(_tok)) or _pool)
+                if _vw["verified"] and _vw["quote"]:
+                    _e["edit_was"] = _vw["quote"]
+                    _e["was_verified"] = True
+                else:
+                    _e["edit_was_unverified"] = _e["edit_was"]
+                    _e["edit_was"] = ""
+                    _e["was_verified"] = False
+            clean_vol_edits[str(_tok)] = _e
+        _ctx_full = "\n".join((h.get("text") or "") for h in hits)
+        unsupported = unsupported_requisites(
+            " ".join([answer_text, data.get("edit_shall", ""), data.get("correction", "")]), _ctx_full)
         # источник для consistency = ТЕ ЖЕ фрагменты, что ушли модели в контекст
         # (раньше hits[:5] при контексте top_k=8 — сущности из фрагментов 6-8 давали
         # ложные «unsupported_refs»). Плюс текст самого замечания: норматив,
@@ -497,8 +614,12 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
         # или отсутствие опоры → принудительно снижаем confidence и помечаем.
         unsupported_refs = bool(cons.get("issues"))
         confidence = data.get("confidence", "")
-        if unsupported_refs or low_support:
+        if unsupported_refs or low_support or unsupported:
             confidence = "low"
+        elif (data.get("edit_was_unverified") or "").strip() or (
+                data.get("edit_shall", "").strip() and not was_verified and not clean_vol_edits):
+            # правка без подтверждённого места в томе — не выше medium
+            confidence = "medium" if confidence == "high" else (confidence or "medium")
 
         # каскад: какие разделы затронет правка (по разделам источников; если ИИ не
         # атрибутировал — по найденным поиском, каскад носит справочный характер)
@@ -531,6 +652,12 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
             # ГДЕ НАЙДЕНО «БЫЛО» (ТЗ 08.09: «как было — том, страница, текст
             # страницы»): фрагмент контекста, в котором цитата действительно есть
             "edit_was_src": _locate_in_hits(data.get("edit_was", ""), hits) or {},
+            "edit_was_unverified": data.get("edit_was_unverified", ""),
+            "was_verified": was_verified,
+            "was_score": was_score,
+            "target_volumes": tv_by_idx.get(idx, []),
+            "volume_edits": clean_vol_edits,
+            "unsupported_requisites": unsupported,
             "attachments": data.get("attachments", []),
             "confidence": confidence,
             "missing_data": data.get("missing_data", ""),

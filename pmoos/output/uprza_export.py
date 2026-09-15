@@ -143,7 +143,7 @@ def _write_task_txt(path: Path, project: str, rows: list[dict], extra: dict,
         "=" * 60,
         f"Проект: {project}",
         f"Сформировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
-        f"Источник данных: раздел ПМООС (ответы Модуля 4).",
+        f"Источник данных: {extra.get('origin') or 'раздел ПМООС (ответы Модуля 4)'}.",
         "",
         "ФАЙЛЫ ВЫГРУЗКИ:",
         "  • uprza_istochniki.csv — источники выбросов (разделитель ';', UTF-8-BOM);",
@@ -199,6 +199,26 @@ def _write_task_txt(path: Path, project: str, rows: list[dict], extra: dict,
 def build_uprza_export(project: str) -> dict[str, Path]:
     """Сформировать выгрузку для УПРЗА. Возвращает словарь путей."""
     rows, extra = collect_emissions(project)
+    # v0.55: настоящие г/с и т/год — из таблиц выбросов томов ООС в базе
+    # (раньше только из текста ответов ИИ → выгрузка была пустой)
+    try:
+        from .uprza_emissions import collect_from_index
+        irows, info = collect_from_index(project)
+    except Exception as e:  # noqa: BLE001 — база занята/нет коллекции
+        irows, info = [], {"error": str(e)[:160]}
+    if irows:
+        known = {r["code"] for r in irows}
+        rows = [{"code": r["code"], "name": r["name"],
+                 "g_s": f"{r['g_s']:.7f}".rstrip("0").rstrip("."),
+                 "t_year": f"{r['t_year']:.7f}".rstrip("0").rstrip("."),
+                 "class": r.get("class", ""), "criterion": r.get("criterion", ""),
+                 "file": r.get("file", ""), "loc": r.get("loc", "")} for r in irows] + \
+               [r for r in rows if r.get("code") not in known]
+        extra["origin"] = (f"таблицы выбросов томов ООС в базе проекта: "
+                           + "; ".join(f"{f} ({n} строк)" for f, n in (info.get("per_file") or {}).items()))
+    else:
+        extra["origin"] = ("в базе проекта таблицы выбросов не найдены — только вещества из "
+                           "текста ответов ИИ без значений" + (f" ({info['error']})" if info.get("error") else ""))
     validation = validate_pollutants(rows)  # аннотирует rows полем status (М6)
     out_dir = project_paths(project)["out"]
     out_dir.mkdir(parents=True, exist_ok=True)

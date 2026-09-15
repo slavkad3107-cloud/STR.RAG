@@ -151,6 +151,10 @@ def api_ai_task(q, body):
 def api_upload(q, body_bytes):
     from pmoos.ingest.uploads import save_bytes
     name = urllib.parse.unquote(q.get("name", "файл.bin"))
+    remark = urllib.parse.unquote(q.get("remark", "")).strip()
+    if remark and not name.lower().endswith(".zip"):
+        # дозагрузка по замечанию: префикс «ЗАМ№N_» — видно, к чему документ
+        name = f"ЗАМ№{re.sub(_BAD_RX, '_', remark)[:12]}_{Path(name).name}"
     saved = save_bytes(q["project"], name, body_bytes)
     return {"saved": saved}
 
@@ -393,6 +397,11 @@ def api_answers(q, body):
             | {"needs_ai": bool(a.get("needs_ai")),
                "low_support": bool(a.get("low_support")),
                "sources_unverified": unverified,
+               "was_verified": bool(a.get("was_verified")),
+               "edit_was_unverified": a.get("edit_was_unverified") or "",
+               "target_volumes": a.get("target_volumes") or [],
+               "volume_edits": a.get("volume_edits") or {},
+               "unsupported_requisites": a.get("unsupported_requisites") or [],
                "attachments": a.get("attachments") or [],
                "edit_was_src": a.get("edit_was_src") or {},
                "sources": [{"file": s.get("file", ""), "loc": s.get("loc", ""),
@@ -400,6 +409,56 @@ def api_answers(q, body):
                             "snippet": s.get("snippet", "")}
                            for s in srcs[:6]]})
     return {"answers": out}
+
+
+def api_missing_docs(q, body):
+    """ДОЗАГРУЗКА ПО ОТВЕТАМ (ТЗ 14.09): какие документы/данные не хватает по
+    каждому замечанию (attachments, missing_data, ответы «Требуется:»), что уже
+    догружено (файлы «ЗАМ№N_…» в tmp_uploads) — чтобы добавить, проиндексировать
+    и переспросить именно эти замечания."""
+    from pmoos.pipeline.block1_answers import load_answers
+    from pmoos.paths import project_paths
+    p = q["project"]
+    up = project_paths(p)["uploads"]
+    loaded: dict[str, list[str]] = {}
+    if up.exists():
+        for f in up.iterdir():
+            m = re.match(r"ЗАМ№([\w.]+)_", f.name)
+            if m and f.is_file():
+                loaded.setdefault(m.group(1), []).append(f.name)
+    items = []
+    for a in (load_answers(p) or {}).get("answers", []):
+        att = [str(x) for x in (a.get("attachments") or []) if str(x).strip()]
+        miss = str(a.get("missing_data") or "").strip()
+        ans = str(a.get("answer") or "")
+        need = ans.lstrip().lower().startswith("требуется")
+        if not (att or miss or need):
+            continue
+        n = str(a.get("number"))
+        items.append({"number": n, "remark": (a.get("remark") or "")[:160], "status": a.get("status"),
+                      "attachments": att, "missing_data": miss, "requires": need,
+                      "loaded": sorted(loaded.get(n, []))})
+    return {"items": items, "total": len(items),
+            "loaded_total": sum(len(v) for v in loaded.values())}
+
+
+def api_reask(q, body):
+    """Переспросить замечания после дозагрузки: ответы помечаются needs_ai —
+    «① Найти ответы» переспросит ТОЛЬКО их (готовые не трогаются)."""
+    from pmoos.pipeline.block1_answers import load_answers, _save
+    p = body["project"]
+    nums = {str(n) for n in (body.get("numbers") or [])}
+    data = load_answers(p) or {}
+    n = 0
+    for a in data.get("answers", []):
+        if str(a.get("number")) in nums:
+            a["needs_ai"] = True
+            if a.get("status") in ("accepted", "edited"):
+                a["status"] = "proposed"
+            n += 1
+    if n:
+        _save(p, data)
+    return {"ok": True, "marked": n}
 
 
 def api_answer_edit(q, body):
@@ -802,6 +861,8 @@ ROUTES_RAW = {"upload": api_upload, "remarks_upload": api_remarks_upload,
               "project_import": api_project_import}
 ROUTES_BIN = {"scan": api_scan, "page_scan": api_page_scan}
 ROUTES_JSON["answer_edit"] = api_answer_edit
+ROUTES_JSON["missing_docs"] = api_missing_docs
+ROUTES_JSON["reask"] = api_reask
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -843,7 +904,8 @@ class Handler(BaseHTTPRequestHandler):
             if name in ("info", "index_state", "registry", "answers",
                         "answers_state", "uprza", "scan", "upload",
                         "remarks_upload", "uprza_import", "corr_upload",
-                        "corr_list", "versions", "gen_state", "page_scan"):
+                        "corr_list", "versions", "gen_state", "page_scan",
+                        "missing_docs"):
                 if not q.get("project", "").strip():
                     raise ValueError("не выбран объект/проект — создайте его "
                                      "кнопкой «+ Новый»")

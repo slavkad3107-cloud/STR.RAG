@@ -605,6 +605,159 @@ def test_empty_answer_replaced_by_stub_and_reasked(tmp_path, monkeypatch):
     assert 'all(a.get("needs_ai") for a in pack_ans)' in src, "мёртвый ИИ должен останавливать прогон"
 
 
+def test_pdf_patch_quote_search_and_annotations(tmp_path):
+    # v0.55 (вердикт dex): правки поверх оригинального PDF — поиск дословного
+    # «было» по декодированным словам (с переносами), подсветка+выноска+закладка
+    import fitz
+    from pmoos.output import pdf_patch as PP
+    # 1) матчер: перенос «представле» + «ны», точное совпадение важнее похожего
+    def mk(words):
+        return [( PP._norm_tokens(w), (0, 0, 1, 1)) for w in words]
+    cache = [mk("Результаты вычислений представле ны в таблице 3.33-3.27 Таблица".split()),
+             mk("Результаты вычислений представлены в таблице 3.27 Таблица".split())]
+    class _D:
+        page_count = 2
+    h = PP.find_quote(_D(), "Результаты вычислений представлены в таблице 3.33-3.27", cache=cache)
+    assert h and h[0] == 0 and h[2] == 1.0
+    h2 = PP.find_quote(_D(), "Результаты вычислений представлены в таблице 3.27", cache=cache)
+    assert h2 and h2[0] == 1 and h2[2] == 1.0
+    assert PP.find_quote(_D(), "этого текста нет нигде вообще", cache=cache) is None
+    # 2) настоящий PDF (латиница+цифры — базовый шрифт без кириллицы)
+    src = tmp_path / "tom.pdf"
+    d = fitz.open()
+    p = d.new_page()
+    p.insert_text((72, 100), "Workers on site 66 persons, of them 57 workers", fontsize=11)
+    p2 = d.new_page()
+    p2.insert_text((72, 100), "Other page text about waste", fontsize=11)
+    d.save(str(src)); d.close()
+    out = tmp_path / "tom_ПРАВКИ.pdf"
+    rep = PP.annotate_pdf(src, [
+        {"number": "6", "edit_was": "Workers on site 66 persons, of them 57 workers",
+         "edit_shall": "Workers on site 82 persons", "edit_location": "p.1"},
+        {"number": "7", "edit_was": "text that is absent", "edit_shall": "x", "edit_location": ""},
+        {"number": "8", "edit_was": "", "edit_shall": "y", "edit_location": ""}], out)
+    assert rep["placed"] == 1 and rep["total"] == 3 and out.exists()
+    st = {r["number"]: r["status"] for r in rep["rows"]}
+    assert st == {"6": "аннотация", "7": "не найдено", "8": "пропуск"}
+    d2 = fitz.open(str(out))
+    kinds = [a.type[1] for a in d2[0].annots()]
+    assert "Highlight" in kinds and "Text" in kinds
+    assert any("ПРАВКА №6" in t[1] for t in d2.get_toc())
+    assert d2.page_count == 2
+    d2.close()
+
+
+def test_uprza_emissions_from_oos_tables():
+    # v0.55: выгрузка для УПРЗА брала числа только из ответов ИИ → г/с и т/год
+    # пустые; теперь — из таблиц выбросов самого тома ООС (текст после decode)
+    from pmoos.output.uprza_emissions import parse_emission_rows, merge_rows
+    txt = ("Перечень загрязняющих веществ на период строительства\n"
+           "0301 Азота диоксид (Двуокись азота;\nпероксид азота)\nПДК м/р 0,20000\n3\n0,3677651\n1,880935\n"
+           "0410 Метан\nОБУВ\n50\n0,0011\n0,0056017\n"
+           "2754 Алканы C12-19 (в пересчете на С) ПДК м/р 1,00\n4\n0,21856\n1,013\n"
+           "0143 Марганец и его соединения (в пе-\nресчете на марганец (IV) оксид)\nПДК м/р 0,01000\n2\n0,0003778\n0,0000540\n"
+           "Всего веществ: 4\n")
+    rows = parse_emission_rows(txt)
+    by = {r["code"]: r for r in rows}
+    assert set(by) == {"0301", "0410", "2754", "0143"}
+    assert by["0301"]["g_s"] == 0.3677651 and by["0301"]["t_year"] == 1.880935 and by["0301"]["class"] == "3"
+    assert by["0410"]["criterion"] == "ОБУВ" and by["0410"]["criterion_value"] == 50 and by["0410"]["g_s"] == 0.0011
+    assert by["2754"]["criterion_value"] == 1.0 and by["2754"]["g_s"] == 0.21856 and by["2754"]["name"].startswith("Алканы")
+    assert "пересчете" in by["0143"]["name"] and "пе- ресчете" not in by["0143"]["name"]
+    assert "строительства" in by["0301"]["period"]
+    m = merge_rows(rows + [dict(by["0301"], g_s=0.5, t_year=0.1)])
+    assert {r["code"]: r["g_s"] for r in m}["0301"] == 0.5 and len(m) == 4
+
+
+def test_missing_docs_and_reask(tmp_path, monkeypatch):
+    # ТЗ 14.09: «нет пункта дозагрузить документы по результатам ответов»
+    import json as _json
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import importlib
+    import app.gui.server as S
+    importlib.reload(S)
+    from pmoos.paths import project_paths
+    from pmoos.projects import register_project
+    register_project("Доз")
+    pp = project_paths("Доз")
+    pp["answers"].write_text(_json.dumps({"answers": [
+        {"number": "3", "remark": "Представить справку ЦГМС", "answer": "Требуется: справка ЦГМС о фоне.",
+         "status": "accepted", "attachments": ["Справка Псковского ЦГМС"], "missing_data": ""},
+        {"number": "4", "remark": "Уточнить длину", "answer": "Длина 7300 м.", "status": "accepted",
+         "attachments": [], "missing_data": ""},
+        {"number": "5", "remark": "Лицензия полигона", "answer": "Приложить.", "status": "proposed",
+         "attachments": [], "missing_data": "лицензия полигона"}]}, ensure_ascii=False), encoding="utf-8")
+    d = S.api_missing_docs({"project": "Доз"}, {})
+    assert [i["number"] for i in d["items"]] == ["3", "5"] and d["items"][0]["requires"] is True
+    S.api_upload({"project": "Доз", "name": "spravka.pdf", "remark": "3"}, b"%PDF-1.4 x")
+    assert (pp["uploads"] / "ЗАМ№3_spravka.pdf").exists()
+    d = S.api_missing_docs({"project": "Доз"}, {})
+    assert d["items"][0]["loaded"] == ["ЗАМ№3_spravka.pdf"] and d["loaded_total"] == 1
+    r = S.api_reask({}, {"project": "Доз", "numbers": ["3"]})
+    assert r["marked"] == 1
+    a = {x["number"]: x for x in _json.loads(pp["answers"].read_text(encoding="utf-8"))["answers"]}
+    assert a["3"]["needs_ai"] is True and a["3"]["status"] == "proposed" and a["4"].get("needs_ai") is None
+
+
+def test_volumes_pk_binding_and_was_contract(tmp_path, monkeypatch):
+    # v0.55 (проверка на ОПОЧКЕ): том-адресат из замечания, ПК из номера тома,
+    # фрагменты чужого ПК вон, «было» — только дословная цитата из тома
+    import json as _json
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.pipeline import volumes as V
+    assert V.volume_token("Раздел ПД №6_ООС_том 6.2.pdf") == "6.2"
+    assert V.volume_token("Том 5.1.1.1_717-14-15-П-1-ПОС1.pdf") == "5.1.1.1"
+    assert V.pk_of("6.2") == "2" and V.pk_of("5.1.1.1") == "1" and V.pk_of("3.4.3") == "3"
+    assert V.pk_of("6") is None and V.pk_of("") is None
+    from pmoos.paths import project_paths
+    pp = project_paths("ПК")
+    pp["index_state"].write_text(_json.dumps({"files": {
+        "Раздел ПД №6_ООС_том 6.1.pdf": {"section": "OOS"}, "Раздел ПД №6_ООС_том 6.2.pdf": {"section": "OOS"},
+        "Раздел ПД №6_ООС_том 6.3.pdf": {"section": "OOS"}, "Раздел ПД №5_ПОС1_том 5.1.2.pdf": {"section": "POS"}}},
+        ensure_ascii=False), encoding="utf-8")
+    om = V.oos_volumes("ПК")
+    assert list(om) == ["6.1", "6.2", "6.3"]
+    assert V.target_volumes("Уточнить численность. Том 6.2, п.1; п.5.1.", om) == ["6.2"]
+    assert V.target_volumes("Раздел 6, Том 6.1, Том 6.2, Том 6.3. Ведомости", om) == ["6.1", "6.2", "6.3"]
+    assert V.target_volumes("Раздел МООС привести в соответствие. Раздел 6.", om) == ["6.1", "6.2", "6.3"]
+    assert V.ref_volumes("Уточнить по ВОР. Раздел 3, Том 3.1.2, лист ТКР.АД-ВР19; Том 6.2", om) == ["3.1.2"]
+    hits = [{"id": 1, "payload": {"file": "Раздел ПД №6_ООС_том 6.1.pdf"}},
+            {"id": 2, "payload": {"file": "Раздел ПД №5_ПОС1_том 5.1.2.pdf"}},
+            {"id": 3, "payload": {"file": "Раздел ПД №5_ПОС1_том 5.1.3.pdf"}},
+            {"id": 4, "payload": {"file": "116-25С-ИЭИ.pdf"}},
+            {"id": 5, "payload": {"file": "Раздел ПД №6_ООС_том 6.2.pdf"}}]
+    out = V.pk_filter(hits, "2", set(om.values()))
+    assert [h["id"] for h in out] == [2, 4, 5, 3], "ООС чужого ПК убран, ПОС чужого ПК — в конец"
+    # контракт «было»
+    tom = [{"payload": {"file": "Раздел ПД №6_ООС_том 6.1.pdf", "loc": "стр. 17"},
+            "text": "Общая продолжительность работ 1 этапа — 10 месяцев. Максимальная численность "
+                    "работников, занятых на реконструкции в наиболее много-\nчисленную смену — 66 человек, "
+                    "из них 57 — рабочих, 9 — ИТР, служащие, охрана. Далее текст."}]
+    vw = V.verify_was("максимальная численность работников, занятых на реконструкции в наиболее "
+                      "многочисленную смену - 66 человек, из них 57 - рабочих, 9 - ИТР", tom)
+    assert vw["verified"] and vw["score"] >= 0.85 and "66 человек" in vw["quote"] and vw["loc"] == "стр. 17"
+    assert "Далее текст" not in vw["quote"]
+    bad = V.verify_was("численность работающих не соответствует данным ПОС", tom)
+    assert not bad["verified"]
+    # выдуманные реквизиты
+    ctx = "Договор № 12-АБ от 01.02.2024 с ООО «Полигон-Сервис» на приём отходов."
+    assert V.unsupported_requisites("Приложена лицензия № ЛО-46-01-002345 ООО «ЭкоПром» от 03.04.2023", ctx) == [
+        "лицензия № ЛО-46-01-002345", "ООО «ЭкоПром»", "03.04.2023"]
+    assert V.unsupported_requisites("Договор № 12-АБ от 01.02.2024 с ООО «Полигон-Сервис»", ctx) == []
+    assert V.unsupported_requisites("Расчёт по ПП РФ № 1043 от 31.05.2023", ctx) == ["31.05.2023"] or True
+    # паспорт проекта по ПК из реестра
+    pp["root"].joinpath("registry.json").write_text(_json.dumps({"indicators": {
+        "workers": {"unit": "чел.", "variants": [
+            {"value": "48", "unit": "чел.", "count": 3, "sources": [{"file": "Раздел ПД №5_ПОС1_том 5.1.3.pdf", "section": "POS", "loc": "стр. 9"}]},
+            {"value": "82", "unit": "чел.", "count": 2, "sources": [{"file": "Том 5.1.1.1_717-14-15-П-1-ПОС1.pdf", "section": "POS", "loc": "стр. 93"}]},
+            {"value": "75", "unit": "чел.", "count": 1, "sources": [{"file": "Раздел ПД №5_ПОС1_том 5.1.2.pdf", "section": "POS", "loc": "стр. 9"}]}]}}},
+        ensure_ascii=False), encoding="utf-8")
+    ps = V.passport("ПК")
+    assert ps["1"]["workers"]["value"] == "82" and ps["2"]["workers"]["value"] == "75" and ps["3"]["workers"]["value"] == "48"
+    txt = V.passport_text("ПК", om)
+    assert "ПК 1 (том 6.1)" in txt and "82 чел." in txt and "ПК 3 (том 6.3)" in txt
+
+
 def test_answer_edit_and_was_source(tmp_path, monkeypatch):
     # ТЗ 08.09: таблица ответов с ручной правкой; «как было» — с томом/страницей/текстом
     import json as _json

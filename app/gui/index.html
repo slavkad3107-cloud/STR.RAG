@@ -82,7 +82,7 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 async function api(name, body, q) {
-  const qs = new URLSearchParams(Object.assign({}, q, name.match(/^(info|index_state|registry|answers|answers_state|uprza|corr_list|versions|gen_state)$/) ? {project: P} : {})).toString();
+  const qs = new URLSearchParams(Object.assign({}, q, name.match(/^(info|index_state|registry|answers|answers_state|uprza|corr_list|versions|gen_state|missing_docs)$/) ? {project: P} : {})).toString();
   const r = await fetch(`/api/${name}${qs ? "?" + qs : ""}`,
     body === undefined ? {} : {method: "POST", body: JSON.stringify(body)});
   const d = await r.json();
@@ -256,6 +256,12 @@ function renderUpload() {
            placeholder="ООО «…» — заказчик / проектировщик" style="width:70%">
     <button class="act" onclick="saveOrg()">💾 Сохранить</button>
   </div>
+  <div class="card"><h3>📎 Дозагрузка документов по результатам ответов</h3>
+    <div class="msg">Замечания, по которым ответам не хватило документов или данных (ИИ написал «Требуется:»,
+      указал «приложить» или «не хватает данных»). Загрузите недостающие документы к нужному замечанию —
+      файл получит префикс «ЗАМ№N_», затем «Индексировать добавленное» и «Переспросить эти замечания».</div>
+    <div id="missBox" class="msg">…</div>
+  </div>
   <div class="card"><h3>🗂 Версии документов (какую редакцию использовать)</h3>
     <div class="msg">Если один и тот же том загружен в нескольких редакциях (старая и
       откорректированная), здесь видно все версии; отметьте актуальную — поиск, ответы и
@@ -267,6 +273,48 @@ function renderUpload() {
   dz.ondragleave = () => dz.classList.remove("hov");
   dz.ondrop = e => { e.preventDefault(); dz.classList.remove("hov"); upFiles(e.dataTransfer.files); };
   loadVersions();
+  loadMissingDocs();
+}
+async function loadMissingDocs() {
+  const box = $("missBox");
+  if (!box) return;
+  if (!P) { box.textContent = "объект не выбран"; return; }
+  let d;
+  try { d = await api("missing_docs"); } catch (e) { box.textContent = "не удалось: " + e.message; return; }
+  if (!d.items.length) { box.textContent = "По текущим ответам недостающих документов не отмечено (или ответы ещё не сформированы)."; return; }
+  window._miss = d.items;
+  box.innerHTML = `<div class="mut">Замечаний с недостающими документами: ${d.total}; догружено файлов: ${d.loaded_total}</div>
+    <table><thead><tr><th>№</th><th>Замечание</th><th>Что нужно</th><th>Догружено</th><th style="width:150px"></th></tr></thead>
+    <tbody>${d.items.map((it, i) => `<tr>
+      <td>${esc(it.number)}${it.requires ? ' <span class="badge w">Требуется</span>' : ""}</td>
+      <td class="msg">${esc(it.remark)}</td>
+      <td class="msg">${esc([...it.attachments, it.missing_data].filter(Boolean).join("; "))}</td>
+      <td class="msg">${esc(it.loaded.join(", ")) || "—"}</td>
+      <td><input type="file" data-missn="${esc(it.number)}" multiple hidden onchange="upMissing(this)">
+          <button class="sec" onclick="this.previousElementSibling.click()">📎 Загрузить…</button></td></tr>`).join("")}</tbody></table>
+    <div style="margin-top:6px">
+      <button class="act" onclick="idx('start')">▶ Индексировать добавленное</button>
+      <button class="act" onclick="reaskLoaded()">🔁 Переспросить замечания с догруженными документами</button>
+    </div>`;
+}
+async function upMissing(inp) {
+  const n = inp.dataset.missn; let k = 0;
+  for (const f of inp.files) {
+    try { const r = await apiRaw("upload", {name: encodeURIComponent(f.name), remark: encodeURIComponent(n)}, f); k += r.saved.length; }
+    catch (e) { err(e); }
+  }
+  toast(`К замечанию №${n} добавлено файлов: ${k}. Далее — «Индексировать добавленное».`);
+  await refreshHeader(); loadMissingDocs();
+}
+async function reaskLoaded() {
+  const nums = (window._miss || []).filter(it => it.loaded.length).map(it => it.number);
+  if (!nums.length) return toast("Сначала догрузите документы хотя бы к одному замечанию.", true);
+  if (!confirm(`Переспросить замечания ${nums.join(", ")} (после индексации добавленных файлов)?`)) return;
+  try {
+    const r = await api("reask", {project: P, numbers: nums});
+    await api("answers_ctl", {project: P, action: "start", remarks_path: remarksPath});
+    toast(`Помечено к переспросу: ${r.marked}. Поиск ответов запущен (вкладка ОТВЕТЫ).`);
+  } catch (e) { err(e); }
 }
 async function loadVersions() {
   const box = $("verBox");
@@ -552,7 +600,13 @@ function showAns(i) {
     <h3>ОТВЕТ</h3>${ta("edAnswer", a.answer, 6)}
     <div class="mut">ИСТОЧНИКИ ответа (том · место · текст фрагмента; «🖼 лист» — страница, если исходник ещё в объекте):</div>
     ${(a.sources||[]).map(s => srcLine(s, a.sources_unverified)).join("") || "<div class='msg'>источники не указаны</div>"}
-    <h3>КАК БЫЛО</h3>${ta("edWas", a.edit_was, 3)}
+    ${(a.target_volumes||[]).length ? `<div class="mut">Тома-адресаты правки: <b>${esc(a.target_volumes.join(", "))}</b></div>` : ""}
+    ${(a.unsupported_requisites||[]).length ? `<div class="warn">⚠ Реквизиты, которых нет в источниках (проверить/заменить плейсхолдером): ${esc(a.unsupported_requisites.join("; "))}</div>` : ""}
+    <h3>КАК БЫЛО ${a.was_verified ? '<span class="badge g">цитата подтверждена в томе</span>' : (a.edit_was ? '<span class="badge w">не проверено</span>' : "")}</h3>${ta("edWas", a.edit_was, 3)}
+    ${a.edit_was_unverified ? `<div class="warn">ИИ предложил «было», которого в томе нет (пересказ): «${esc(a.edit_was_unverified.slice(0,300))}» — впишите дословную цитату из тома или оставьте пустым.</div>` : ""}
+    ${Object.keys(a.volume_edits||{}).length ? `<div class="mut">Правки по томам:</div>` + Object.entries(a.volume_edits).map(([t, e]) =>
+      `<div style="margin:3px 0;padding:4px 6px;border-left:3px solid var(--b)"><b>том ${esc(t)}</b> ${e.was_verified ? '<span class="badge g">было подтверждено</span>' : (e.edit_was_unverified ? '<span class="badge w">было не найдено</span>' : "")}
+       <div class="msg">где: ${esc(e.edit_location||"—")}<br>было: ${esc(e.edit_was||e.edit_was_unverified||"—")}<br>стало: ${esc(e.edit_shall||"—")}</div></div>`).join("") : ""}
     <div class="mut">где найдено «было»:</div>
     ${ws.file ? srcLine(ws, false) : "<div class='msg'>цитата в фрагментах контекста не найдена — проверьте текст «было» по тому</div>"}
     <label>ГДЕ ПРАВИТЬ (том, пункт, таблица): <input type="text" id="edLoc" value="${esc(a.edit_location)}" style="width:100%"></label>
@@ -703,6 +757,8 @@ function renderCorrReport(rep) {
     <div class="msg">по месту ${(st.replace||0)+(st.insert||0)} · вручную ${st.manual||0} · не внесено ${st.missing||0} ·
       приложений зарезервировано ${st.reserved||0} ${rep.report_docx ? `<button class="sec" onclick="openPath(${JSON.stringify(rep.report_docx)})">Открыть отчёт</button>` : ""}</div>
     ${rep.volumes.map(v => `<b>${esc(v.volume)}</b>${v.error ? ` <span class="warn">⚠ ${esc(v.error)}</span>` : ""}
+      ${v.pdf && v.pdf.output ? ` <span class="msg">· PDF поверх оригинала: аннотировано ${v.pdf.placed} из ${v.pdf.total}
+        <button class="sec" onclick="openPath(${JSON.stringify(v.pdf.output)})">Открыть PDF</button></span>` : (v.pdf && v.pdf.error ? ` <span class="warn">PDF: ${esc(v.pdf.error)}</span>` : "")}
       <table><thead><tr><th>№</th><th>Статус</th><th>Куда / способ</th><th>Приложения</th></tr></thead>
       <tbody>${(v.rows||[]).map(r => `<tr><td>${esc(r.number)}</td><td>${esc(r.status)}</td>
         <td class="msg">${esc(r.note)}${r.where ? "<br>" + esc(r.where) : ""}</td><td class="msg">${esc((r.attachments||[]).join("; "))}</td></tr>`).join("") ||

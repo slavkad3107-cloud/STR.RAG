@@ -291,11 +291,14 @@ class HybridRetriever:
     def _dense(self, project: str, query: str, *, candidates: int,
                sections, exclude_sections) -> list[dict]:
         qv = self.embedder.embed_queries([query])[0]
-        hits = self.store.search(project, qv, top=candidates,
+        ff = getattr(self, "_files_filter", None)
+        hits = self.store.search(project, qv, top=candidates * (4 if ff else 1),
                                  sections=sections, exclude_sections=exclude_sections)
         inactive = self._inactive(project)
         if inactive:
             hits = [h for h in hits if (h.get("payload") or {}).get("file") not in inactive]
+        if ff:
+            hits = [h for h in hits if (h.get("payload") or {}).get("file") in ff][:candidates]
         return hits
 
     def _bm25(self, project: str, query: str, *, candidates: int,
@@ -322,6 +325,9 @@ class HybridRetriever:
             if xset and sec in xset:
                 continue
             if inactive and pl.get("file") in inactive:
+                continue
+            ff = getattr(self, "_files_filter", None)
+            if ff and pl.get("file") not in ff:
                 continue
             out.append({"id": corp.ids[i], "score": float(scores[i]),
                         "text": corp.texts[i], "payload": pl})
@@ -421,8 +427,12 @@ class HybridRetriever:
                candidates: int | None = None, sections: list[str] | None = None,
                exclude_sections: list[str] | None = None,
                use_expansion: bool | None = None,
-               expansions: list[str] | None = None) -> list[dict]:
+               expansions: list[str] | None = None,
+               files: list[str] | None = None) -> list[dict]:
+        """files — ограничить поиск конкретными файлами (payload.file): так
+        берутся фрагменты ТОМА-АДРЕСАТА для контракта «было» (v0.55)."""
         top = top or int(self.cfg.get("retrieval.top_k", 8))
+        self._files_filter = set(files) if files else None
         candidates = candidates or int(self.cfg.get("retrieval.candidates", 60))
         use_expansion = self.cfg.get("retrieval.use_query_expansion", True) if use_expansion is None else use_expansion
 

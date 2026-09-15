@@ -296,6 +296,10 @@ def _match_volume(a: dict, src: Path) -> bool:
     «где править» и текст замечания: «Том 6.2, п. 4.2.3» → том 6.2. Реальный
     случай (05.09): полтора десятка правок «Том 6.2/6.3» ложились в том 6.1."""
     tok = _src_volume_token(src)
+    # 0) v0.55: тома-адресаты, определённые из текста замечания при ответе
+    tv = a.get("target_volumes") or []
+    if tv and tok:
+        return tok in tv
     # Приоритет: 1) «Том X.Y» в «где править» (ИИ пишет адрес правки);
     # 2) служебное поле «Том ООС»; 3) только если оба пусты — тома из текста
     # замечания (ревью: в замечании часто упомянут ЧУЖОЙ том — «см. том 5.1
@@ -704,7 +708,9 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
         loc = decode_garbled((a.get("edit_location") or "").strip())
         remark = decode_garbled((a.get("remark") or "").strip())
         e = {"number": num, "mode": "manual", "idx": -1, "k": 0, "score": 0.0,
-             "par_text": "", "shall": shall, "location": loc,
+             "par_text": "", "shall": shall, "was": was, "location": loc,
+             "sources": [f"{s.get('file', '')} {s.get('loc', '')}".strip()
+                         for s in (a.get("sources") or [])[:4]],
              "is_table": _is_md_table(shall), "via": "",
              # документы, которых не хватает, — под них резервируется место
              # в конце тома (ТЗ 08.09: «оставить пустое место и выделить»)
@@ -1068,6 +1074,9 @@ def verify_corrected(out_path, plan: list[dict]) -> list[dict]:
                 status, note = "⚠ дубль", f"метка встречается {cnt} раз"
         rows.append({"number": num, "mode": e["mode"], "status": status, "note": note,
                      "where": (e.get("par_text") or e.get("location") or "")[:120],
+                     "location": e.get("location", ""),
+                     "was": (e.get("was") or "")[:600], "shall": (e.get("shall") or "")[:1200],
+                     "sources": list(e.get("sources") or []),
                      "attachments": list(e.get("attachments") or [])})
     return rows
 
@@ -1087,24 +1096,41 @@ def _write_report(project: str, report: dict) -> Path:
                       f"вручную {report['stats'].get('manual', 0)}, "
                       f"не внесено {report['stats'].get('missing', 0)}, "
                       f"приложений зарезервировано {report['stats'].get('reserved', 0)}.")
+    # ПЕРЕЧЕНЬ ИЗМЕНЕНИЙ (вердикт dex 15.09: главный сдаваемый документ —
+    # реестр правок с точной привязкой: № · том · где · БЫЛО · СТАЛО ·
+    # основание · способ внесения)
     for vol in report.get("volumes", []):
         add_heading(doc, vol["volume"], level=1)
         rows = vol.get("rows") or []
+        pdf = vol.get("pdf") or {}
+        if pdf.get("output"):
+            doc.add_paragraph(f"PDF с правками поверх оригинала: {Path(pdf['output']).name} — "
+                              f"аннотировано {pdf.get('placed', 0)} из {pdf.get('total', 0)} правок "
+                              f"(подсветка «было», выноска со «стало», закладки «★ ПРАВКА №…»).")
         if not rows:
             doc.add_paragraph("Правок для этого тома нет.")
             continue
-        tbl = doc.add_table(rows=1, cols=4)
+        pdf_rows = {str(r.get("number")): r for r in (pdf.get("rows") or [])}
+        tbl = doc.add_table(rows=1, cols=7)
         try:
             tbl.style = "Table Grid"
         except KeyError:
             pass
-        for j, hdr in enumerate(("№", "Статус", "Куда / способ", "Приложения")):
+        for j, hdr in enumerate(("№", "Где (том, пункт)", "БЫЛО", "СТАЛО", "Основание (источник в ПД)",
+                                 "Способ внесения", "Приложения")):
             tbl.rows[0].cells[j].text = hdr
         for r in rows:
             c = tbl.add_row().cells
-            c[0].text, c[1].text = r["number"], r["status"]
-            c[2].text = (r["note"] + (f"\n{r['where']}" if r["where"] else "")).strip()
-            c[3].text = "; ".join(r["attachments"])
+            pr = pdf_rows.get(str(r["number"]))
+            way = r["status"] + (f"; в PDF: {pr['status']}" + (f" стр. {pr['page']}" if pr.get("page") else "")
+                                 if pr else "")
+            c[0].text = r["number"]
+            c[1].text = (r.get("location") or r.get("where") or "")
+            c[2].text = r.get("was") or "—"
+            c[3].text = r.get("shall") or "—"
+            c[4].text = "; ".join(r.get("sources") or []) or "—"
+            c[5].text = (way + (f"\n{r['note']}" if r.get("note") else "")).strip()
+            c[6].text = "; ".join(r["attachments"])
     p = out_dir / f"{_REPORT_NAME}.docx"
     doc.save(str(p))
     return p
@@ -1192,12 +1218,27 @@ def _volume_answers(answers: list[dict], srcs: list, si: int, src) -> list[dict]
     Ответ, называющий несколько томов («Том 6.1, Том 6.2, Том 6.3»), идёт в
     КАЖДЫЙ из них; не отнесённые ни к одному тому — в первый."""
     if len(srcs) <= 1:
-        return list(answers)
-    matched_ids = {id(a) for s2 in srcs for a in answers if _match_volume(a, s2)}
-    mine = [a for a in answers if _match_volume(a, src)]
-    if si == 0:
-        mine += [a for a in answers if id(a) not in matched_ids]
-    return mine
+        mine = list(answers)
+    else:
+        matched_ids = {id(a) for s2 in srcs for a in answers if _match_volume(a, s2)}
+        mine = [a for a in answers if _match_volume(a, src)]
+        if si == 0:
+            mine += [a for a in answers if id(a) not in matched_ids]
+    # ПРАВКА ПО ТОМУ (v0.55): если ИИ дал volume_edits для этого тома (свои
+    # числа по пусковому комплексу) — подставляем их вместо общих полей
+    tok = _src_volume_token(src)
+    out = []
+    for a in mine:
+        ve = (a.get("volume_edits") or {}).get(tok) if tok else None
+        if isinstance(ve, dict) and (ve.get("edit_shall") or "").strip():
+            a2 = dict(a)
+            a2["edit_location"] = ve.get("edit_location") or a.get("edit_location", "")
+            a2["edit_was"] = ve.get("edit_was") or ""
+            a2["edit_shall"] = ve["edit_shall"]
+            out.append(a2)
+        else:
+            out.append(a)
+    return out
 
 
 def _placed_text(e: dict) -> str:
@@ -1299,8 +1340,24 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
                 report["stats"]["missing"] += 1
         for k in ("replace", "insert", "manual", "skip", "reserved"):
             report["stats"][k] += int(stats.get(k, 0))
-        report["volumes"].append({"volume": src.name, "output": out.name, "rows": rows,
-                                  "stats": stats})
+        vol_rep = {"volume": src.name, "output": out.name, "rows": rows, "stats": stats}
+        # ПРАВКИ ПОВЕРХ ОРИГИНАЛЬНОГО PDF (v0.55): если том загружали как PDF,
+        # оригинал лежит в _orig — кладём подсветки/выноски/закладки в его копию
+        orig_pdf = src.parent / "_orig" / f"{src.stem}.pdf"
+        if orig_pdf.exists():
+            try:
+                from .pdf_patch import annotate_pdf
+                items = [{"number": e["number"], "edit_was": e.get("was", ""),
+                          "edit_shall": e["shall"], "edit_location": e.get("location", "")}
+                         for e in plan if e["mode"] != "skip"]
+                vol_rep["pdf"] = annotate_pdf(orig_pdf, items, out_dir / f"{src.stem}_ПРАВКИ.pdf")
+                report["stats"]["pdf_annotated"] = report["stats"].get("pdf_annotated", 0) + vol_rep["pdf"]["placed"]
+                print(f"[m5] {src.name}: PDF-аннотации {vol_rep['pdf']['placed']}/{vol_rep['pdf']['total']}",
+                      flush=True)
+            except Exception as e:  # noqa: BLE001
+                vol_rep["pdf"] = {"error": str(e)[:200]}
+                print(f"[m5] {src.name}: PDF-аннотации не удались: {e}", flush=True)
+        report["volumes"].append(vol_rep)
         print(f"[m5] {src.name}: замен {stats['replace']}, вставок {stats['insert']}, "
               f"вручную {stats['manual']}, приложений зарезервировано "
               f"{stats.get('reserved', 0)} → {out.name}", flush=True)
