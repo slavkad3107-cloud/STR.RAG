@@ -550,6 +550,16 @@ def test_docx_text_len_counts_textboxes(tmp_path):
     assert _docx_text_len(f) > 300                                       # но текст есть
 
 
+def test_garbled_tables_not_indexed():
+    # 15.09.2026 (ОПОЧКА-ПРОВЕРКА): текст страниц декодировался, а «таблицы»
+    # pdfplumber с тех же страниц шли в индекс как «(cid:20)(cid:25)…» —
+    # 150 битых чанков на том; такие таблицы отбрасываются
+    from pmoos.ingest import loaders as L
+    src = open(L.__file__, encoding="utf-8").read()
+    assert "i in decoded_pages" in src and 'ttext.count("(cid:") >= 3' in src
+    assert L.is_garbled("(cid:20)(cid:25)(cid:3) " * 20) is True
+
+
 def test_garbled_lowercase_detected_and_repaired(tmp_path):
     # 06.09.2026: тома ООС ОПОЧКИ («ɋɚɧɤɬ-ɉɟɬɟɪɛɭɪɝ» = Санкт-Петербург) на 80 %
     # из строчных IPA-символов проходили как нормальный текст (диапазон
@@ -697,6 +707,70 @@ def test_missing_docs_and_reask(tmp_path, monkeypatch):
     assert r["marked"] == 1
     a = {x["number"]: x for x in _json.loads(pp["answers"].read_text(encoding="utf-8"))["answers"]}
     assert a["3"]["needs_ai"] is True and a["3"]["status"] == "proposed" and a["4"].get("needs_ai") is None
+
+
+def test_answer_pack_end_to_end_with_stubs(tmp_path, monkeypatch):
+    # v0.55: сквозной прогон _answer_pack со стабами поиска и ИИ — ловит
+    # ошибки сборки (15.09: NameError 'target' уронил живой прогон на ОПОЧКЕ)
+    import json as _json
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.paths import project_paths
+    from pmoos.projects import register_project
+    register_project("Сквозь")
+    pp = project_paths("Сквозь")
+    pp["index_state"].write_text(_json.dumps({"files": {
+        "Раздел ПД №6_ООС_том 6.1.pdf": {"section": "OOS"}, "Раздел ПД №6_ООС_том 6.2.pdf": {"section": "OOS"},
+        "Раздел ПД №5_ПОС1_том 5.1.2.pdf": {"section": "POS"}}}, ensure_ascii=False), encoding="utf-8")
+    from pmoos.pipeline import block1_answers as B
+    from pmoos.ingest.remarks import Remark
+    oos_txt = ("Максимальная численность работников, занятых на реконструкции в наиболее "
+               "многочисленную смену - 66 человек, из них 57 - рабочих, 9 - ИТР.")
+
+    class _Retr:
+        calls = []
+        def __init__(self, cfg): pass
+        def batch_search(self, project, queries, **kw):
+            _Retr.calls.append(kw)
+            if kw.get("files"):
+                f = kw["files"][0]
+                return [[{"id": f + "#1", "text": oos_txt, "payload": {"file": f, "loc": "стр. 17", "section": "OOS"}}]
+                        for _ in queries]
+            return [[{"id": "pos#1", "text": "Максимальное количество работающих 75 чел.",
+                      "payload": {"file": "Раздел ПД №5_ПОС1_том 5.1.2.pdf", "loc": "стр. 9", "section": "POS"}},
+                     {"id": "pos3#1", "text": "Максимальное количество работающих 48 чел.",
+                      "payload": {"file": "Раздел ПД №5_ПОС1_том 5.1.3.pdf", "loc": "стр. 9", "section": "POS"}}]
+                    for _ in queries]
+        def close(self): pass
+    monkeypatch.setattr(B, "HybridRetriever", _Retr)
+    seen_prompts = []
+
+    def _batch_chat(cfg, jobs, **kw):
+        out = []
+        for j in jobs:
+            seen_prompts.append(j[1]["content"])
+            out.append({"ok": True, "result": {
+                "answer": "Численность уточнена по ПОС: 75 чел. Лицензия № ЛО-11-22 ООО «Выдумка».",
+                "correction": "x", "edit_location": "Том 6.2, п. 1",
+                "edit_was": "максимальная численность работников занятых на реконструкции в наиболее многочисленную смену 66 человек из них 57 рабочих 9 итр",
+                "edit_shall": "… 75 человек …", "attachments": [], "used_sources": [1], "confidence": "high",
+                "missing_data": "", "volume_edits": {}}})
+        return out
+    monkeypatch.setattr(B, "batch_chat", _batch_chat)
+    monkeypatch.setattr(B, "downstream", lambda project, codes: {"changed": [], "affected": []})
+    monkeypatch.setattr(B, "explain_cascade", lambda *a, **k: "")
+    from pmoos.config import load_config
+    cfg = load_config()
+    cfg.set("ai.json_repair_retry", False)
+    remarks = [Remark(number="6", text="Уточнить количество строителей согласно ПОС. Том 6.2, п.1; п.5.1.")]
+    answers = B._answer_pack("Сквозь", cfg, "линейный", remarks, [], None)
+    a = answers[0]
+    assert a["target_volumes"] == ["6.2"] and a["oos_volume"] == "Раздел ПД №6_ООС_том 6.2.pdf"
+    assert any(kw.get("files") == ["Раздел ПД №6_ООС_том 6.2.pdf"] for kw in _Retr.calls), "поиск по тому-адресату"
+    assert "{ТОМ-АДРЕСАТ 6.2}" in seen_prompts[0] and "ПРАВИЛА" in seen_prompts[0]
+    assert a["was_verified"] is True and "66 человек" in a["edit_was"]      # дословная цитата из тома
+    assert "ЛО-11-22" in " ".join(a["unsupported_requisites"]) and a["confidence"] == "low"
+    # фрагмент ПОС чужого ПК (5.1.3) ушёл в конец
+    assert [s["file"] for s in a["retrieved_sources"]][-1].endswith("5.1.3.pdf")
 
 
 def test_volumes_pk_binding_and_was_contract(tmp_path, monkeypatch):

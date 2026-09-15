@@ -96,6 +96,14 @@ def _ocr_page(pix_bytes: bytes, lang: str) -> str:
     return txt
 
 
+def _ipa_ratio(text: str) -> float:
+    """Доля символов латиницы-расширенной/IPA (U+0180–U+02FF) среди непробельных."""
+    import re as _re
+    t = text or ""
+    tot = len(_re.findall(r"\S", t))
+    return (len(_re.findall(r"[ƀ-˿]", t)) / tot) if tot else 0.0
+
+
 def decode_garbled_text(text: str) -> str:
     """Восстановить кириллицу из «ɡɚɤɚɡɱɢɤ» (шрифт PDF без кодировки) —
     та же таблица, что в output.docx_writer.decode_garbled."""
@@ -150,6 +158,7 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
     page_text: dict[int, str] = {}
     ocr_jobs: list[tuple[int, bytes]] = []
     empty_text_pages: set[int] = set()  # чистые сканы (нет текстового слоя вовсе)
+    decoded_pages: set[int] = set()     # страницы с восстановленной кодировкой шрифта
     try:
         for i, page in enumerate(doc, start=1):
             # защита от «зависания» на гигантских сканах: не рендерим больше лимита
@@ -160,12 +169,15 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
             text = page.get_text("text") or ""
             if not text.strip():
                 empty_text_pages.add(i)
-            if len(text.strip()) >= min_text_chars and is_garbled(text):
+            if text.strip() and (is_garbled(text) or _ipa_ratio(text) > 0.05):
                 # битая кодировка шрифта — сначала пробуем ВОССТАНОВИТЬ текст
-                # (сдвиг 0x1D6 детерминирован, точнее и в сотни раз быстрее OCR)
+                # (сдвиг 0x1D6 детерминирован, точнее и в сотни раз быстрее OCR).
+                # Длина не важна: короткая рамка листа приложения («717/14/15-П-1/
+                # ООС Лист 111») тоже должна стать читаемой (15.09.2026)
                 dec = decode_garbled_text(text)
-                if not is_garbled(dec):
+                if _ipa_ratio(dec) < _ipa_ratio(text) and not is_garbled(dec):
                     text = dec
+                    decoded_pages.add(i)
             page_text[i] = text
             if ocr and (len(text.strip()) < min_text_chars or is_garbled(text)):
                 try:
@@ -215,12 +227,18 @@ def extract_pdf(path: Path, *, ocr: bool = True, min_text_chars: int = 200,
             for i, page in enumerate(pdf.pages, start=1):
                 if max_pages and i > max_pages:
                     break
-                if i in empty_text_pages:
+                if i in empty_text_pages or i in decoded_pages:
+                    # у страниц с битым шрифтом pdfplumber отдаёт ячейки как
+                    # «(cid:20)(cid:25)…» — такие «таблицы» засоряли индекс
+                    # (ОПОЧКА, 15.09: 150 битых чанков на том), а содержимое
+                    # таблиц уже есть в восстановленном тексте страницы
                     continue
                 try:
                     for tbl in (page.extract_tables() or []):
                         rows = [" | ".join((c or "").strip() for c in row) for row in tbl]
                         ttext = "\n".join(r for r in rows if r.strip())
+                        if ttext.count("(cid:") >= 3 or is_garbled(ttext):
+                            continue
                         if ttext.strip():
                             pages.append({"loc": f"стр. {i} (таблица)",
                                           "text": ttext, "is_table": True})

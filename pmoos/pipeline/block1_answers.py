@@ -441,7 +441,7 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
     # плюс отдельный поиск ПО САМОМУ ТОМУ для дословного «было».
     from .volumes import (oos_volumes, target_volumes, pk_of, pk_filter,
                           passport_text)
-    oos_map = oos_volumes(project, target)
+    oos_map = oos_volumes(project, str(cfg.get("target_section", "OOS") or "OOS"))
     oos_files = set(oos_map.values())
     tv_by_idx: dict[int, list[str]] = {}
     vol_hits_by_idx: dict[int, dict[str, list[dict]]] = {}
