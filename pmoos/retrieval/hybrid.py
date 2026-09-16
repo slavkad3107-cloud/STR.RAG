@@ -124,9 +124,21 @@ class _Corpus:
     tokens: Any = None  # предвычисленные токены для BM25 (персистятся на диск)
 
 
+def _preload_ml() -> None:
+    """Импортировать тяжёлые библиотеки ДО открытия embedded-Qdrant (16.09.2026:
+    генерация раздела падала access violation при ленивом импорте pandas/sklearn
+    из transformers уже после открытия хранилища; с предзагрузкой — стабильно)."""
+    for mod in ("numpy", "pandas", "sklearn", "torch", "sentence_transformers"):
+        try:
+            __import__(mod)
+        except Exception:  # noqa: BLE001 — отсутствие модуля не критично здесь
+            pass
+
+
 class HybridRetriever:
     def __init__(self, cfg: Config, *, embedder: Embedder | None = None,
                  store: VectorStore | None = None, reranker: Reranker | None = None):
+        _preload_ml()
         self.cfg = cfg
         self.embedder = embedder or Embedder(cfg)
         # dim — ЛЕНИВО (callable): self.embedder.dim грузит модель ~2.3 ГБ, а в

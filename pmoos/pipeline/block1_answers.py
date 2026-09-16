@@ -45,7 +45,17 @@ _SYS = _SYS_TMPL.format(target="Перечень мероприятий по о�
 
 def _sys_for(target: str) -> str:
     from ..ingest.sections import target_name
-    return _SYS_TMPL.format(target=target_name(target))
+    base = _SYS_TMPL.format(target=target_name(target))
+    try:
+        from .volumes import normatives_block
+        nb = normatives_block()
+    except Exception:  # noqa: BLE001
+        nb = ""
+    if nb:
+        base += ("\n\nУСТАРЕВШИЕ НОРМАТИВЫ (не называть их актуальными; в «стало» ставить "
+                 "действующие):\n" + nb +
+                 "\nФразы «в актуальной/действующей редакции» без номера и даты документа запрещены.")
+    return base
 
 _USER_TMPL = (
     "ЗАМЕЧАНИЕ ЭКСПЕРТА №{num}:\n«{remark}»\n\n"
@@ -64,7 +74,12 @@ _USER_TMPL = (
     "ответ начинается со слов «Требуется:» с перечнем, что запросить/пересчитать; "
     "не пиши «представлен/приложен/выполнен».\n"
     "4) Числа по пусковым комплексам — только из паспорта проекта и фрагментов того "
-    "же ПК; числа другого ПК в том не переносить.\n"
+    "же ПК; числа другого ПК в том не переносить; при РАСХОЖДЕНИИ источников — "
+    "назвать оба значения и какое принято.\n"
+    "6) Если данных нет («Требуется…»), в edit_shall — только формулировка с "
+    "плейсхолдерами «<значение по …>» без придуманных чисел, кодов и организаций.\n"
+    "7) edit_shall не должен повторять edit_was без изменений; если «было» найдено, "
+    "edit_shall обязателен.\n"
     "5) edit_location — существующий пункт/таблица тома-адресата (как во фрагментах).\n\n"
     "Сформируй ответ строго в формате JSON:\n"
     "{{\n"
@@ -392,6 +407,16 @@ def run_block1(project: str, cfg: Config | None = None, *,
                       f"Готово ответов: {len(by_num)}/{total}")
 
     out = _save_merged(project, remarks, by_num, cfg, object_type, partial=False)
+    # v0.55: если тома уже загружены во ВЫГРУЗКУ — проверить «было» по их полному тексту
+    try:
+        from .volumes import reverify_answers
+        rv = reverify_answers(project)
+        if rv.get("verified"):
+            print(f"[block1] «было» подтверждено по полному тексту томов: {rv['verified']} из {rv['checked']}",
+                  flush=True)
+            out = load_answers(project)
+    except Exception as e:  # noqa: BLE001
+        print(f"[block1] повторная проверка «было»: {e}", flush=True)
     _ans_progress(project, total, len(by_num),
                   f"Готово: {len(by_num)} ответов.", status="done")
     return out
@@ -440,7 +465,7 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
     # текста замечания (не из первого чанка), фрагменты чужого ПК — вон/в конец,
     # плюс отдельный поиск ПО САМОМУ ТОМУ для дословного «было».
     from .volumes import (oos_volumes, target_volumes, pk_of, pk_filter,
-                          passport_text)
+                          passport_text, volume_token)
     oos_map = oos_volumes(project, str(cfg.get("target_section", "OOS") or "OOS"))
     oos_files = set(oos_map.values())
     tv_by_idx: dict[int, list[str]] = {}
@@ -482,6 +507,43 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
                 seen_ids = {str(h.get("id")) for h in vh}
                 hits_per[_k] = vh + [h for h in hits_per[_k] if str(h.get("id")) not in seen_ids]
     passport = passport_text(project, oos_map)
+    # ОБЯЗАТЕЛЬНЫЕ ИСТОЧНИКИ ИЗ «ОСНОВАНИЯ» (тестировщик №2, рек. 3): том,
+    # названный в замечании («Раздел 3, Том 3.1.2, лист ТКР.АД-ВР19»), ищется
+    # прицельно и попадает в контекст с меткой {ОСНОВАНИЕ …}
+    from .volumes import ref_volumes, _state_files
+    _all_files = {}
+    for _rel in _state_files(project):
+        _tok = volume_token(_rel)
+        if _tok and _tok not in oos_map:
+            _all_files.setdefault(_tok, _rel)
+    ref_by_idx: dict[int, list[str]] = {}
+    for _k, _r in enumerate(remarks):
+        ref_by_idx[_k] = [t for t in ref_volumes(_r.text, oos_map) if t in _all_files][:3]
+    per_ref: dict[str, list[int]] = {}
+    for _k, toks in ref_by_idx.items():
+        for tok in toks:
+            per_ref.setdefault(_all_files[tok], []).append(_k)
+    if per_ref:
+        retr3 = HybridRetriever(cfg)
+        try:
+            for fname, idxs in per_ref.items():
+                tok = next(t for t, f in _all_files.items() if f == fname)
+                try:
+                    res = retr3.batch_search(project, [remarks[i].text for i in idxs],
+                                             files=[fname], top=2, candidates=16, use_expansion=False)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[block1] поиск по основанию {tok}: {e}", flush=True)
+                    res = [[] for _ in idxs]
+                for i, hs in zip(idxs, res):
+                    for h in hs:
+                        h["payload"] = dict(h.get("payload") or {}, _tag=f"ОСНОВАНИЕ том {tok}")
+                    seen_ids = {str(h.get("id")) for h in hits_per[i]}
+                    add = [h for h in hs if str(h.get("id")) not in seen_ids]
+                    # после фрагментов тома-адресата, перед общим поиском
+                    nvol = sum(1 for h in hits_per[i] if (h.get("payload") or {}).get("_tag", "").startswith("ТОМ-АДРЕСАТ"))
+                    hits_per[i] = hits_per[i][:nvol] + add + hits_per[i][nvol:]
+        finally:
+            retr3.close()
 
     # 3) формируем задания для ИИ (с few-shot из памяти прошлых проектов)
     use_mem = bool(cfg.get("memory.enabled", True))
@@ -594,9 +656,47 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
                     _e["edit_was"] = ""
                     _e["was_verified"] = False
             clean_vol_edits[str(_tok)] = _e
-        _ctx_full = "\n".join((h.get("text") or "") for h in hits)
+        # общее замечание: верхние поля правки пустые, а правки по томам есть —
+        # берём первый том как «лицо» ответа (экспорт таблиц, старые сценарии)
+        if clean_vol_edits and not (data.get("edit_shall") or "").strip():
+            _first = next(iter(clean_vol_edits.values()))
+            data["edit_shall"] = _first.get("edit_shall", "")
+            data["edit_location"] = data.get("edit_location") or _first.get("edit_location", "")
+            if not (data.get("edit_was") or "").strip() and _first.get("edit_was"):
+                data["edit_was"] = _first["edit_was"]
+                was_verified = bool(_first.get("was_verified"))
+        # «где править» указывает на ЧУЖОЙ том (ПОС/ТКР вместо тома ООС) —
+        # правка не может лечь в том-адресат (проверка 15.09: «Том 5.1.3, п. 24»)
+        from ..output.docx_writer import _volume_tokens as _vt
+        _loc_vols = _vt(data.get("edit_location") or "")
+        _tv_set = set(tv_by_idx.get(idx, []))
+        location_mismatch = bool(_loc_vols and _tv_set and not (_loc_vols & _tv_set))
+        _ctx_full = "\n".join((h.get("text") or "") for h in hits) + "\n" + passport
         unsupported = unsupported_requisites(
             " ".join([answer_text, data.get("edit_shall", ""), data.get("correction", "")]), _ctx_full)
+        # ЧИСЛА В «СТАЛО» БЕЗ ИСТОЧНИКА и режим «нет данных» (тестировщик №2, рек. 1–2):
+        # если ответ говорит «Требуется…»/не хватает данных, а в «стало» стоят
+        # числа, которых нет ни во фрагментах, ни в паспорте, — это сочинённые
+        # значения: правка не вносится автоматически (shall_unverified)
+        from .volumes import unsupported_numbers, location_from_remark, normalize as _nz
+        requires_docs = bool((data.get("missing_data") or "").strip()) or \
+            answer_text.lstrip().lower().startswith("требуется") or bool(data.get("attachments"))
+        unsupported_nums = unsupported_numbers(data.get("edit_shall", ""), _ctx_full)
+        shall_unverified = bool(unsupported_nums) and requires_docs
+        # флаги качества правки
+        _shall = (data.get("edit_shall") or "").strip()
+        shall_missing = bool(was_verified) and not _shall
+        no_change = bool(_shall) and bool((data.get("edit_was") or "").strip()) and \
+            _nz(_shall) == _nz(data.get("edit_was") or "")
+        # адрес правки: из подтверждённого «было» (лист) или из текста замечания
+        if _shall and not (data.get("edit_location") or "").strip():
+            _from_remark = location_from_remark(r.text)
+            _tv0 = (tv_by_idx.get(idx) or [""])[0]
+            data["edit_location"] = (f"Том {_tv0}, " if _tv0 else "") + (_from_remark or "место уточнить")
+        if was_verified:
+            _src = _locate_in_hits(data.get("edit_was", ""), hits) or {}
+            if _src.get("loc") and _src["loc"] not in (data.get("edit_location") or ""):
+                data["edit_location"] = (data.get("edit_location") or "").rstrip(" ;") + f" ({_src['loc']})"
         # источник для consistency = ТЕ ЖЕ фрагменты, что ушли модели в контекст
         # (раньше hits[:5] при контексте top_k=8 — сущности из фрагментов 6-8 давали
         # ложные «unsupported_refs»). Плюс текст самого замечания: норматив,
@@ -613,13 +713,16 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
         # ГЕЙТ ДОСТОВЕРНОСТИ: выдуманные нормативы/ЗВ/техника (consistency.issues)
         # или отсутствие опоры → принудительно снижаем confidence и помечаем.
         unsupported_refs = bool(cons.get("issues"))
-        confidence = data.get("confidence", "")
-        if unsupported_refs or low_support or unsupported:
+        # КАЛИБРОВКА ПО ФАКТАМ (тестировщик №2, рек. 11): high — только дословное
+        # «было» + непустое «стало» + ни одного неподтверждённого реквизита/числа +
+        # есть источники; «Требуется»/нет источников → не выше medium; выдумки → low
+        if unsupported_refs or low_support or unsupported or shall_unverified:
             confidence = "low"
-        elif (data.get("edit_was_unverified") or "").strip() or (
-                data.get("edit_shall", "").strip() and not was_verified and not clean_vol_edits):
-            # правка без подтверждённого места в томе — не выше medium
-            confidence = "medium" if confidence == "high" else (confidence or "medium")
+        elif was_verified and _shall and used_sources and not requires_docs and not location_mismatch \
+                and not no_change and not unsupported_nums:
+            confidence = "high"
+        else:
+            confidence = "medium"
 
         # каскад: какие разделы затронет правка (по разделам источников; если ИИ не
         # атрибутировал — по найденным поиском, каскад носит справочный характер)
@@ -658,6 +761,12 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
             "target_volumes": tv_by_idx.get(idx, []),
             "volume_edits": clean_vol_edits,
             "unsupported_requisites": unsupported,
+            "location_mismatch": location_mismatch,
+            "unsupported_numbers": unsupported_nums,
+            "shall_unverified": shall_unverified,
+            "shall_missing": shall_missing,
+            "no_change": no_change,
+            "requires_docs": requires_docs,
             "attachments": data.get("attachments", []),
             "confidence": confidence,
             "missing_data": data.get("missing_data", ""),

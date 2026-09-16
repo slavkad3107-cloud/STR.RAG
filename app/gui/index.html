@@ -602,8 +602,13 @@ function showAns(i) {
     ${(a.sources||[]).map(s => srcLine(s, a.sources_unverified)).join("") || "<div class='msg'>источники не указаны</div>"}
     ${(a.target_volumes||[]).length ? `<div class="mut">Тома-адресаты правки: <b>${esc(a.target_volumes.join(", "))}</b></div>` : ""}
     ${(a.unsupported_requisites||[]).length ? `<div class="warn">⚠ Реквизиты, которых нет в источниках (проверить/заменить плейсхолдером): ${esc(a.unsupported_requisites.join("; "))}</div>` : ""}
+    ${a.location_mismatch ? `<div class="warn">⚠ «Где править» указывает на чужой том (не том-адресат) — уточните адрес правки в томе ООС.</div>` : ""}
     <h3>КАК БЫЛО ${a.was_verified ? '<span class="badge g">цитата подтверждена в томе</span>' : (a.edit_was ? '<span class="badge w">не проверено</span>' : "")}</h3>${ta("edWas", a.edit_was, 3)}
     ${a.edit_was_unverified ? `<div class="warn">ИИ предложил «было», которого в томе нет (пересказ): «${esc(a.edit_was_unverified.slice(0,300))}» — впишите дословную цитату из тома или оставьте пустым.</div>` : ""}
+    ${(a.edit_was_candidates||[]).length ? `<div class="mut">Похожие фрагменты тома (выберите дословное «было»):</div>` +
+      a.edit_was_candidates.map((c, i) => `<div style="margin:2px 0;padding:3px 6px;border-left:3px solid var(--line)">
+        <button class="sec" data-wascand="${i}" style="padding:1px 6px">✔ взять</button> <span class="mut">том ${esc(c.volume)} · ${Math.round(c.score*100)}%</span>
+        <div class="msg">${esc(c.quote)}</div></div>`).join("") : ""}
     ${Object.keys(a.volume_edits||{}).length ? `<div class="mut">Правки по томам:</div>` + Object.entries(a.volume_edits).map(([t, e]) =>
       `<div style="margin:3px 0;padding:4px 6px;border-left:3px solid var(--b)"><b>том ${esc(t)}</b> ${e.was_verified ? '<span class="badge g">было подтверждено</span>' : (e.edit_was_unverified ? '<span class="badge w">было не найдено</span>' : "")}
        <div class="msg">где: ${esc(e.edit_location||"—")}<br>было: ${esc(e.edit_was||e.edit_was_unverified||"—")}<br>стало: ${esc(e.edit_shall||"—")}</div></div>`).join("") : ""}
@@ -620,6 +625,10 @@ function showAns(i) {
       <button class="sec" onclick="decideSel('rejected')">✖ Отклонить</button>
     </div>
     <div id="scanBox2"></div>`;
+  $("ansDetail").querySelectorAll("[data-wascand]").forEach(b => b.onclick = () => {
+    $("edWas").value = (a.edit_was_candidates[+b.dataset.wascand] || {}).quote || "";
+    toast("Цитата подставлена в «КАК БЫЛО» — нажмите «💾 Сохранить правку».");
+  });
   $("ansDetail").querySelectorAll("[data-scan]").forEach(b => b.onclick = () => {
     $("scanBox2").innerHTML = `<img class="scan" src="${b.dataset.scan}&t=${Date.now()}"
       onerror="this.outerHTML='<div class=warn>Лист недоступен: исходник удалён после индексации — доступен текст фрагмента выше.</div>'">`;

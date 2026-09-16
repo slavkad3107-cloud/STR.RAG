@@ -118,6 +118,9 @@ def normalize(s: str) -> str:
     s = (s or "").lower().replace("ё", "е").replace("­", "")
     s = re.sub(r"-\s*\n\s*", "", s)               # перенос по дефису
     s = re.sub(r"[‐-―−]", "-", s)   # все тире/дефисы → '-'
+    # дефис внутри слова («представле-ны» из PDF, скопированный ИИ) — убираем
+    # с обеих сторон сравнения (санитарно-защитная → санитарнозащитная — симметрично)
+    s = re.sub(r"(?<=[а-яa-z])-(?=[а-яa-z])", "", s)
     s = s.replace(" ", " ")
     s = re.sub(r"[«»\"“”„']", "", s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -175,13 +178,128 @@ def verify_was(was: str, hits: list[dict], threshold: float = 0.85) -> dict:
     return best
 
 
+def volume_texts(project: str) -> dict[str, str]:
+    """Полный текст томов из corr_sources (*.docx, включая текстовые рамки) по
+    номеру тома — для повторной проверки «было» по ВСЕМУ тому, а не по
+    фрагментам поиска."""
+    from ..paths import project_paths
+    out: dict[str, str] = {}
+    cdir = project_paths(project)["root"] / "corr_sources"
+    if not cdir.exists():
+        return out
+    try:
+        from docx import Document
+        from ..output.docx_writer import _all_paragraphs
+    except Exception:  # noqa: BLE001
+        return out
+    for f in sorted(cdir.glob("*.docx")):
+        tok = volume_token(f.name)
+        if not tok:
+            continue
+        try:
+            d = Document(str(f))
+            out[tok] = "\n".join(p.text for p in _all_paragraphs(d))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _sliced(text: str, size: int = 4000, step: int = 3000) -> list[dict]:
+    """Текст тома окнами (как фрагменты) для verify_was."""
+    return [{"text": text[i:i + size], "payload": {}} for i in range(0, max(1, len(text)), step)]
+
+
+def reverify_answers(project: str, answers: list[dict] | None = None) -> dict:
+    """ПОВТОРНАЯ ПРОВЕРКА «БЫЛО» по полному тексту томов (после загрузки томов во
+    ВЫГРУЗКУ или после ответов): непроверенные цитаты, которые есть в томе,
+    становятся подтверждёнными (с дословной подстановкой). Возвращает сводку;
+    при answers=None читает и сохраняет answers.json."""
+    from .block1_answers import load_answers, _save
+    own = answers is None
+    data = load_answers(project) if own else {"answers": answers}
+    texts = volume_texts(project)
+    if not texts:
+        return {"checked": 0, "verified": 0, "note": "тома в corr_sources не загружены"}
+    windows = {tok: _sliced(t) for tok, t in texts.items()}
+    checked = verified = 0
+
+    def _check(was: str, toks: list[str]) -> dict | None:
+        best = None
+        for tok in toks or list(windows):
+            if tok not in windows:
+                continue
+            r = verify_was(was, windows[tok])
+            if r["verified"] and (best is None or r["score"] > best["score"]):
+                best = dict(r, volume=tok)
+        return best
+
+    def _candidates(was: str, toks: list[str], k: int = 3) -> list[dict]:
+        """Ближайшие дословные фрагменты тома (покрытие ≥ 0.5) — предложить
+        пользователю выбрать «было», если ИИ дал пересказ (вердикт dex: топ-3)."""
+        found: list[dict] = []
+        for tok in toks or list(windows):
+            for w in windows.get(tok, []):
+                r = verify_was(was, [w], threshold=0.5)
+                if r["verified"] and r["quote"]:
+                    found.append({"volume": tok, "score": r["score"], "quote": r["quote"][:500]})
+        found.sort(key=lambda x: -x["score"])
+        out, seen = [], set()
+        for c in found:
+            key = normalize(c["quote"])[:120]
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(c)
+            if len(out) >= k:
+                break
+        return out
+    for a in data.get("answers", []):
+        toks = list(a.get("target_volumes") or [])
+        if not a.get("was_verified"):
+            was = (a.get("edit_was") or a.get("edit_was_unverified") or "").strip()
+            if was:
+                checked += 1
+                r = _check(was, toks)
+                if r:
+                    a["edit_was"] = r["quote"] or was
+                    a["was_verified"] = True
+                    a["was_score"] = r["score"]
+                    a["edit_was_unverified"] = ""
+                    a["edit_was_candidates"] = []
+                    a.setdefault("edit_was_src", {})
+                    if not a["edit_was_src"]:
+                        a["edit_was_src"] = {"file": texts and f"том {r['volume']}", "loc": "",
+                                             "snippet": (r["quote"] or "")[:600], "score": r["score"]}
+                    verified += 1
+                else:
+                    a["edit_was_candidates"] = _candidates(was, toks)
+        for tok, ed in (a.get("volume_edits") or {}).items():
+            if not isinstance(ed, dict) or ed.get("was_verified"):
+                continue
+            was = (ed.get("edit_was") or ed.get("edit_was_unverified") or "").strip()
+            if was:
+                checked += 1
+                r = _check(was, [tok])
+                if r:
+                    ed["edit_was"] = r["quote"] or was
+                    ed["was_verified"] = True
+                    ed["edit_was_unverified"] = ""
+                    verified += 1
+    if own and verified:
+        _save(project, data)
+    return {"checked": checked, "verified": verified, "volumes": sorted(texts)}
+
+
 # ───────────── выдуманные реквизиты ─────────────
 _REQ_PATTERNS = [
-    r"(?:лиценз\w*|договор\w*|письм\w*|справк\w*|заключен\w*|протокол\w*|акт\w*)\s*(?:№|N)\s*[\w\-/.]+",
+    r"(?:лиценз\w*|договор\w*|письм\w*|справк\w*|заключен\w*|протокол\w*|акт\w*)\s*(?:№|N)\s*[\w\-/.‐-―]+",
     r"(?:ООО|АО|ПАО|ЗАО|МУП|ГУП|ФГБУ|ИП)\s*[«\"][^»\"]{2,60}[»\"]",
     r"\b\d{2}\.\d{2}\.(?:19|20)\d{2}\b",
 ]
 _REQ_RX = [re.compile(p, re.I) for p in _REQ_PATTERNS]
+# дата после названия НОРМАТИВА («ПП РФ от 16.02.2008 № 87») — не реквизит документа проекта
+_NORM_BEFORE_RX = re.compile(r"(?:пп|постановлен\w*|приказ\w*|распоряжен\w*|фз|санпин|сп|гост|"
+                             r"гн|сн|рд|методик\w*|закон\w*|кодекс\w*)[^\n]{0,60}$", re.I)
 
 
 def unsupported_requisites(text: str, context: str) -> list[str]:
@@ -192,6 +310,12 @@ def unsupported_requisites(text: str, context: str) -> list[str]:
     for rx in _REQ_RX:
         for m in rx.finditer(text or ""):
             tok = m.group(0)
+            if "___" in tok or "__" in tok:
+                continue                      # плейсхолдер «№ ___» — не выдумка
+            if re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", tok) and _NORM_BEFORE_RX.search(text[max(0, m.start() - 60):m.start()]):
+                continue                      # дата норматива (ПП-87 от 16.02.2008)
+            if re.search(r"(?:№|N)\s*[\w]{1,2}$", tok):
+                continue                      # обрезанный «№ пр» — не судим
             tn = normalize(tok)
             digits = re.findall(r"\d{2,}", tn)
             if tn in ctx:
@@ -207,33 +331,107 @@ def unsupported_requisites(text: str, context: str) -> list[str]:
     return out
 
 
+# ───────────── неподтверждённые ЧИСЛА в «стало» ─────────────
+_NUM_TOK_RX = re.compile(r"(?<![\d.,])\d{1,3}(?:[  ]\d{3})*(?:[.,]\d+)?(?![\d.,])")
+
+
+def unsupported_numbers(text: str, context: str) -> list[str]:
+    """Числа из «стало»/ответа, которых нет ни в фрагментах, ни в паспорте:
+    сочинённые значения (16.09: «0,2 м», «5 м³/с», ставки, суммы). Годы
+    (19xx/20xx), номера пунктов/таблиц («п. 3.5.2», «табл. 4.1») и числа
+    из одной цифры не считаем."""
+    def _canon(t: str) -> str:
+        t = re.sub(r"\s", "", t).replace(",", ".")
+        return t.rstrip("0").rstrip(".") if "." in t else t      # 0,20 == 0.2, но 20 ≠ 2
+    ctx_nums = {_canon(m.group(0)) for m in _NUM_TOK_RX.finditer(context or "")}
+    out: list[str] = []
+    for m in _NUM_TOK_RX.finditer(text or ""):
+        raw = m.group(0)
+        tok = re.sub(r"\s", "", raw).replace(",", ".")
+        if len(tok.replace(".", "")) < 2 or re.fullmatch(r"(?:19|20)\d{2}", tok):
+            continue
+        before = (text[max(0, m.start() - 12):m.start()]).lower()
+        if re.search(r"(?:п\.|пп\.|табл\w*\.?|таблиц\w*|рис\w*\.?|прил\w*\.?|раздел\w*|глав\w*|том\w*|№|n)\s*$", before):
+            continue
+        if _canon(raw) in ctx_nums:
+            continue
+        if raw not in out:
+            out.append(raw)
+    return out
+
+
+def location_from_remark(remark: str) -> str:
+    """Адрес правки из текста замечания: «п.2.1.4», «табл. 3.33», «приложение 4.2»."""
+    t = remark or ""
+    parts = []
+    for m in re.finditer(r"(?:п\.|пункт[аеу]?)\s*([\d.]+\d)", t, re.I):
+        parts.append(f"п. {m.group(1)}")
+    for m in re.finditer(r"(?:табл\.|таблиц[аеы])\s*([\d.]+\d)", t, re.I):
+        parts.append(f"табл. {m.group(1)}")
+    for m in re.finditer(r"приложени[еяи]\s*([\d.]+\d)", t, re.I):
+        parts.append(f"приложение {m.group(1)}")
+    return "; ".join(dict.fromkeys(parts))[:160]
+
+
+def normatives_block(limit: int = 12) -> str:
+    """Справка ИИ об устаревших нормативах из data/normatives.yaml (replaced/
+    cancelled): «X → заменён Y» — чтобы в «стало» не попадал ПП-913 как
+    «актуальная редакция» (16.09.2026)."""
+    try:
+        from ..normatives.engine import _registry
+        reg = _registry()
+    except Exception:  # noqa: BLE001
+        return ""
+    lines = []
+    for item in reg.values():
+        st = str(item.get("status") or "")
+        if st in ("replaced", "cancelled"):
+            what = item.get("id", "")
+            rep = item.get("replaced_by") or ""
+            lines.append(f"- {what}: {'заменён' if st == 'replaced' else 'отменён'}"
+                         + (f" → {rep}" if rep else ""))
+    return "\n".join(lines[:limit])
+
+
 # ───────────── паспорт проекта по ПК ─────────────
 _PASSPORT_KEYS = ("length_route", "workers", "duration", "area_plot")
-_PASSPORT_PREFER = ("POS", "TKR", "PPO", "PZU", "AR", "KR")
+_PASSPORT_PREFER = {"length_route": ("TKR", "AR", "PPO", "PZU", "POS"),
+                    "area_plot": ("PPO", "PZU", "TKR", "AR", "POS"),
+                    "workers": ("POS", "TKR", "PPO", "PZU"),
+                    "duration": ("POS", "TKR", "PPO", "PZU")}
 
 
 def passport(project: str) -> dict[str, dict]:
-    """{'1': {'workers': {'value': '82', 'unit': 'чел.', 'file': …}, …}, '2': …}
-    — значения показателей по пусковым комплексам (по источнику варианта)."""
+    """{'1': {'workers': {'value': '82', 'unit': 'чел.', 'file': …, 'alts': [...]}, …}, '2': …}
+    — значения показателей по пусковым комплексам (по источнику варианта);
+    длина — из ТКР (ПОС даёт длину этапа), сроки/численность — из ПОС; alts —
+    расходящиеся значения из других разделов (в ответ выносится расхождение)."""
     from ..data import registry as R
     inds = (R.load_registry(project).get("indicators") or {})
     out: dict[str, dict] = {}
     for key in _PASSPORT_KEYS:
         rec = inds.get(key) or {}
-        best: dict[str, tuple[int, dict]] = {}
+        prefer = _PASSPORT_PREFER.get(key, ("POS", "TKR", "PPO", "PZU"))
+        cands: dict[str, list[tuple[tuple, dict]]] = {}
         for v in rec.get("variants") or []:
             for s in v.get("sources") or []:
                 pk = pk_of(volume_token(s.get("file", "")))
                 if not pk:
                     continue
-                pri = _PASSPORT_PREFER.index(s.get("section")) if s.get("section") in _PASSPORT_PREFER else 9
-                score = (pri, -int(v.get("count", 0)))
-                cur = best.get(pk)
-                if cur is None or score < cur[0]:
-                    best[pk] = (score, {"value": v.get("value"), "unit": v.get("unit") or rec.get("unit", ""),
-                                        "file": s.get("file", ""), "loc": s.get("loc", "")})
-        for pk, (_, d) in best.items():
-            out.setdefault(pk, {})[key] = d
+                pri = prefer.index(s.get("section")) if s.get("section") in prefer else 9
+                cands.setdefault(pk, []).append(((pri, -int(v.get("count", 0))),
+                                                 {"value": v.get("value"), "unit": v.get("unit") or rec.get("unit", ""),
+                                                  "file": s.get("file", ""), "loc": s.get("loc", ""),
+                                                  "section": s.get("section", "")}))
+        for pk, lst in cands.items():
+            lst.sort(key=lambda x: x[0])
+            best = lst[0][1]
+            alts = []
+            for _, d in lst[1:]:
+                if d["value"] != best["value"] and d["section"] != best["section"] and \
+                        all(d["value"] != a["value"] for a in alts):
+                    alts.append(d)
+            out.setdefault(pk, {})[key] = dict(best, alts=alts[:2])
     return dict(sorted(out.items()))
 
 
@@ -248,7 +446,12 @@ def passport_text(project: str, oos_map: dict[str, str] | None = None) -> str:
     for pk, vals in pp.items():
         vol = next((t for t in oos_map if pk_of(t) == pk), "")
         head = f"ПК {pk}" + (f" (том {vol})" if vol else "")
-        parts = [f"{labels.get(k, k)}: {d['value']} {d['unit']} [{d['file']}, {d['loc']}]"
-                 for k, d in vals.items()]
+        parts = []
+        for k, d in vals.items():
+            s = f"{labels.get(k, k)}: {d['value']} {d['unit']} [{d['file']}, {d['loc']}]"
+            if d.get("alts"):
+                s += " (РАСХОЖДЕНИЕ: " + "; ".join(f"{a['value']} {a['unit']} по {a['file']}" for a in d["alts"]) + \
+                     " — укажи расхождение в ответе)"
+            parts.append(s)
         lines.append(f"- {head}: " + "; ".join(parts))
     return "\n".join(lines)

@@ -402,6 +402,8 @@ def api_answers(q, body):
                "target_volumes": a.get("target_volumes") or [],
                "volume_edits": a.get("volume_edits") or {},
                "unsupported_requisites": a.get("unsupported_requisites") or [],
+               "location_mismatch": bool(a.get("location_mismatch")),
+               "edit_was_candidates": a.get("edit_was_candidates") or [],
                "attachments": a.get("attachments") or [],
                "edit_was_src": a.get("edit_was_src") or {},
                "sources": [{"file": s.get("file", ""), "loc": s.get("loc", ""),
@@ -602,7 +604,15 @@ def api_corr_preview(q, body):
     srcs = sorted(_corr_dir(body["project"]).glob("*.docx"))
     if not srcs:
         raise FileNotFoundError("сначала загрузите исходные тома (.docx)")
-    return preview_corrections(body["project"], [str(s) for s in srcs])
+    # v0.55: перед раскладкой — повторная проверка «было» по ПОЛНОМУ тексту томов
+    try:
+        from pmoos.pipeline.volumes import reverify_answers
+        rv = reverify_answers(body["project"])
+    except Exception as e:  # noqa: BLE001
+        rv = {"error": str(e)[:120]}
+    out = preview_corrections(body["project"], [str(s) for s in srcs])
+    out["reverify"] = rv
+    return out
 
 
 def api_corr_write(q, body):

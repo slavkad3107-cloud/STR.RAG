@@ -193,19 +193,40 @@ def form_units(target: str) -> list[dict]:
     return units
 
 
-_STATUS_RX = re.compile(r"^\s*СТАТУС\s*:\s*(ДОСТАТОЧНО|НЕДОСТАТОЧНО)[^\n]*", re.I | re.M)
+_STATUS_RX = re.compile(r"^[\s*_#>]*СТАТУС\s*:\s*[*_]*\s*(ДОСТАТОЧНО|НЕДОСТАТОЧНО)[^\n]*", re.I | re.M)
 
 
 def _parse_status(text: str) -> tuple[bool, str, str]:
-    """(достаточно?, что нужно, текст без строки статуса)."""
+    """(достаточно?, что нужно, текст без строки статуса). Модель может обернуть
+    строку статуса в markdown («**СТАТУС: …**») и продолжить перечень «нужно»
+    списком на следующих строках — забираем его целиком (16.09.2026)."""
     m = _STATUS_RX.search(text or "")
     if not m:
         return True, "", (text or "").strip()
     ok = m.group(1).upper() == "ДОСТАТОЧНО"
     line = m.group(0)
-    need = re.sub(r"^\s*СТАТУС\s*:\s*НЕДОСТАТОЧНО\s*[—\-–:]*\s*(нужно\s*:)?\s*", "", line,
-                  flags=re.I).strip()
-    rest = (text[:m.start()] + text[m.end():]).strip()
+    need = "" if ok else re.sub(
+        r"^[\s*_#>]*СТАТУС\s*:\s*[*_]*\s*НЕДОСТАТОЧНО\s*[*_]*\s*[—\-–:]*\s*(нужно\s*:)?\s*", "",
+        line, flags=re.I).strip(" *_:")
+    end = m.end()
+    if not ok:
+        # перечень «нужно» на следующих строках (маркеры списка) — до пустой строки
+        tail = text[end:]
+        items = []
+        for ln in tail.splitlines():
+            s = ln.strip()
+            if not s:
+                if items:
+                    break
+                continue
+            if re.match(r"^(?:[-•*]|\d+[.)])\s+", s):
+                items.append(re.sub(r"^(?:[-•*]|\d+[.)])\s+", "", s).strip(" *_"))
+                end += len(ln) + 1
+            else:
+                break
+        if items:
+            need = (need + "; " if need else "") + "; ".join(items)
+    rest = (text[:m.start()] + text[end:]).strip()
     return ok, need, rest
 
 

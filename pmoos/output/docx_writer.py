@@ -1008,37 +1008,37 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
                 for att in (e.get("attachments") or [])]
     stats["reserved"] = len(reserved)
     if reserved:
+        # один раздел-перечень с выделенным пустым местом под КАЖДЫЙ документ
+        # (15.09: по 70 документов на том — отдельный лист под каждый раздувал
+        # том на 70 страниц; юзеру нужно «пустое место, выделенное»)
         from docx.enum.text import WD_BREAK
-        seen = set()
-        n = 0
+        doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+        h = doc.add_paragraph()
+        hr = h.add_run("ПРИЛОЖЕНИЯ (ЗАРЕЗЕРВИРОВАНО) ПОД ДОКУМЕНТЫ ПО ЗАМЕЧАНИЯМ "
+                       "(вложить после получения, заглушки удалить)")
+        _std_run(hr)
+        hr.bold = True
+        _yellow(hr)
+        seen: dict[str, list[str]] = {}
+        order: list[str] = []
         for num, att in reserved:
             key = att.strip().lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            n += 1
-            doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
-            h = doc.add_paragraph()
-            hr = h.add_run(f"ПРИЛОЖЕНИЕ (ЗАРЕЗЕРВИРОВАНО) №{n} — по замечанию №{num}")
-            _std_run(hr)
-            hr.bold = True
-            _yellow(hr)
+            if key not in seen:
+                seen[key] = []
+                order.append(att.strip())
+            if str(num) not in seen[key]:
+                seen[key].append(str(num))
+        stats["reserved"] = len(order)
+        for n, att in enumerate(order, start=1):
             p = doc.add_paragraph()
-            r = p.add_run(f"Документ: {att}")
+            r = p.add_run(f"Приложение (зарезервировано) {n}. {att} — по замечаниям № "
+                          f"{', '.join(seen[att.strip().lower()])}")
             _std_run(r)
             r.bold = True
-            p2 = doc.add_paragraph()
-            r2 = p2.add_run("МЕСТО ДЛЯ ВСТАВКИ ДОКУМЕНТА ПОСЛЕ ЕГО ПОЛУЧЕНИЯ. "
-                            "Заглушку удалить, документ вложить сюда, ссылку в тексте "
-                            "тома сохранить.")
-            _std_run(r2)
-            r2.italic = True
-            _yellow(r2)
-            for _ in range(3):
-                pe = doc.add_paragraph()
-                re_ = pe.add_run("_" * 70)
-                _std_run(re_)
-                _yellow(re_)
+            pe = doc.add_paragraph()
+            re_ = pe.add_run("МЕСТО ДЛЯ ВСТАВКИ: " + "_" * 60)
+            _std_run(re_)
+            _yellow(re_)
     return stats
 
 

@@ -709,6 +709,37 @@ def test_missing_docs_and_reask(tmp_path, monkeypatch):
     assert a["3"]["needs_ai"] is True and a["3"]["status"] == "proposed" and a["4"].get("needs_ai") is None
 
 
+def test_unsupported_numbers_location_and_normatives(tmp_path, monkeypatch):
+    # v0.55 раунд 2 (тестировщик №2): сочинённые числа в «стало», адрес правки
+    # из замечания, справка об устаревших нормативах, расхождения в паспорте
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.pipeline import volumes as V
+    ctx = "Объём ГВС 0,2135 м³/с при температуре 450 °C. Высота источника 2 м. Таблица 4.2."
+    got = V.unsupported_numbers("Объём газовоздушной смеси принят 5 м³/с (18 000 м³/ч) при 20 °C, высота 0,2 м; см. п. 3.5.2, табл. 4.2, 2024 г.", ctx)
+    assert "18 000" in got and "20" in got and "0,2" in got and "3.5.2" not in " ".join(got) and "2024" not in got
+    assert V.unsupported_numbers("Объём ГВС 0,2135 м³/с при 450 °C", ctx) == []
+    assert V.location_from_remark("Уточнить… Том 6.1, п.3.5.2 (лист 61; табл.3.33, табл.3.34). Приложение 4.2.") == \
+        "п. 3.5.2; табл. 3.33; табл. 3.34; приложение 4.2"
+    nb = V.normatives_block()
+    assert "ПП РФ № 913" in nb and "1043" in nb and "ОНД-86" in nb
+    # реквизиты: дата норматива и обрезанный «№ пр» — не выдумка; номер письма с дефисами — ловится
+    assert V.unsupported_requisites("по Постановлению Правительства РФ от 16.02.2008 № 87", "") == []
+    assert V.unsupported_requisites("письмо № пр", "") == []
+    assert V.unsupported_requisites("письмо № пр-05-6256 от 12.12.2025", "") == ["письмо № пр-05-6256", "12.12.2025"]
+    # паспорт: длина — из ТКР, ПОС — как расхождение
+    import json as _json
+    from pmoos.paths import project_paths
+    pp = project_paths("ПКр")
+    pp["root"].joinpath("registry.json").write_text(_json.dumps({"indicators": {
+        "length_route": {"unit": "км", "variants": [
+            {"value": "7.30", "unit": "км", "count": 5, "sources": [{"file": "Раздел ПД №5_ПОС1_том 5.1.1.1.pdf", "section": "POS", "loc": "стр. 3"}]},
+            {"value": "7300", "unit": "м", "count": 2, "sources": [{"file": "Раздел ПД №3_ТКР.АД_том 3.1.1.pdf", "section": "TKR", "loc": "стр. 9"}]}]}}},
+        ensure_ascii=False), encoding="utf-8")
+    ps = V.passport("ПКр")
+    assert ps["1"]["length_route"]["value"] == "7300" and ps["1"]["length_route"]["alts"][0]["value"] == "7.30"
+    assert "РАСХОЖДЕНИЕ" in V.passport_text("ПКр", {"6.1": "x"})
+
+
 def test_answer_pack_end_to_end_with_stubs(tmp_path, monkeypatch):
     # v0.55: сквозной прогон _answer_pack со стабами поиска и ИИ — ловит
     # ошибки сборки (15.09: NameError 'target' уронил живой прогон на ОПОЧКЕ)
@@ -771,6 +802,11 @@ def test_answer_pack_end_to_end_with_stubs(tmp_path, monkeypatch):
     assert "ЛО-11-22" in " ".join(a["unsupported_requisites"]) and a["confidence"] == "low"
     # фрагмент ПОС чужого ПК (5.1.3) ушёл в конец
     assert [s["file"] for s in a["retrieved_sources"]][-1].endswith("5.1.3.pdf")
+    # раунд 2: адрес правки дополнен листом найденного «было», флаги качества на месте
+    assert "стр. 17" in a["edit_location"] and a["no_change"] is False and a["shall_missing"] is False
+    assert a["requires_docs"] is False and isinstance(a["unsupported_numbers"], list)
+    # справка об устаревших нормативах попала в системный промпт
+    assert "УСТАРЕВШИЕ НОРМАТИВЫ" in B._sys_for("OOS") and "913" in B._sys_for("OOS")
 
 
 def test_volumes_pk_binding_and_was_contract(tmp_path, monkeypatch):
