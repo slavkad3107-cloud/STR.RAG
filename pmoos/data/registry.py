@@ -95,6 +95,11 @@ _UNIT_ALIASES = {
 }
 
 
+_HEADER_UNIT_RX = re.compile(
+    r"^\s*,\s*\(?\s*(км|м2|м²|м|мес\w*|чел\w*|т/год|г/с|шт\w*|дба)\.?\s*\)?\s*[:–-]?\s+"
+    r"(\d{1,3}(?:[\u00a0\u202f ]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)(?![\d/])", re.I)
+
+
 def _value_rx(unit: str) -> re.Pattern:
     alts = "|".join(_UNIT_ALIASES.get(unit, [re.escape(unit)]))
     return re.compile(rf"({_NUM})\s*(?:{alts})\b", re.I)
@@ -143,6 +148,26 @@ def _scan_text(text: str, ind: dict) -> list[str]:
             # ОБРЫВАЕТСЯ НА ГРАНИЦЕ ПРЕДЛОЖЕНИЯ — иначе «выброс … т/год»
             # подхватывал число из соседней фразы про отходы (проверено).
             window = low[m.end(): m.end() + 160]
+            # ЕДИНИЦА ПЕРЕД ЧИСЛОМ — строка ТЭП «Протяженность, м   5920» (ТКР.АД;
+            # тестировщик №4: длины 5920 и 3827,05 м не находились, в ответы шли
+            # 6,35 и 3,397 км из ПОС). Метры для показателя в км пересчитываются
+            hm = _HEADER_UNIT_RX.match(window)
+            if hm:
+                unit_h, raw = hm.group(1).strip().lower(), hm.group(2)
+                val_h = _norm_num(raw)
+                ok_unit = any(re.fullmatch(a, unit_h, re.I) for a in _UNIT_ALIASES.get(ind["unit"], [re.escape(ind["unit"])]))
+                try:
+                    if ind["unit"] == "км" and unit_h == "м":
+                        val_h = _norm_num(f"{float(val_h) / 1000:.5f}")
+                        ok_unit = True
+                    lo, hi = ind.get("range", (None, None))
+                    before_h = re.split(r"[.;:]\s", low[max(0, m.start() - 90): m.start()])[-1]
+                    if ok_unit and (lo is None or lo <= float(val_h) <= hi) and not (
+                            ind.get("skip") and re.search(ind["skip"], before_h + low[m.start(): m.end()])):
+                        out.append(val_h)
+                        continue
+                except ValueError:
+                    pass
             cut = re.search(r"[.;]\s", window)
             if cut:
                 window = window[: cut.start()]

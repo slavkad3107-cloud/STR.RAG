@@ -335,28 +335,81 @@ def unsupported_requisites(text: str, context: str) -> list[str]:
 _NUM_TOK_RX = re.compile(r"(?<![\d.,])\d{1,3}(?:[  ]\d{3})*(?:[.,]\d+)?(?![\d.,])")
 
 
-def unsupported_numbers(text: str, context: str) -> list[str]:
-    """Числа из «стало»/ответа, которых нет ни в фрагментах, ни в паспорте:
-    сочинённые значения (16.09: «0,2 м», «5 м³/с», ставки, суммы). Годы
-    (19xx/20xx), номера пунктов/таблиц («п. 3.5.2», «табл. 4.1») и числа
-    из одной цифры не считаем."""
+# не числа-значения: коды ФККО, даты, шифры, обозначения нормативов (тестировщик №4:
+# ложное «31» из «31 мая 2023 г.» заблокировало верные правки №25 и №48)
+_NOT_VALUE_RXS = [
+    re.compile(r"\b\d\s\d{2}\s\d{3}\s\d{2}\s\d{2}\s\d\b"),                       # ФККО
+    re.compile(r"\b\d{1,2}\s+(?:январ|феврал|март|апрел|ма[яй]|июн|июл|август|сентябр|октябр|ноябр|декабр)"
+               r"\w*(?:\s+\d{4})?(?:\s*г(?:ода|\.)?)?", re.I),                          # 31 мая 2023 г.
+    re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b"),                                      # 16.02.2008
+    re.compile(r"\b(?:ГОСТ(?:\s*Р)?|СП|СНиП|СанПиН|СН|РД|ОДМ|ВСН|МУ|МР|ГН|ФЗ|ПП(?:\s*РФ)?|ИТС)"
+               r"\s*№?\s*[\d][\d./\-–‑]*\d(?:\s*-\s*\d{2,4})?(?:-р|-ФЗ)?", re.I),   # СанПиН 1.2.3685-21
+    re.compile(r"(?:№|N)\s*[\w./\-–‑]+", re.I),                                          # № 2409-р, № 717/14/15-П-1
+    re.compile(r"\b\d+(?:[/\-–‑]\d+)+(?:[/\-–‑][А-ЯA-Zа-яa-z\d.]+)+"),                   # 117-24/С
+    re.compile(r"\b(?:ст|стать\w+|п|пп|пункт\w*|табл\w*|таблиц\w*|рис\w*|прил\w*|приложени\w*|раздел\w*|глав\w*|"
+               r"том\w*|лист\w*|стр|ИЗА|источник\w*\s*№?)\.?\s*№?\s*\d+(?:\.\d+)*", re.I),
+]
+_UNIT_FAMILIES = [
+    ("mes", r"мес\w*"), ("mm", r"мм\b"), ("mg", r"мг\b"), ("m3", r"м[³3]|куб\w*\.?\s*м\w*"),
+    ("m2", r"м[²2]|кв\.?\s*м\w*"), ("km", r"км\b|километр\w*"), ("ha", r"га\b|гектар\w*"),
+    ("db", r"дб\s?а?\b"), ("kg", r"кг\b"), ("pct", r"%|процент\w*"), ("chel", r"чел\w*"),
+    ("sht", r"шт\w*|штук\w*"), ("rub", r"руб\w*"), ("deg", r"°\s?[cс]|град\w*"),
+    ("t", r"т\b|тонн\w*"), ("m", r"м\b|метр\w*"), ("sut", r"сут\w*"), ("h", r"ч\b|час\w*"),
+]
+_UNIT_AFTER_RX = re.compile(r"^\s{0,2}(?:" + "|".join(f"(?P<{k}>{v})" for k, v in _UNIT_FAMILIES) + ")", re.I)
+
+
+def _mask_not_values(s: str) -> str:
+    for rx in _NOT_VALUE_RXS:
+        s = rx.sub(lambda m: " " * len(m.group(0)), s)
+    return s
+
+
+def _num_unit_pairs(s: str) -> tuple[set[str], set[tuple[str, str]]]:
     def _canon(t: str) -> str:
         t = re.sub(r"\s", "", t).replace(",", ".")
         return t.rstrip("0").rstrip(".") if "." in t else t      # 0,20 == 0.2, но 20 ≠ 2
-    ctx_nums = {_canon(m.group(0)) for m in _NUM_TOK_RX.finditer(context or "")}
+    nums: set[str] = set()
+    pairs: set[tuple[str, str]] = set()
+    for m in _NUM_TOK_RX.finditer(s or ""):
+        c = _canon(m.group(0))
+        nums.add(c)
+        um = _UNIT_AFTER_RX.match(s[m.end(): m.end() + 14])
+        if um:
+            pairs.add((c, um.lastgroup or ""))
+    return nums, pairs
+
+
+def unsupported_numbers(text: str, context: str, *, strict_units: bool = True) -> list[str]:
+    """Числа из «стало», которых нет в источниках (фрагменты, паспорт, замечание):
+    сочинённые значения. Годы, номера пунктов/таблиц/источников, коды ФККО, даты,
+    шифры и обозначения нормативов не считаются. Число С ЕДИНИЦЕЙ («200 м»,
+    «70 дБА») подтверждается только той же парой «число + единица» в источниках
+    (тестировщик №4: «СЗЗ 200 м» проходило, потому что «200» где-то встречалось)."""
+    def _canon(t: str) -> str:
+        t = re.sub(r"\s", "", t).replace(",", ".")
+        return t.rstrip("0").rstrip(".") if "." in t else t
+    ctx_nums, ctx_pairs = _num_unit_pairs(context or "")
+    masked = _mask_not_values(text or "")
     out: list[str] = []
-    for m in _NUM_TOK_RX.finditer(text or ""):
+    for m in _NUM_TOK_RX.finditer(masked):
         raw = m.group(0)
         tok = re.sub(r"\s", "", raw).replace(",", ".")
         if len(tok.replace(".", "")) < 2 or re.fullmatch(r"(?:19|20)\d{2}", tok):
             continue
-        before = (text[max(0, m.start() - 12):m.start()]).lower()
-        if re.search(r"(?:п\.|пп\.|табл\w*\.?|таблиц\w*|рис\w*\.?|прил\w*\.?|раздел\w*|глав\w*|том\w*|№|n)\s*$", before):
-            continue
-        if _canon(raw) in ctx_nums:
-            continue
-        if raw not in out:
-            out.append(raw)
+        c = _canon(raw)
+        um = _UNIT_AFTER_RX.match(masked[m.end(): m.end() + 14])
+        if um and strict_units:
+            fam = um.lastgroup or ""
+            if (c, fam) in ctx_pairs:
+                continue
+            label = f"{raw} {um.group(0).strip()}"
+        else:
+            if c in ctx_nums:
+                continue
+            label = raw
+        if label not in out:
+            out.append(label)
     return out
 
 
@@ -373,7 +426,13 @@ def location_from_remark(remark: str) -> str:
     return "; ".join(dict.fromkeys(parts))[:160]
 
 
-def normatives_block(limit: int = 12) -> str:
+def _norm_key(ident: str) -> str:
+    """Числовое обозначение норматива из его названия: «ПП РФ № 913» → «913»."""
+    toks = re.findall(r"\d[\d./\-]*\d|\d{3,}", ident or "")
+    return max(toks, key=len) if toks else ""
+
+
+def normatives_block(limit: int = 12, scope_text: str | None = None) -> str:
     """Справка ИИ об устаревших нормативах из data/normatives.yaml (replaced/
     cancelled): «X → заменён Y» — чтобы в «стало» не попадал ПП-913 как
     «актуальная редакция» (16.09.2026)."""
@@ -387,6 +446,13 @@ def normatives_block(limit: int = 12) -> str:
         st = str(item.get("status") or "")
         if st in ("replaced", "cancelled"):
             what = item.get("id", "")
+            if scope_text is not None:
+                # ТОЛЬКО ПО ТЕМЕ (тестировщик №4: блок целиком протекал в ответы —
+                # СП 131 и СанПиН 1.2.3685-21 появились в 22 ответах как «обоснование»):
+                # строка даётся, если устаревший документ назван в замечании/фрагментах
+                key = _norm_key(str(what))
+                if not key or not re.search(r"(?<![\d.])" + re.escape(key) + r"(?![\d])", scope_text):
+                    continue
             rep = item.get("replaced_by") or ""
             lines.append(f"- {what}: {'заменён' if st == 'replaced' else 'отменён'}"
                          + (f" → {rep}" if rep else ""))

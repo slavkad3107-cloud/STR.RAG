@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -43,18 +44,31 @@ _SYS_TMPL = (
 _SYS = _SYS_TMPL.format(target="Перечень мероприятий по охране окружающей среды (ПМООС)")
 
 
-def _sys_for(target: str) -> str:
+_PASSPORT_TOPIC_RX = re.compile(
+    r"численн|работающ|работник|рабочих|персонал|протяж[её]н|длин\w*\s+(?:трасс|участк|дорог)|"
+    r"продолжительн|срок\w*\s+(?:строит|реконстр|производства)|площад\w*\s+(?:участк|отвод|землеотвод)|"
+    r"пусков\w+\s+комплекс", re.I)
+_DONE_RX = re.compile(
+    r"\b(?:внесен[ыоа]?|уточнен[ыоа]?|пересчитан[ыоа]?|указан[ыоа]?|добавлен[ыоа]?|дополнен[ыоа]?|"
+    r"откорректирован[ыоа]?|исправлен[ыоа]?|приведен[ыоа]?|актуализирован[ыоа]?|заменен[ыоа]?|"
+    r"выполнен[ыоа]?|представлен[ыоа]?)\b", re.I)
+
+
+def _sys_for(target: str, scope_text: str | None = None) -> str:
+    """scope_text — замечание + найденные фрагменты: справка об устаревших
+    нормативах даётся только по документам, которые там названы."""
     from ..ingest.sections import target_name
     base = _SYS_TMPL.format(target=target_name(target))
     try:
         from .volumes import normatives_block
-        nb = normatives_block()
+        nb = normatives_block(scope_text=scope_text)
     except Exception:  # noqa: BLE001
         nb = ""
     if nb:
-        base += ("\n\nУСТАРЕВШИЕ НОРМАТИВЫ (не называть их актуальными; в «стало» ставить "
-                 "действующие):\n" + nb +
-                 "\nФразы «в актуальной/действующей редакции» без номера и даты документа запрещены.")
+        base += ("\n\nУСТАРЕВШИЕ НОРМАТИВЫ, названные в замечании или в томе (не называть их "
+                 "актуальными; в «стало» ставить действующие):\n" + nb +
+                 "\nФразы «в актуальной/действующей редакции» без номера и даты документа запрещены."
+                 "\nНе ссылайся на нормативный документ, если его нет ни в замечании, ни во фрагментах.")
     return base
 
 _USER_TMPL = (
@@ -559,8 +573,16 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
             _vb = ("ТОМА-АДРЕСАТЫ ПРАВКИ: " + ", ".join(f"том {t} ({oos_map[t]})" for t in _tv)
                    + (" — правка нужна В КАЖДОМ томе (заполни volume_edits)" if len(_tv) > 1 else "")
                    + "\n")
-        if passport:
-            _vb += "ПАСПОРТ ПРОЕКТА ПО ПУСКОВЫМ КОМПЛЕКСАМ (значение · источник):\n" + passport + "\n"
+        if passport and _PASSPORT_TOPIC_RX.search(r.text or ""):
+            # справка нужна только замечаниям про численность/длину/сроки/площадь и
+            # только по ПК своего тома (тестировщик №4: «6,35 км» разошлось по 16
+            # ответам, в тексте появился несуществующий «Паспорт проекта»)
+            _pl = [ln for ln in passport.splitlines()
+                   if not _tv or any(f"(том {t})" in ln for t in _tv)]
+            if _pl:
+                _vb += ("СЛУЖЕБНАЯ СПРАВКА ПО ПУСКОВЫМ КОМПЛЕКСАМ (значение · источник; в тексте ответа "
+                        "ссылайся на сам источник, слов «паспорт проекта» и «справка» не пиши):\n"
+                        + "\n".join(_pl) + "\n")
         if _vb:
             _vb += "\n"
         user_msg = _USER_TMPL.format(num=r.number, remark=r.text, context=ctx or "(не найдено)",
@@ -575,7 +597,8 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
                 user_msg = fs + "\n\n" + user_msg
         jobs.append([
             {"role": "system",
-             "content": _sys_for(str(cfg.get("target_section", "OOS") or "OOS"))},
+             "content": _sys_for(str(cfg.get("target_section", "OOS") or "OOS"),
+                                 scope_text=(r.text or "") + "\n" + (ctx or ""))},
             {"role": "user", "content": user_msg},
         ])
 
@@ -681,13 +704,25 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
         from .volumes import unsupported_numbers, location_from_remark, normalize as _nz
         requires_docs = bool((data.get("missing_data") or "").strip()) or \
             answer_text.lstrip().lower().startswith("требуется") or bool(data.get("attachments"))
-        unsupported_nums = unsupported_numbers(data.get("edit_shall", ""), _ctx_full)
+        unsupported_nums = unsupported_numbers(data.get("edit_shall", ""), _ctx_full + "\n" + (r.text or ""))
         shall_unverified = bool(unsupported_nums) and requires_docs
         # флаги качества правки
         _shall = (data.get("edit_shall") or "").strip()
         shall_missing = bool(was_verified) and not _shall
+        from ..output.docx_writer import _same_text
         no_change = bool(_shall) and bool((data.get("edit_was") or "").strip()) and \
-            _nz(_shall) == _nz(data.get("edit_was") or "")
+            (_nz(_shall) == _nz(data.get("edit_was") or "") or _same_text(_shall, data.get("edit_was") or ""))
+        # ОТВЕТ ЗАЯВЛЯЕТ «ВНЕСЕНО», А ПРАВКА НЕ ЗАВЕРШЕНА (тестировщик №4, рек. 13):
+        # заглушки/поля в «стало», непустое «не хватает данных» или числа без источника
+        _placeholders = bool(re.search(r"<[^<>\n]{2,80}>|_{3,}|\bХХ+\b|\bXX+\b", _shall))
+        answer_overclaims = bool(answer_text) and bool(_DONE_RX.search(answer_text.replace("ё", "е"))) and (
+            bool((data.get("missing_data") or "").strip()) or _placeholders or shall_unverified or no_change)
+        if answer_overclaims:
+            _need = (data.get("missing_data") or "").strip() or (
+                "«стало» совпадает с «было»" if no_change else "заполнить отмеченные поля/подтвердить числа")
+            answer_text = (f"ПРАВКА НЕ ЗАВЕРШЕНА — требуется: {_need[:400]}. После получения данных правка "
+                           f"вносится в: {(data.get('edit_location') or 'место уточнить')[:160]}.\n"
+                           f"Черновик ответа: {answer_text}")
         # адрес правки: из подтверждённого «было» (лист) или из текста замечания
         if _shall and not (data.get("edit_location") or "").strip():
             _from_remark = location_from_remark(r.text)
@@ -716,7 +751,8 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
         # КАЛИБРОВКА ПО ФАКТАМ (тестировщик №2, рек. 11): high — только дословное
         # «было» + непустое «стало» + ни одного неподтверждённого реквизита/числа +
         # есть источники; «Требуется»/нет источников → не выше medium; выдумки → low
-        if unsupported_refs or low_support or unsupported or shall_unverified:
+        if unsupported_refs or low_support or unsupported or shall_unverified or no_change \
+                or answer_overclaims or not _shall:
             confidence = "low"
         elif was_verified and _shall and used_sources and not requires_docs and not location_mismatch \
                 and not no_change and not unsupported_nums:
@@ -766,6 +802,7 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
             "shall_unverified": shall_unverified,
             "shall_missing": shall_missing,
             "no_change": no_change,
+            "answer_overclaims": answer_overclaims,
             "requires_docs": requires_docs,
             "attachments": data.get("attachments", []),
             "confidence": confidence,

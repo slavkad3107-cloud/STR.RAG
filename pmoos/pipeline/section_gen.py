@@ -263,19 +263,32 @@ def read_state(project: str) -> dict:
         return {"status": "idle", "total": 0, "done": 0, "message": "", "pid": 0}
 
 
+import threading as _threading
+_STATE_LOCK = _threading.Lock()
+
+
 def write_state(project: str, st: dict) -> None:
-    p = _state_path(project)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    st["heartbeat"] = datetime.now().isoformat(timespec="seconds")
-    tmp = p.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
-    for _ in range(5):
+    # ЗАМОК + tmp, уникальный для потока (18.09.2026: генерация дважды умирала на
+    # 20-м подразделе — поток «пульса» и главный поток писали состояние через
+    # один tmp-файл процесса, второй replace падал FileNotFoundError)
+    with _STATE_LOCK:
+        p = _state_path(project)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        st["heartbeat"] = datetime.now().isoformat(timespec="seconds")
+        tmp = p.with_suffix(f".{os.getpid()}.{_threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+        for _ in range(6):
+            try:
+                tmp.replace(p)
+                return
+            except (PermissionError, FileNotFoundError):
+                time.sleep(0.2)
+                if not tmp.exists():
+                    tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
             tmp.replace(p)
-            return
-        except PermissionError:
-            time.sleep(0.2)
-    tmp.replace(p)
+        except OSError:
+            pass          # состояние вторично: сбой записи не должен убивать генерацию
 
 
 def is_running(project: str) -> bool:
