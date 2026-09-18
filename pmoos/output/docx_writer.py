@@ -783,6 +783,13 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
     ix = _Index(doc)
     used: set[int] = set()
     plan: list[dict] = []
+    insert_on = INSERT_UNDER_HEADING
+    if not insert_on:
+        try:
+            from ..config import load_config
+            insert_on = bool(load_config().get("corrections.insert_under_heading", False))
+        except Exception:  # noqa: BLE001
+            insert_on = False
     for a in answers:
         num = a.get("number", "?")
         # ДЕКОДИРУЕМ поля ответа: ИИ мог скопировать «ɢɧɬɟɧɫɢɜɧɨɫɬɶ» из индекса,
@@ -896,10 +903,10 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
                 e["hint"] = f"таблица {mt.group(1)} в томе уже есть — заменить её содержимое вручную"
             elif not insert_heads and table_hits:
                 e["hint"] = f"правка относится к таблице {table_hits[0]} — внести в таблицу вручную"
-            if not INSERT_UNDER_HEADING and insert_heads and not e.get("hint"):
+            if not insert_on and insert_heads and not e.get("hint"):
                 e["hint"] = (f"добавление в п. {insert_heads[0][0]} — внести вручную (авто-вставка под заголовок "
                              f"выключена: оставляет старый текст пункта рядом с новым)")
-            for h, hi_ in (insert_heads if INSERT_UNDER_HEADING else []):
+            for h, hi_ in (insert_heads if insert_on else []):
                 end_ = ix.heading_end(hi_)
                 if hi_ not in used and end_ not in used:
                     e.update(mode="insert", idx=end_, k=1, via=f"после заголовка п. {h}",
