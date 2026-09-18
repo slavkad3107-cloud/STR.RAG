@@ -1201,6 +1201,44 @@ def test_inactive_versions_excluded_from_search(tmp_path, monkeypatch):
     assert [h["payload"]["file"] for h in hits] == ["ООС_старый.docx"]
 
 
+def test_section_gen_resumes_after_crash(tmp_path, monkeypatch):
+    # 18.09: процесс генерации умер на 21-м подразделе из 31 — готовое пропало.
+    # Теперь готовые подразделы лежат в section_gen_partial.json и при повторном
+    # запуске берутся оттуда; отказ ИИ не запоминается; после успеха файл удаляется
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from pmoos.pipeline import section_gen as G
+    from pmoos.projects import register_project
+    register_project("Обрыв")
+    calls = []
+    state = {"crash_at": 4}
+
+    def retrieve(q):
+        if state["crash_at"] and len(calls) >= state["crash_at"]:
+            raise RuntimeError("процесс убит")
+        return [{"payload": {"file": "ПЗ.docx", "loc": "с. 3", "text": "данные"}, "score": 0.8}]
+
+    def chat(cfg, msgs, **kw):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ConnectionError("ИИ недоступен")
+        return "СТАТУС: ДОСТАТОЧНО\nТекст [ПЗ.docx, с. 3]."
+    import pytest
+    with pytest.raises(RuntimeError):
+        G.run_section_gen("Обрыв", "OOS", retrieve=retrieve, chat=chat, object_type="площадной")
+    part = G._partial_path("Обрыв")
+    assert part.exists()
+    import json as _json
+    saved = _json.loads(part.read_text(encoding="utf-8"))["units"]
+    assert len(saved) == 3                      # 4 вызова ИИ, один — отказ (не запомнен)
+    state["crash_at"] = 0
+    before = len(calls)
+    out = G.run_section_gen("Обрыв", "OOS", retrieve=retrieve, chat=chat, object_type="площадной")
+    total = len(G.form_units("OOS"))
+    assert len(calls) - before == total - 3     # готовые подразделы повторно не писались
+    assert out.exists() and not part.exists()
+    assert G.read_state("Обрыв")["status"] == "done"
+
+
 def test_section_gen_from_other_sections(tmp_path, monkeypatch):
     # ТЗ 05.09: «по исходным данным из разделов ПД (без ООС/ИЭИ/ОЦЕНКИ) сгенерировать
     # эти разделы в автоматическом режиме» — главы, источники, таблицы, пробелы

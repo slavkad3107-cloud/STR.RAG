@@ -379,6 +379,35 @@ def default_retriever(cfg, project: str, object_type: str, target: str) -> Calla
 
 
 # ───────────────────── основной проход ─────────────────────
+def _partial_path(project: str) -> Path:
+    return _stop_path(project).parent / "section_gen_partial.json"
+
+
+def _partial_sig(target: str, indicators: str, units: list[dict]) -> str:
+    import hashlib
+    from .. import __version__
+    raw = "|".join([__version__, target, indicators, _SYS, _USER] + [f"{u['n']}:{u['title']}" for u in units])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_partial(project: str, sig: str) -> dict[str, dict]:
+    try:
+        d = json.loads(_partial_path(project).read_text(encoding="utf-8"))
+        return dict(d.get("units") or {}) if d.get("sig") == sig else {}
+    except Exception:  # noqa: BLE001 — нет файла/битый — начинаем заново
+        return {}
+
+
+def _save_partial(project: str, sig: str, units: dict[str, dict]) -> None:
+    try:
+        p = _partial_path(project)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"sig": sig, "units": units}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)
+    except Exception:  # noqa: BLE001 — кэш вторичен
+        pass
+
+
 def run_section_gen(project: str, target: str = "OOS", *, cfg=None,
                     object_type: str | None = None,
                     retrieve: Callable[[str], list[dict]] | None = None,
@@ -407,9 +436,18 @@ def run_section_gen(project: str, target: str = "OOS", *, cfg=None,
     stop = _stop_path(project)
     if stop.exists():
         stop.unlink()
+    # ПРОДОЛЖЕНИЕ ПОСЛЕ ОБРЫВА (18.09: процесс умер на 21-м подразделе из 31 —
+    # полчаса работы пропали): готовые подразделы пишутся в section_gen_partial.json
+    # и при повторном запуске с теми же показателями берутся оттуда
+    sig = _partial_sig(target, indicators, units)
+    cached = _load_partial(project, sig)
     try:
         for k, u in enumerate(units, start=1):
             n, chapter = u["n"], u["title"]
+            if str(n) in cached:
+                results.append(cached[str(n)])
+                _progress(project, total, k, f"Подраздел {n} ({k}/{total}) — взят из прерванного запуска.")
+                continue
             if stop.exists():
                 _progress(project, total, k - 1, f"⏹ Остановлено на подразделе {n}.",
                           status="paused")
@@ -434,6 +472,8 @@ def run_section_gen(project: str, target: str = "OOS", *, cfg=None,
                 # оставлять пустым и писать, что нужно добавить»)
                 res.update(text=placeholder_text(u, hits=0), placeholder=True)
                 results.append(res)
+                cached[str(n)] = res
+                _save_partial(project, sig, cached)
                 _progress(project, total, k, f"Подраздел {n}: данных нет — оставлен пустым.")
                 continue
             _progress(project, total, k - 1,
@@ -442,9 +482,11 @@ def run_section_gen(project: str, target: str = "OOS", *, cfg=None,
                     {"role": "user", "content": _USER.format(
                         target=tname, n=n, chapter=chapter, needs=u.get("needs", ""),
                         indicators=indicators, fragments=_fragments_text(hits))}]
+            ai_failed = False
             try:
                 raw = chat(cfg, msgs, module="module4", max_tokens=3500) or ""
             except Exception as e:  # noqa: BLE001
+                ai_failed = True
                 raw = (f"СТАТУС: НЕДОСТАТОЧНО — нужно: повторить генерацию, ИИ недоступен "
                        f"({str(e)[:160]})")
             ok, need, text = _parse_status(raw)
@@ -454,6 +496,9 @@ def run_section_gen(project: str, target: str = "OOS", *, cfg=None,
             else:
                 res.update(text=text.strip())
             results.append(res)
+            if not ai_failed:                 # отказ ИИ не запоминаем — повторим при перезапуске
+                cached[str(n)] = res
+                _save_partial(project, sig, cached)
             _progress(project, total, k, f"Подраздел {n} ({k}/{total}) готов"
                       + (" (пустой — данных не хватает)." if res["placeholder"] else "."))
     finally:
@@ -465,6 +510,11 @@ def run_section_gen(project: str, target: str = "OOS", *, cfg=None,
     out = _write_docx(project, target, tname, results, indicators)
     st = read_state(project)
     done_all = len(results) == total
+    if done_all:
+        try:
+            _partial_path(project).unlink()
+        except OSError:
+            pass
     _progress(project, total, len(results),
               (f"Готово: {len(results)} глав → {out.name}" if done_all
                else f"Остановлено: {len(results)}/{total} глав сохранено → {out.name}"),
