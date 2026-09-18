@@ -1041,8 +1041,12 @@ def test_round4_toc_headings_tables_and_meta(tmp_path, monkeypatch):
     assert not any("изм. по замечанию" in t for t in paras[: toc_end + 1]), "в оглавление ничего не вставлено"
     i1 = next(i for i, t in enumerate(paras) if "кварталами 178" in t)
     assert paras[i1 - 1] == "период эксплуатации" and paras[i1 - 2].startswith("2.2.2."), "заголовок не разорван"
+    # правка к таблице 3.6 не понижается до «п. 3.6» и не вставляется текстом между
+    # подписью и телом таблицы — уходит в ручной раздел с подсказкой про таблицу
     i2 = next(i for i, t in enumerate(paras) if "бульдозер" in t)
-    assert paras[i2 - 1].startswith("Таблица 3.6"), "правка к таблице — у подписи таблицы, а не в п. 3.6"
+    assert "таблице 3.6" in paras[i2] and "№2. " in paras[i2]
+    i36 = paras.index("3.6. Мероприятия по уменьшению шума", toc_end + 1)
+    assert "изм. по замечанию" not in paras[i36 + 1]
     assert "3.3.1. Воздействие на атмосферный воздух в период реконструкции" in paras, "заголовок пункта сохранён"
     i3 = next(i for i, t in enumerate(paras) if "всего 14 источников" in t)
     assert not paras[i3].startswith("3.3.1")

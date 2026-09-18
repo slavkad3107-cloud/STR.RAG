@@ -285,9 +285,62 @@ def reverify_answers(project: str, answers: list[dict] | None = None) -> dict:
                     ed["was_verified"] = True
                     ed["edit_was_unverified"] = ""
                     verified += 1
-    if own and verified:
+    reflagged = _reflag(project, data.get("answers", []), texts)
+    if own and (verified or reflagged["changed"]):
         _save(project, data)
-    return {"checked": checked, "verified": verified, "volumes": sorted(texts)}
+    return {"checked": checked, "verified": verified, "volumes": sorted(texts),
+            "reflagged": reflagged["changed"], "numbers_cleared": reflagged["cleared"],
+            "numbers_added": reflagged["added"], "no_change": reflagged["no_change"]}
+
+
+def _num_head(label: str) -> str:
+    m = _NUM_TOK_RX.search(label or "")
+    return re.sub(r"\s", "", m.group(0)).replace(",", ".") if m else (label or "")
+
+
+def _reflag(project: str, answers: list[dict], texts: dict[str, str]) -> dict:
+    """ПЕРЕПРОВЕРКА ФЛАГОВ готовых ответов без ИИ (раунд 4, тестировщик №4): числа
+    «стало» сверяются с ПОЛНЫМ текстом тома-адресата + фрагментами-источниками +
+    замечанием. Ложные тревоги (даты, ФККО, шифры, число есть в томе) снимаются,
+    пропущенные выдумки «число + единица» добавляются; «стало» ≈ «было» → no_change."""
+    try:
+        from ..output.docx_writer import _same_text
+    except Exception:  # noqa: BLE001
+        _same_text = lambda a, b: False      # noqa: E731
+    try:
+        passport = passport_text(project, oos_volumes(project, "OOS"))
+    except Exception:  # noqa: BLE001
+        passport = ""
+    changed = cleared = added = nochange = 0
+    for a in answers:
+        shall = (a.get("edit_shall") or "").strip()
+        if not shall:
+            continue
+        toks = [t for t in (a.get("target_volumes") or []) if t in texts] or list(texts)
+        ctx = "\n".join(texts[t] for t in toks) + "\n" + (a.get("remark") or "") + "\n" + passport + "\n" + \
+            "\n".join(str(x.get("snippet") or "") for x in (a.get("sources") or []) + (a.get("retrieved_sources") or []))
+        old = list(a.get("unsupported_numbers") or [])
+        new = unsupported_numbers(shall, ctx)
+        if sorted(_num_head(x) for x in old) != sorted(_num_head(x) for x in new):
+            new_heads = {_num_head(x) for x in new}
+            old_heads = {_num_head(x) for x in old}
+            cleared += len(old_heads - new_heads)
+            added += len(new_heads - old_heads)
+            a["unsupported_numbers"] = new
+            changed += 1
+        nc = bool((a.get("edit_was") or "").strip()) and _same_text(shall, a.get("edit_was") or "")
+        if nc and not a.get("no_change"):
+            a["no_change"] = True
+            nochange += 1
+            changed += 1
+        su = bool(a.get("unsupported_numbers")) and bool(a.get("requires_docs"))
+        if su != bool(a.get("shall_unverified")):
+            a["shall_unverified"] = su
+            changed += 1
+        if (a.get("unsupported_numbers") or a.get("no_change")) and a.get("confidence") == "high":
+            a["confidence"] = "medium" if not a.get("no_change") else "low"
+            changed += 1
+    return {"changed": changed, "cleared": cleared, "added": added, "no_change": nochange}
 
 
 # ───────────── выдуманные реквизиты ─────────────

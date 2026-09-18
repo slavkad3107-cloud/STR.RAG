@@ -588,8 +588,11 @@ class _Index:
             i = j
         self._head_pos = [h[0] for h in self.heads]
         self.head_lines: set[int] = set()
+        self.caps_head_lines: set[int] = set()     # только заголовки ЗАГЛАВНЫМИ — надёжные
         for h in self.heads:
             self.head_lines.update(range(h[0], h[4] + 1))
+            if h[2]:
+                self.caps_head_lines.update(range(h[0], h[4] + 1))
 
     def heading_end(self, i: int) -> int:
         """Последняя строка заголовка, начатого строкой i: PDF рвёт длинный
@@ -810,12 +813,19 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
         # заголовки пунктов/таблиц из «где править» — В ТЕЛЕ тома (не в составе
         # проекта и не в оглавлении); окно поиска — сам пункт (до 400 строк)
         hints = _loc_hints(loc)
-        heads = [(h, ix.find_heading(h, kind)) for kind, h in hints]
-        heads = [(h, hi_) for h, hi_ in heads if hi_ >= 0]
+        heads_all = [(h, ix.find_heading(h, kind), kind) for kind, h in hints]
+        # окно поиска «было» — любой найденный пункт/таблица; ЯКОРЬ ВСТАВКИ — только
+        # заголовок пункта с составным номером: под заголовок главы («раздел 5») и
+        # к подписи таблицы текст не вставляется (18.09: «5.1.13 …» легло под «5.
+        # ВОЗДЕЙСТВИЕ…», текст — между «Таблица 1.1.» и её названием) → вручную
+        heads = [(h, hi_) for h, hi_, _k in heads_all if hi_ >= 0]
+        insert_heads = [(h, hi_) for h, hi_, kind in heads_all if hi_ >= 0 and kind == "item" and "." in h]
+        table_hits = [h for h, hi_, kind in heads_all if hi_ >= 0 and kind == "table"]
         if a.get("location_mismatch"):
             # место из ответа не сходится с замечанием (чужой том/раздел) —
             # по заголовку НЕ ставим; остаётся только дословное «было»
             heads = []
+            insert_heads = []
             e["hint"] = "место в ответе не соответствует замечанию — проверить том и пункт"
         i, k, s, via = -1, 0, 0.0, ""
         near = None
@@ -854,7 +864,14 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
         else:
             # 3) сразу после заголовка нужного пункта/таблицы (в теле тома) —
             #    только для ДОБАВЛЯЕМОГО текста (без «было»)
-            for h, hi_ in heads:
+            mt = re.match(r"^\s*таблица\s*№?\s*(\d+(?:\.\d+)*)", shall, re.I)
+            if mt and ix.find_heading(mt.group(1).rstrip("."), "table") >= 0:
+                # «стало» — таблица, которая в томе УЖЕ ЕСТЬ: вставка дала бы дубль
+                insert_heads = []
+                e["hint"] = f"таблица {mt.group(1)} в томе уже есть — заменить её содержимое вручную"
+            elif not insert_heads and table_hits:
+                e["hint"] = f"правка относится к таблице {table_hits[0]} — внести в таблицу вручную"
+            for h, hi_ in insert_heads:
                 end_ = ix.heading_end(hi_)
                 if hi_ not in used and end_ not in used:
                     e.update(mode="insert", idx=end_, k=1, via=f"после заголовка п. {h}",
@@ -866,7 +883,7 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
             #    пунктов нет — только названия). Внутри раздела ещё раз ищем
             #    «было»/цитату замечания (порог ниже: область уже верная);
             #    иначе — сразу после заголовка раздела.
-            if e["mode"] == "manual":
+            if e["mode"] == "manual" and not e.get("hint"):
                 import re as _re2
                 # название раздела/таблицы в кавычках из «где править» —
                 # самый точный ориентир, пробуем его первым
@@ -913,7 +930,7 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
                     elif not placed:
                         e["hint"] = f"вероятный раздел: «{ttitle[:60]}»"
             # 5) по ТЕКСТУ ЗАМЕЧАНИЯ по всему тому — только при высоком сходстве
-            if e["mode"] == "manual" and remark:
+            if e["mode"] == "manual" and remark and not e.get("hint"):
                 i3, k3, s3 = ix.find(remark, used)
                 if s3 >= 0.50:
                     last = ix.sentence_end(i3 + k3 - 1)
@@ -960,7 +977,10 @@ def _trim_window(ix: "_Index", i: int, k: int, was: str, used: set[int]) -> tupl
         i += 1
         k -= 1
     kept: list[int] = []
-    if k > 1 and (_HEAD_LINE_RX.match(decode_garbled(ix.text[i])) or i in ix.head_lines):
+    # заголовок = строка с номером пункта («3.3.1. Воздействие…») либо ЗАГЛАВНЫМИ; строка
+    # обычного регистра из эвристики заголовков — НЕ заголовок (18.09: первая строка
+    # абзаца «Территория размещения…» считалась заголовком, и замена легла в хвост фразы)
+    if k > 1 and (_HEAD_LINE_RX.match(decode_garbled(ix.text[i])) or i in ix.caps_head_lines):
         end_ = min(ix.heading_end(i), i + k - 2)
         kept = list(range(i, end_ + 1))
         k -= len(kept)
