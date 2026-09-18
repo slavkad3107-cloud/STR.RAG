@@ -546,9 +546,16 @@ def passport(project: str) -> dict[str, dict]:
             lst.sort(key=lambda x: x[0])
             best = lst[0][1]
             alts = []
+            def _close(a: str, b: str) -> bool:
+                # 3,82705 и 3,82706 км — одно значение (округление), не «расхождение»
+                try:
+                    fa, fb = float(a), float(b)
+                    return abs(fa - fb) <= 0.005 * max(abs(fa), abs(fb), 1e-9)
+                except ValueError:
+                    return a == b
             for _, d in lst[1:]:
-                if d["value"] != best["value"] and d["section"] != best["section"] and \
-                        all(d["value"] != a["value"] for a in alts):
+                if not _close(d["value"], best["value"]) and d["section"] != best["section"] and \
+                        all(not _close(d["value"], a["value"]) for a in alts):
                     alts.append(d)
             out.setdefault(pk, {})[key] = dict(best, alts=alts[:2])
     return dict(sorted(out.items()))
