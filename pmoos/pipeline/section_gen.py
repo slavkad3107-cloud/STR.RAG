@@ -535,6 +535,12 @@ def run_section_gen(project: str, target: str = "OOS", *, cfg=None,
     return out
 
 
+def _demd(text: str) -> str:
+    """Текст без значков markdown-выделения (строки таблиц «| … |» не трогаем)."""
+    text = re.sub(r"\*\*|__|`", "", text or "")
+    return re.sub(r"(?m)^(?P<ind>[ \t]*)[*][ \t]+", lambda m: m.group("ind") + "— ", text)
+
+
 def _write_docx(project: str, target: str, tname: str, results: list[dict],
                 indicators: str) -> Path:
     from docx import Document
@@ -554,6 +560,10 @@ def _write_docx(project: str, target: str, tname: str, results: list[dict],
     from docx.enum.text import WD_COLOR_INDEX
     gaps: list[str] = []
     empty: list[dict] = []
+    # остатки markdown (**жирный**, `код`) убираем ВЕЗДЕ — в тексте, заглушках, ячейках
+    # таблиц и в ведомости «что добавить» (18.09: оставались в заглушках и таблицах)
+    results = [dict(r, text=_demd(r.get("text") or ""), ai_need=_demd(r.get("ai_need") or ""))
+               for r in results]
     for r in results:
         if r.get("chapter_title"):
             add_heading(doc, f"{r.get('chapter_n', '')}. {r['chapter_title']}", level=1)
