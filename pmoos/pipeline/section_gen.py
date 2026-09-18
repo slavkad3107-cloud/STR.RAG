@@ -328,6 +328,17 @@ def _indicators_text(project: str) -> str:
             line += " — РАСХОЖДЕНИЕ В ИСТОЧНИКАХ: " + "; ".join(vars_) + \
                     " (использовать только значение, подтверждённое фрагментом по теме подраздела, иначе «◈ ВНЕСТИ»)"
         lines.append(line)
+    # ОБЪЕКТ ИЗ НЕСКОЛЬКИХ ПУСКОВЫХ КОМПЛЕКСОВ: общий реестр хранит одно значение,
+    # а у каждого ПК свои длина/численность/сроки — даём паспорт по комплексам
+    try:
+        from .volumes import oos_volumes, passport_text
+        omap = oos_volumes(project, "OOS")
+        if len(omap) > 1:
+            lines.append("ПО ПУСКОВЫМ КОМПЛЕКСАМ (значения не смешивать; в тексте указывать, "
+                         "к какому комплексу относится число):")
+            lines.append(passport_text(project, omap))
+    except Exception:  # noqa: BLE001 — паспорт вторичен
+        pass
     return "\n".join(lines) or "(показатели не собраны — соберите во вкладке ДАННЫЕ)"
 
 
