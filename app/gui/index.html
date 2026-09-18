@@ -602,6 +602,10 @@ function showAns(i) {
     ${(a.sources||[]).map(s => srcLine(s, a.sources_unverified)).join("") || "<div class='msg'>источники не указаны</div>"}
     ${(a.target_volumes||[]).length ? `<div class="mut">Тома-адресаты правки: <b>${esc(a.target_volumes.join(", "))}</b></div>` : ""}
     ${(a.unsupported_requisites||[]).length ? `<div class="warn">⚠ Реквизиты, которых нет в источниках (проверить/заменить плейсхолдером): ${esc(a.unsupported_requisites.join("; "))}</div>` : ""}
+    ${(a.unsupported_numbers||[]).length ? `<div class="warn">⚠ Числа в «стало», которых нет в источниках рядом с местом правки: ${esc(a.unsupported_numbers.join("; "))}${a.shall_unverified ? " — правка в том автоматически НЕ вносится" : ""}.</div>` : ""}
+    ${a.no_change ? `<div class="warn">⚠ «Стало» совпадает с «было» — менять нечего, проверьте ответ.</div>` : ""}
+    ${a.answer_overclaims ? `<div class="warn">⚠ ИИ написал «внесено», но правка не завершена (нет данных / заглушки / числа без источника) — в начало ответа добавлено «ПРАВКА НЕ ЗАВЕРШЕНА».</div>` : ""}
+    ${a.was_kept_from_previous ? `<div class="msg">«Было» сохранено из прошлого прогона (тогда цитата была подтверждена по тому).</div>` : ""}
     ${a.location_mismatch ? `<div class="warn">⚠ «Где править» указывает на чужой том (не том-адресат) — уточните адрес правки в томе ООС.</div>` : ""}
     <h3>КАК БЫЛО ${a.was_verified ? '<span class="badge g">цитата подтверждена в томе</span>' : (a.edit_was ? '<span class="badge w">не проверено</span>' : "")}</h3>${ta("edWas", a.edit_was, 3)}
     ${a.edit_was_unverified ? `<div class="warn">ИИ предложил «было», которого в томе нет (пересказ): «${esc(a.edit_was_unverified.slice(0,300))}» — впишите дословную цитату из тома или оставьте пустым.</div>` : ""}
