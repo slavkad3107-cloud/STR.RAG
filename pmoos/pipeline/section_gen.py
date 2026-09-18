@@ -652,6 +652,10 @@ def _write_docx(project: str, target: str, tname: str, results: list[dict],
             ra.font.highlight_color = WD_COLOR_INDEX.YELLOW
     add_heading(doc, "Показатели проекта, использованные при генерации", level=1)
     for line in indicators.splitlines():
+        # служебные указания для ИИ («использовать только…», «в тексте использовать…») —
+        # не для читателя документа (тестировщик №5: утечка фразы промпта)
+        line = re.sub(r"\s*\((?:использовать только|значения не смешивать)[^)]*\)", "", line)
+        line = re.sub(r"\s*—\s*(?:в тексте использовать основное значение|укажи расхождение в ответе)", "", line)
         doc.add_paragraph(line.lstrip("- "))
     if empty:
         add_heading(doc, "Ведомость: что добавить, чтобы сформировать пустые подразделы",
