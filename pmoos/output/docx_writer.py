@@ -1345,6 +1345,34 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
 _REPORT_NAME = "КОРР_финал-проверка"
 
 
+def _stale_normative_nearby(texts: list[str], mark: str, shall: str, radius: int = 4) -> str:
+    """Устаревший норматив, оставшийся в ±radius строках от внесённой правки, если «стало»
+    уже называет его замену («№ 913» рядом с новым «№ 1043»)."""
+    try:
+        from ..normatives.engine import _registry
+        from ..pipeline.volumes import _norm_key
+        reg = _registry()
+    except Exception:  # noqa: BLE001
+        return ""
+    try:
+        pos = next(i for i, t in enumerate(texts) if mark in t)
+    except StopIteration:
+        return ""
+    around = " ".join(decode_garbled(t) for j, t in enumerate(texts[max(0, pos - radius): pos + radius + 1])
+                      if j != min(pos, radius))
+    for item in reg.values():
+        if str(item.get("status") or "") not in ("replaced", "cancelled"):
+            continue
+        old_key = _norm_key(str(item.get("id") or ""))
+        new_keys = [k for k in re.findall(r"№\s*([\w\-]+)", str(item.get("replaced_by") or "")) if k]
+        if not old_key or not new_keys:
+            continue
+        if any(re.search(r"№\s*" + re.escape(k) + r"(?![\w])", shall) for k in new_keys) and \
+                re.search(r"№\s*" + re.escape(old_key) + r"(?![\d])", around):
+            return str(item.get("id"))
+    return ""
+
+
 def verify_corrected(out_path, plan: list[dict]) -> list[dict]:
     """ФИНАЛ-ПРОВЕРКА тома после записи (ТЗ 08.09): по каждому ответу — встала
     ли правка (метка «[изм. по замечанию №N]» ровно один раз), ушла ли в раздел
@@ -1369,6 +1397,12 @@ def verify_corrected(out_path, plan: list[dict]) -> list[dict]:
             if cnt == 1:
                 status = "✓ заменено" if e["mode"] == "replace" else "✓ вставлено (старый текст не тронут)"
                 note = f"{e['mode']}: {e.get('via', '')}"
+                left = _stale_normative_nearby(texts, mark, e.get("shall") or "")
+                if left:
+                    # новая ссылка вставлена, а старая осталась строкой выше (тестировщик №5:
+                    # «№ 913» прямо перед новым текстом про № 1043) — предупреждаем
+                    status = "⚠ заменено, рядом остался устаревший норматив"
+                    note += f"; в соседних строках осталась ссылка на {left} — удалить вручную"
             elif cnt == 0:
                 status, note = "✗ НЕ ВНЕСЕНО", "метка правки в томе не найдена"
             else:
