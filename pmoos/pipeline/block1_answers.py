@@ -725,9 +725,22 @@ def _answer_pack(project: str, cfg: Config, object_type: str, remarks: list,
             (_nz(_shall) == _nz(data.get("edit_was") or "") or _same_text(_shall, data.get("edit_was") or ""))
         # ОТВЕТ ЗАЯВЛЯЕТ «ВНЕСЕНО», А ПРАВКА НЕ ЗАВЕРШЕНА (тестировщик №4, рек. 13):
         # заглушки/поля в «стало», непустое «не хватает данных» или числа без источника
+        # внутренняя справка программы не документ проекта — в текст не выходит
+        _svc_rx = re.compile(r"(?:согласно|по|в соответствии с|см\.?)?\s*служебн\w+\s+справк\w+(?:\s+по\s+пусков\w+\s+комплекс\w+)?",
+                             re.I)
+        answer_text = _svc_rx.sub("по данным томов ПОС и ТКР", answer_text or "")
+        for _k in ("edit_shall", "correction"):
+            if data.get(_k):
+                data[_k] = _svc_rx.sub("по данным томов ПОС и ТКР", data[_k])
+        _shall = (data.get("edit_shall") or "").strip()
         _placeholders = bool(re.search(r"<[^<>\n]{2,80}>|_{3,}|\bХХ+\b|\bXX+\b", _shall))
+        # завершённая замена по подтверждённому «было» без заглушек и без чисел без источника —
+        # это сделанная правка, даже если ИИ попутно перечислил «чего не хватает» (приёмка: №47, №74)
+        _complete = bool(was_verified) and bool(_shall) and not _placeholders and not shall_unverified \
+            and not no_change
         answer_overclaims = bool(answer_text) and bool(_DONE_RX.search(answer_text.replace("ё", "е"))) and (
-            bool((data.get("missing_data") or "").strip()) or _placeholders or shall_unverified or no_change)
+            _placeholders or shall_unverified or no_change
+            or (bool((data.get("missing_data") or "").strip()) and not _complete))
         if answer_overclaims:
             _need = (data.get("missing_data") or "").strip() or (
                 "«стало» совпадает с «было»" if no_change else "заполнить отмеченные поля/подтвердить числа")

@@ -795,6 +795,8 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
         # ДЕКОДИРУЕМ поля ответа: ИИ мог скопировать «ɢɧɬɟɧɫɢɜɧɨɫɬɶ» из индекса,
         # собранного до фикса кодировки, — иначе мусор уехал бы в том (05.08)
         shall = decode_garbled((a.get("edit_shall") or a.get("correction") or "").strip())
+        # литеральные «\n» из JSON-ответа ИИ — это переводы строк (приёмка: 8 штук в 6.3 №55)
+        shall = shall.replace("\\n", "\n").replace("\\t", " ")
         was = decode_garbled((a.get("edit_was") or "").strip())
         loc = decode_garbled((a.get("edit_location") or "").strip())
         remark = decode_garbled((a.get("remark") or "").strip())
@@ -803,6 +805,8 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
              "sources": [f"{s.get('file', '')} {s.get('loc', '')}".strip()
                          for s in (a.get("sources") or [])[:4]],
              "is_table": _is_md_table(shall), "via": "",
+             # текст, которым правка подтверждается: замечание + фрагменты-источники
+             "basis": remark + " " + " ".join(str(s.get("snippet") or "") for s in (a.get("sources") or [])[:8]),
              # документы, которых не хватает, — под них резервируется место
              # в конце тома (ТЗ 08.09: «оставить пустое место и выделить»)
              "attachments": [str(x) for x in (a.get("attachments") or []) if str(x).strip()]}
@@ -1352,6 +1356,53 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
 _REPORT_NAME = "КОРР_финал-проверка"
 
 
+_REF_RX = re.compile(
+    r"(?:ГОСТ(?:\s*Р)?|СП|СНиП|СанПиН|РД|ОДМ|ВСН|МУ|ГН)\s*№?\s*\d[\d./\-–‑]*\d|"
+    r"(?:ст\.|стать[яеию])\s*\d+(?:\.\d+)?|"
+    r"№\s*[\w/\-–‑]*\d[\w/\-–‑]*(?:\s*от\s*\d{1,2}[.\s][\w.]+\s*\d{2,4})?|"
+    r"\d+-ФЗ", re.I)
+
+
+def _new_refs(shall: str, basis: str) -> list[str]:
+    """Нормативы, статьи и реквизиты из «стало», которых нет в «было»/замечании/источниках."""
+    def key(t: str) -> str:
+        return re.sub(r"[^0-9a-zа-я]+", "", t.lower().replace("ё", "е"))
+    base = key(basis)
+    out: list[str] = []
+    for m in _REF_RX.finditer(shall or ""):
+        ref = m.group(0).strip()
+        digits = re.sub(r"[^0-9]", "", ref)
+        if len(digits) < 2 or "_" in ref:
+            continue
+        head = re.split(r"\s+от\s+", ref)[0]              # «№ 1043 от 31.05.2023» → «№ 1043»
+        if key(ref) in base or key(head) in base or ref in out:
+            continue
+        if _known_actual(head):
+            continue                                        # действующий норматив из справочника программы
+        out.append(ref)
+    return out
+
+
+def _known_actual(ref: str) -> bool:
+    try:
+        from ..normatives.engine import _registry
+        from ..pipeline.volumes import _norm_key
+        if re.match(r"\s*(?:ст\.|стать)", ref, re.I):
+            return False                       # статья кодекса — не норматив из справочника
+        k = _norm_key(ref)
+        if not k:
+            return False
+        for it in _registry().values():
+            if _norm_key(str(it.get("id") or "")) == k and str(it.get("status") or "") == "actual":
+                return True
+            # документ-замена, названный в справочнике («№ 2409-р» в replaced_by у ПП-913)
+            if re.search(r"№\s*" + re.escape(k) + r"(?![\d])", str(it.get("replaced_by") or "")):
+                return True
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _stale_normative_nearby(texts: list[str], mark: str, shall: str, radius: int = 4) -> str:
     """Устаревший норматив, оставшийся в ±radius строках от внесённой правки, если «стало»
     уже называет его замену («№ 913» рядом с новым «№ 1043»)."""
@@ -1404,11 +1455,19 @@ def verify_corrected(out_path, plan: list[dict]) -> list[dict]:
             if cnt == 1:
                 status = "✓ заменено" if e["mode"] == "replace" else "✓ вставлено (старый текст не тронут)"
                 note = f"{e['mode']}: {e.get('via', '')}"
+                new_refs = _new_refs(e.get("shall") or "", (e.get("was") or "") + " " + (e.get("basis") or ""))
+                if e["mode"] == "replace" and new_refs:
+                    # замена аккуратна, но «стало» называет нормативы/реквизиты, которых нет ни в
+                    # «было», ни в замечании, ни в источниках (приёмка: ПП № 881 с выдуманным
+                    # названием, ст. 87 ЗК РФ, несуществующий СП) — без «✓», на проверку
+                    status = "⚠ заменено — проверить ссылки, которых нет в источниках"
+                    note += "; проверить: " + "; ".join(new_refs[:5])
                 left = _stale_normative_nearby(texts, mark, e.get("shall") or "")
                 if left:
                     # новая ссылка вставлена, а старая осталась строкой выше (тестировщик №5:
                     # «№ 913» прямо перед новым текстом про № 1043) — предупреждаем
-                    status = "⚠ заменено, рядом остался устаревший норматив"
+                    status = ("⚠ заменено, рядом остался устаревший норматив" if status.startswith("✓")
+                              else status + "; рядом остался устаревший норматив")
                     note += f"; в соседних строках осталась ссылка на {left} — удалить вручную"
             elif cnt == 0:
                 status, note = "✗ НЕ ВНЕСЕНО", "метка правки в томе не найдена"
