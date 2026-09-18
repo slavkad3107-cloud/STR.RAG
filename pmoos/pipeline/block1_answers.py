@@ -403,6 +403,17 @@ def run_block1(project: str, cfg: Config | None = None, *,
                       f"{pack[0].number}–{pack[-1].number}…")
         pack_ans = _answer_pack(project, cfg, object_type, pack, src_codes, progress)
         for a in pack_ans:
+            # НЕ ТЕРЯТЬ ПОДТВЕРЖДЁННОЕ «БЫЛО» (тестировщик №4, рек. 14): при переспросе ИИ
+            # часто даёт пересказ там, где раньше стояла дословная цитата тома — старая
+            # цитата и её место сохраняются, новое «стало» остаётся
+            old = prev_by_num.get(str(a["number"])) or {}
+            if old.get("was_verified") and not a.get("was_verified") and (old.get("edit_was") or "").strip():
+                a["edit_was_unverified"] = a.get("edit_was") or a.get("edit_was_unverified") or ""
+                a["edit_was"] = old["edit_was"]
+                a["edit_was_src"] = old.get("edit_was_src") or {}
+                a["was_verified"] = True
+                a["was_score"] = old.get("was_score", 0.0)
+                a["was_kept_from_previous"] = True
             by_num[str(a["number"])] = a
         _save_merged(project, remarks, by_num, cfg, object_type, partial=True)
         # ИИ МЁРТВ ЦЕЛИКОМ (все провайдеры упали на всём пакете) — дальше идти
