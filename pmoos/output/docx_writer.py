@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -715,8 +716,16 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
              # документы, которых не хватает, — под них резервируется место
              # в конце тома (ТЗ 08.09: «оставить пустое место и выделить»)
              "attachments": [str(x) for x in (a.get("attachments") or []) if str(x).strip()]}
-        if not shall:
+        if not shall or a.get("no_change") or re.search(r"см\.\s*поле|edit_shall|edit_was", shall, re.I):
+            # нет текста правки / «стало» = «было» / мета-текст вместо правки
             e["mode"] = "skip"
+            e["hint"] = "без изменений" if a.get("no_change") else ("нет текста правки" if not shall
+                                                                     else "мета-текст вместо правки")
+            plan.append(e)
+            continue
+        if a.get("shall_unverified"):
+            # «стало» с числами без источника при «Требуется…» — не вносить
+            e["hint"] = "«стало» содержит неподтверждённые числа (нужны данные)"
             plan.append(e)
             continue
         # заголовки пунктов/таблиц из «где править» — В ТЕЛЕ тома (не в составе
@@ -746,13 +755,18 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
             e.update(mode="replace", idx=i, k=k, score=round(s, 2), via=via,
                      par_text=decode_garbled(" ".join(ix.text[i:i + k]))[:200])
         elif near:
+            # похожее место есть, но не дословно: вставка «рядом» оставляла старый
+            # абзац (противоречия 66/82 чел. — тестировщик №3) → вручную с подсказкой
             i2, k2, s2 = near
-            used.update(range(i2, i2 + k2))
-            e.update(mode="insert", idx=i2 + k2 - 1, k=1, score=round(s2, 2),
-                     via="похоже на «было» (сходство среднее)",
-                     par_text=decode_garbled(" ".join(ix.text[i2:i2 + k2]))[:160])
+            e["hint"] = (f"похожий фрагмент (сходство {int(s2 * 100)} %): "
+                         f"«{decode_garbled(' '.join(ix.text[i2:i2 + k2]))[:120]}»")
+        elif was:
+            # «было» есть, но в томе не найдено — под заголовок НЕ вставляем
+            # (старый текст остался бы рядом с новым): в ручное размещение
+            pass
         else:
-            # 3) сразу после заголовка нужного пункта/таблицы (в теле тома)
+            # 3) сразу после заголовка нужного пункта/таблицы (в теле тома) —
+            #    только для ДОБАВЛЯЕМОГО текста (без «было»)
             for h, hi_ in heads:
                 if hi_ not in used:
                     e.update(mode="insert", idx=hi_, k=1, via=f"после заголовка п. {h}",
@@ -821,6 +835,41 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
                              par_text=decode_garbled(" ".join(ix.text[i3:i3 + k3]))[:160])
         plan.append(e)
     return plan, ix
+
+
+def _span_context(lines: list[str], was: str) -> tuple[str, str]:
+    """Что в окне строк стоит ДО и ПОСЛЕ цитаты «было» (сохраняется при замене).
+    Совпадение ищется difflib'ом по тексту без изменения длины (регистр, ё→е),
+    чтобы индексы совпадали с оригиналом; при слабом покрытии (< 60 %) —
+    контекст не выделяется (как раньше: заменяется всё окно)."""
+    import difflib
+    if not lines or not was:
+        return "", ""
+    wt = "\n".join(decode_garbled(l) for l in lines)
+    a = wt.lower().replace("ё", "е")
+    b = decode_garbled(was).lower().replace("ё", "е").strip()
+    if len(b) < 8:
+        return "", ""
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    blocks = [bl for bl in sm.get_matching_blocks() if bl.size >= 4]
+    if not blocks:
+        return "", ""
+    cov = sum(bl.size for bl in blocks) / max(1, len(b))
+    if cov < 0.6:
+        return "", ""
+    s0 = blocks[0].a
+    s1 = blocks[-1].a + blocks[-1].size
+    first_len = len(lines[0])
+    last_start = len(wt) - len(lines[-1])
+    pre = wt[:s0].strip() if s0 <= first_len else ""
+    post = wt[s1:].strip() if s1 >= last_start else ""
+    # знак препинания на стыке принадлежит заменяемой фразе — не дублируем
+    post = post.lstrip(".,;:) ").strip()
+    pre = pre.rstrip("(").strip()
+    # обрывки короче 3 знаков (знаки препинания) — не тащим
+    pre = pre if len(pre) >= 3 else ""
+    post = post if len(post) >= 3 else ""
+    return pre, post
 
 
 def _blank_par_text(par) -> int:
@@ -954,7 +1003,13 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
         head_lines = [l for l in shall.splitlines() if l.strip() and l.count("|") < 2]
         body = " ".join(head_lines) if e["is_table"] else shall
         if mode == "replace":
-            _set_par(par, body)
+            # ТОЧНАЯ ЗАМЕНА (тестировщик №3, 16.09: замена стирала соседний текст —
+            # заголовки, шапки таблиц, полустроки): меняем только сам фрагмент
+            # «было», текст до и после него в окне сохраняется
+            lines = [ix.text[j] for j in range(e["idx"], e["idx"] + e["k"])]
+            pre, post = _span_context(lines, e.get("was") or "")
+            body_new = (pre + " " if pre else "") + body + (" " + post if post else "")
+            _set_par(par, body_new)
             _mark(par, num)
             # остальные строки окна — стираем ТОЛЬКО текст (рисунки/рамки/поля
             # остаются; текст перенесён в первую строку)
@@ -1105,8 +1160,10 @@ def _write_report(project: str, report: dict) -> Path:
         pdf = vol.get("pdf") or {}
         if pdf.get("output"):
             doc.add_paragraph(f"PDF с правками поверх оригинала: {Path(pdf['output']).name} — "
-                              f"аннотировано {pdf.get('placed', 0)} из {pdf.get('total', 0)} правок "
-                              f"(подсветка «было», выноска со «стало», закладки «★ ПРАВКА №…»).")
+                              f"по месту {pdf.get('placed', 0)} (подсветка «было» + выноска со «стало», "
+                              f"закладки «★ ПРАВКА №…»), у заголовка пункта {pdf.get('at_heading', 0)} "
+                              f"(закладки «☆»), в сводке на первой странице {pdf.get('loose', 0)} — "
+                              f"всего {pdf.get('total', 0)} правок.")
         if not rows:
             doc.add_paragraph("Правок для этого тома нет.")
             continue
@@ -1352,8 +1409,11 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
                          for e in plan if e["mode"] != "skip"]
                 vol_rep["pdf"] = annotate_pdf(orig_pdf, items, out_dir / f"{src.stem}_ПРАВКИ.pdf")
                 report["stats"]["pdf_annotated"] = report["stats"].get("pdf_annotated", 0) + vol_rep["pdf"]["placed"]
-                print(f"[m5] {src.name}: PDF-аннотации {vol_rep['pdf']['placed']}/{vol_rep['pdf']['total']}",
-                      flush=True)
+                report["stats"]["pdf_at_heading"] = report["stats"].get("pdf_at_heading", 0) + vol_rep["pdf"].get("at_heading", 0)
+                report["stats"]["pdf_loose"] = report["stats"].get("pdf_loose", 0) + vol_rep["pdf"].get("loose", 0)
+                print(f"[m5] {src.name}: PDF — по месту {vol_rep['pdf']['placed']}, у пункта "
+                      f"{vol_rep['pdf'].get('at_heading', 0)}, в сводке {vol_rep['pdf'].get('loose', 0)} "
+                      f"из {vol_rep['pdf']['total']}", flush=True)
             except Exception as e:  # noqa: BLE001
                 vol_rep["pdf"] = {"error": str(e)[:200]}
                 print(f"[m5] {src.name}: PDF-аннотации не удались: {e}", flush=True)

@@ -317,8 +317,17 @@ def _indicators_text(project: str) -> str:
         if not v:
             continue
         prov = rec.get("provenance") or {}
-        lines.append(f"- {m['label']}: {v} {rec.get('unit', m['unit'])} · "
-                     f"[{prov.get('file', '—')}, {prov.get('loc', '')}]")
+        line = (f"- {m['label']}: {v} {rec.get('unit', m['unit'])} · "
+                f"[{prov.get('file', '—')}, {prov.get('loc', '')}]")
+        # РАСХОЖДЕНИЕ (тестировщик №3, 16.09: генерация тиражировала неверные
+        # показатели — «10 км», «1,5 мес.»): при конфликте даём варианты с
+        # источниками и запрещаем брать значение без сверки по фрагментам
+        if rec.get("conflict") and rec.get("source") == "auto":
+            vars_ = [f"{x.get('value')} {x.get('unit', '')} [{(x.get('sources') or [{}])[0].get('file', '—')}, "
+                     f"{(x.get('sources') or [{}])[0].get('loc', '')}]" for x in (rec.get("variants") or [])[:3]]
+            line += " — РАСХОЖДЕНИЕ В ИСТОЧНИКАХ: " + "; ".join(vars_) + \
+                    " (использовать только значение, подтверждённое фрагментом по теме подраздела, иначе «◈ ВНЕСТИ»)"
+        lines.append(line)
     return "\n".join(lines) or "(показатели не собраны — соберите во вкладке ДАННЫЕ)"
 
 
@@ -565,7 +574,9 @@ def _flush(doc, block: list[str], is_table, rows_fn) -> None:
             doc.add_paragraph()
             return
     for line in block:
-        line = re.sub(r"^\s*(#+\s*|\*\*|__)", "", line).strip()
+        line = re.sub(r"^\s*(#+\s*|\*\*|__)", "", line)
+        line = re.sub(r"\*\*|__|`", "", line).strip()          # остатки markdown внутри строки
+        line = re.sub(r"^\s*[-•]\s+", "— ", line)
         doc.add_paragraph(line)
 
 

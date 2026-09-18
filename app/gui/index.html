@@ -766,7 +766,7 @@ function renderCorrReport(rep) {
     <div class="msg">по месту ${(st.replace||0)+(st.insert||0)} · вручную ${st.manual||0} · не внесено ${st.missing||0} ·
       приложений зарезервировано ${st.reserved||0} ${rep.report_docx ? `<button class="sec" onclick="openPath(${JSON.stringify(rep.report_docx)})">Открыть отчёт</button>` : ""}</div>
     ${rep.volumes.map(v => `<b>${esc(v.volume)}</b>${v.error ? ` <span class="warn">⚠ ${esc(v.error)}</span>` : ""}
-      ${v.pdf && v.pdf.output ? ` <span class="msg">· PDF поверх оригинала: аннотировано ${v.pdf.placed} из ${v.pdf.total}
+      ${v.pdf && v.pdf.output ? ` <span class="msg">· PDF поверх оригинала: по месту ${v.pdf.placed}, у пункта ${v.pdf.at_heading||0}, в сводке на стр. 1 — ${v.pdf.loose||0} (всего ${v.pdf.total})
         <button class="sec" onclick="openPath(${JSON.stringify(v.pdf.output)})">Открыть PDF</button></span>` : (v.pdf && v.pdf.error ? ` <span class="warn">PDF: ${esc(v.pdf.error)}</span>` : "")}
       <table><thead><tr><th>№</th><th>Статус</th><th>Куда / способ</th><th>Приложения</th></tr></thead>
       <tbody>${(v.rows||[]).map(r => `<tr><td>${esc(r.number)}</td><td>${esc(r.status)}</td>

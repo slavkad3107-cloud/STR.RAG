@@ -114,6 +114,62 @@ def find_quote(doc, was: str, *, max_miss: float = 0.10, pages: list[int] | None
     return best
 
 
+_LOC_PAGE_RX = re.compile(r"стр\.?\s*(\d{1,4})", re.I)
+_LOC_TABLE_RX = re.compile(r"табл(?:ица|ицу|ице|ицы|\.)?\s*№?\s*(\d+(?:\.\d+)+|\d+)", re.I)
+_LOC_ITEM_RX = re.compile(r"(?:п\.|пункт[а-я]*|раздел[а-я]*|подраздел[а-я]*)\s*(\d+(?:\.\d+){0,4})", re.I)
+
+
+def page_lines(doc) -> list[list[tuple[str, tuple[float, float, float, float]]]]:
+    """Строки всех страниц: [(декодированный текст строки, bbox)] — для поиска
+    заголовков пунктов и таблиц (правки-ДОБАВЛЕНИЯ без «было»)."""
+    out = []
+    for i in range(doc.page_count):
+        rows: dict[tuple[int, int], list] = {}
+        for w in doc[i].get_text("words"):
+            rows.setdefault((w[5], w[6]), []).append(w)
+        lines = []
+        for key in sorted(rows):
+            ws = sorted(rows[key], key=lambda w: w[0])
+            text = decode_garbled(" ".join(w[4] for w in ws)).strip()
+            if text:
+                lines.append((text, (min(w[0] for w in ws), min(w[1] for w in ws),
+                                     max(w[2] for w in ws), max(w[3] for w in ws))))
+        out.append(lines)
+    return out
+
+
+def find_location(doc, location: str, lines: list | None = None):
+    """Страница и bbox места правки по полю «где править»: заголовок таблицы →
+    заголовок пункта → «стр. N». Строки оглавления (хвост — номер страницы или
+    отточие) пропускаются. → (pno, bbox, как нашли) либо None."""
+    loc = location or ""
+    lines = lines if lines is not None else page_lines(doc)
+    targets: list[tuple[str, re.Pattern]] = []
+    for m in _LOC_TABLE_RX.finditer(loc):
+        targets.append((f"таблица {m.group(1)}",
+                        re.compile(r"^\s*табл(?:ица|\.)\s*№?\s*" + re.escape(m.group(1)) + r"(?!\d|\.\d)", re.I)))
+    for m in _LOC_ITEM_RX.finditer(loc):
+        num = m.group(1).rstrip(".")
+        if "." not in num and not re.search(r"раздел", m.group(0), re.I):
+            continue                      # «п. 5» слишком общо — совпадёт с чем угодно
+        targets.append((f"п. {num}", re.compile(r"^\s*" + re.escape(num) + r"\.?\s+[А-ЯЁA-Z«\"]")))
+    for label, rx in targets:
+        for pno, pl in enumerate(lines):
+            for text, bbox in pl:
+                if not rx.search(text):
+                    continue
+                if re.search(r"(\.{3,}|…)\s*\d*\s*$", text) or re.search(r"\s\d{1,3}\s*$", text):
+                    continue              # строка оглавления
+                return pno, bbox, label
+    m = _LOC_PAGE_RX.search(loc)
+    if m:
+        pno = int(m.group(1)) - 1
+        if 0 <= pno < doc.page_count:
+            pl = lines[pno]
+            return pno, (pl[0][1] if pl else (40.0, 40.0, 60.0, 60.0)), f"стр. {pno + 1}"
+    return None
+
+
 def annotate_pdf(src_pdf: str | Path, items: list[dict], out_pdf: str | Path) -> dict:
     """items: [{number, edit_was, edit_shall, edit_location}] → копия PDF с
     подсветкой/выносками/закладками. Возвращает отчёт по каждому пункту."""
@@ -122,20 +178,46 @@ def annotate_pdf(src_pdf: str | Path, items: list[dict], out_pdf: str | Path) ->
     doc = fitz.open(str(src_pdf))
     report: list[dict] = []
     toc = doc.get_toc() or []
-    placed = 0
+    placed = at_heading = 0
+    lines = None
+    loose: list[tuple[str, str, str, str]] = []
     try:
         cache = page_tokens_cache(doc)
         for it in items:
             num = str(it.get("number", "?"))
             was = (it.get("edit_was") or "").strip()
             shall = (it.get("edit_shall") or "").strip()
-            if not was or not shall:
-                report.append({"number": num, "status": "пропуск", "note": "нет «было» или «стало»"})
+            if not shall:
+                report.append({"number": num, "status": "пропуск", "note": "нет текста «стало»"})
                 continue
-            hit = find_quote(doc, was, cache=cache)
+            hit = find_quote(doc, was, cache=cache) if was else None
             if not hit:
-                report.append({"number": num, "status": "не найдено",
-                               "note": "цитата «было» в PDF не найдена (проверьте дословность)"})
+                # ДОБАВЛЕНИЕ без «было» либо цитата не найдена: выноска у заголовка
+                # пункта/таблицы из «где править»; нет и его — в сводку на 1-й странице
+                # (тестировщик №3: в PDF попадало 28 правок из 91)
+                if lines is None:
+                    lines = page_lines(doc)
+                where = find_location(doc, it.get("edit_location") or "", lines)
+                why = "цитата «было» в PDF не найдена" if was else "добавление (без «было»)"
+                if where:
+                    pno, bbox, label = where
+                    r0 = fitz.Rect(*bbox)
+                    note = doc[pno].add_text_annot(
+                        fitz.Point(max(r0.x0 - 18, 5), r0.y0),
+                        f"ПРАВКА ПО ЗАМЕЧАНИЮ №{num} — РАЗМЕСТИТЬ В ЭТОМ ПУНКТЕ\n"
+                        f"ГДЕ: {it.get('edit_location') or '—'}\n"
+                        + (f"БЫЛО (не найдено дословно): {was[:400]}\n" if was else "")
+                        + f"СТАЛО / ДОБАВИТЬ: {shall[:1200]}", icon="Insert")
+                    note.set_info(title=f"STR.RAG №{num}")
+                    note.update()
+                    toc.append([1, f"☆ ПРАВКА №{num} (у {label}) — стр. {pno + 1}", pno + 1])
+                    at_heading += 1
+                    report.append({"number": num, "status": "выноска у пункта", "page": pno + 1,
+                                   "note": f"{why}; выноска у «{label}», стр. {pno + 1}"})
+                else:
+                    loose.append((num, it.get("edit_location") or "—", was, shall))
+                    report.append({"number": num, "status": "сводка на стр. 1", "page": 1,
+                                   "note": f"{why}; место в PDF не определено — см. сводку на первой странице"})
                 continue
             pno, rects, score = hit
             page = doc[pno]
@@ -158,11 +240,25 @@ def annotate_pdf(src_pdf: str | Path, items: list[dict], out_pdf: str | Path) ->
             placed += 1
             report.append({"number": num, "status": "аннотация", "page": pno + 1,
                            "score": score, "note": f"подсветка «было» + выноска со «стало», стр. {pno + 1}"})
-        if placed:
+        # сводка правок без определённого места — выноски столбиком на 1-й странице
+        for k, (num, loc, was, shall) in enumerate(loose):
+            note = doc[0].add_text_annot(
+                fitz.Point(8, 30 + 22 * (k % 34)),
+                f"ПРАВКА ПО ЗАМЕЧАНИЮ №{num} — МЕСТО ОПРЕДЕЛИТЬ ВРУЧНУЮ\nГДЕ: {loc}\n"
+                + (f"БЫЛО: {was[:400]}\n" if was else "") + f"СТАЛО / ДОБАВИТЬ: {shall[:1200]}",
+                icon="Help")
+            note.set_info(title=f"STR.RAG №{num}")
+            note.update()
+        if loose:
+            toc.append([1, f"☆ ПРАВКИ БЕЗ МЕСТА ({len(loose)}) — стр. 1", 1])
+        if placed or at_heading or loose:
             toc.sort(key=lambda t: (t[2], t[1]))
+            if toc and toc[0][0] != 1:      # set_toc: первый пункт обязан быть уровня 1
+                toc[0][0] = 1
             doc.set_toc(toc)
         out_pdf.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(out_pdf), garbage=1, deflate=True)
     finally:
         doc.close()
-    return {"output": str(out_pdf), "placed": placed, "total": len(items), "rows": report}
+    return {"output": str(out_pdf), "placed": placed, "at_heading": at_heading, "loose": len(loose),
+            "total": len(items), "rows": report}

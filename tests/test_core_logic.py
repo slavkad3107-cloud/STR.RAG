@@ -638,21 +638,29 @@ def test_pdf_patch_quote_search_and_annotations(tmp_path):
     p = d.new_page()
     p.insert_text((72, 100), "Workers on site 66 persons, of them 57 workers", fontsize=11)
     p2 = d.new_page()
-    p2.insert_text((72, 100), "Other page text about waste", fontsize=11)
+    p2.insert_text((72, 100), "5.1 Waste types and amounts", fontsize=11)
+    p2.insert_text((72, 130), "Other page text about waste", fontsize=11)
     d.save(str(src)); d.close()
     out = tmp_path / "tom_ПРАВКИ.pdf"
     rep = PP.annotate_pdf(src, [
         {"number": "6", "edit_was": "Workers on site 66 persons, of them 57 workers",
          "edit_shall": "Workers on site 82 persons", "edit_location": "p.1"},
         {"number": "7", "edit_was": "text that is absent", "edit_shall": "x", "edit_location": ""},
-        {"number": "8", "edit_was": "", "edit_shall": "y", "edit_location": ""}], out)
-    assert rep["placed"] == 1 and rep["total"] == 3 and out.exists()
+        {"number": "8", "edit_was": "", "edit_shall": "y", "edit_location": "Том 6.1, п. 5.1"},
+        {"number": "9", "edit_was": "", "edit_shall": "", "edit_location": ""}], out)
+    assert rep["placed"] == 1 and rep["total"] == 4 and out.exists()
+    assert rep["at_heading"] == 1 and rep["loose"] == 1
     st = {r["number"]: r["status"] for r in rep["rows"]}
-    assert st == {"6": "аннотация", "7": "не найдено", "8": "пропуск"}
+    # тестировщик №3: добавления без «было» тоже попадают в PDF — выноской у
+    # заголовка пункта, а без места — в сводку на первой странице
+    assert st == {"6": "аннотация", "7": "сводка на стр. 1", "8": "выноска у пункта", "9": "пропуск"}
+    assert [r for r in rep["rows"] if r["number"] == "8"][0]["page"] == 2
     d2 = fitz.open(str(out))
     kinds = [a.type[1] for a in d2[0].annots()]
     assert "Highlight" in kinds and "Text" in kinds
+    assert [a.type[1] for a in d2[1].annots()] == ["Text"]
     assert any("ПРАВКА №6" in t[1] for t in d2.get_toc())
+    assert any("ПРАВКИ БЕЗ МЕСТА (1)" in t[1] for t in d2.get_toc())
     assert d2.page_count == 2
     d2.close()
 
@@ -897,6 +905,54 @@ def test_answer_edit_and_was_source(tmp_path, monkeypatch):
     import pytest as _pt
     with _pt.raises(KeyError):
         B.edit_answer("Ред", "99", {"answer": "x"})
+
+
+def test_precise_replace_keeps_neighbour_text(tmp_path, monkeypatch):
+    # тестировщик №3 (16.09): замена стирала текст вокруг «было» в строке —
+    # заголовки, шапки таблиц, полустроки; «было» без найденного места и
+    # «похожее» место больше не вставляются под заголовок (дубли 66/82 чел.)
+    import json as _json
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from docx import Document
+    from pmoos.paths import project_paths
+    from pmoos.output import docx_writer as DW
+    pre, post = DW._span_context(
+        ["7.4.2 Плата за отходы. Ставка платы за размещение отходов IV класса 663,2 руб./т (ПП № 913). Примечание: по ГОСТ."],
+        "Ставка платы за размещение отходов IV класса 663,2 руб./т (ПП № 913)")
+    assert pre == "7.4.2 Плата за отходы." and post == "Примечание: по ГОСТ."
+    assert DW._span_context(["совсем другой текст про воздух"], "ставка платы 663,2") == ("", "")
+    d = Document()
+    d.add_paragraph("1. Введение")
+    d.add_paragraph("Максимальная численность работников в наиболее многочисленную смену - 66 человек, из них 57 рабочих. Продолжительность 10 месяцев.")
+    d.add_paragraph("2. Отходы")
+    d.add_paragraph("Отходы вывозятся на полигон.")
+    src = tmp_path / "Том 6.1.docx"
+    d.save(str(src))
+    pp = project_paths("Точн")
+    pp["answers"].write_text(_json.dumps({"answers": [
+        {"number": "1", "status": "accepted", "remark": "Уточнить численность. Том 6.1, п.1",
+         "edit_location": "Том 6.1, п. 1",
+         "edit_was": "Максимальная численность работников в наиболее многочисленную смену - 66 человек, из них 57 рабочих",
+         "edit_shall": "Максимальное количество работающих 82 человека, в смену 57 рабочих", "attachments": []},
+        {"number": "2", "status": "accepted", "remark": "Уточнить отходы. Том 6.1, п.2", "edit_location": "Том 6.1, п. 2",
+         "edit_was": "Отходы складируются на площадке и сжигаются",     # в томе нет такого
+         "edit_shall": "Отходы передаются по договору.", "attachments": []},
+        {"number": "3", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 2", "edit_was": "Отходы вывозятся на полигон.",
+         "edit_shall": "Отходы вывозятся на полигон.", "no_change": True, "attachments": []},
+        {"number": "4", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 2", "edit_was": "",
+         "edit_shall": "Значение 5 м³/с", "shall_unverified": True, "attachments": []},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    outs, failed = DW.write_corrected_volumes("Точн", [str(src)])
+    paras = [p.text for p in Document(str(outs[0])).paragraphs]
+    joined = "\n".join(paras)
+    assert "82 человека" in joined and "Продолжительность 10 месяцев." in joined, "хвост строки сохранён"
+    assert "66 человек" not in joined.split("ТРЕБУЮЩИЕ")[0]
+    assert "Отходы вывозятся на полигон." in paras          # старый абзац не тронут, дубля нет
+    assert joined.count("Отходы передаются по договору.") == 1 and "№2. " in joined   # только в ручном разделе
+    rep = DW.last_report("Точн")
+    rows = {r["number"]: r for r in rep["volumes"][0]["rows"]}
+    assert rows["1"]["status"] == "✓ по месту" and rows["2"]["status"] == "вручную"
+    assert rows["3"]["status"] == "пропуск" and rows["4"]["status"] == "вручную"
 
 
 def test_strict_placement_reserved_appendix_and_final_check(tmp_path, monkeypatch):
