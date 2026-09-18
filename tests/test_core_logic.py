@@ -969,8 +969,82 @@ def test_precise_replace_keeps_neighbour_text(tmp_path, monkeypatch):
     assert joined.count("Отходы передаются по договору.") == 1 and "№2. " in joined   # только в ручном разделе
     rep = DW.last_report("Точн")
     rows = {r["number"]: r for r in rep["volumes"][0]["rows"]}
-    assert rows["1"]["status"] == "✓ по месту" and rows["2"]["status"] == "вручную"
+    assert rows["1"]["status"] == "✓ заменено" and rows["2"]["status"] == "вручную"
     assert rows["3"]["status"] == "пропуск" and rows["4"]["status"] == "вручную"
+
+
+def test_round4_toc_headings_tables_and_meta(tmp_path, monkeypatch):
+    # тестировщик №4 (18.09): вставки в оглавление, разорванные двухстрочные
+    # заголовки, «таблица 3.6» → п. 3.6, съеденный заголовок внутри «было»,
+    # обрывок после переноса, мета-текст в томе, ложная причина пропуска
+    import json as _json
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from docx import Document
+    from pmoos.paths import project_paths
+    from pmoos.output import docx_writer as DW
+    long_ = "Текст раздела с описанием проектных решений и мероприятий, достаточно длинный для тела тома. "
+    d = Document()
+    d.add_paragraph("СОДЕРЖАНИЕ")
+    for t in ("1. Общие сведения ..............................", "2.2.2. Воздействие объекта проектирования на территорию на",
+              "период эксплуатации ..............................", "3.6. Мероприятия по уменьшению шума ..............................",
+              "5.1. Виды отходов ..............................", "5.2. Класс опасности ..............................",
+              "6. Прочее .............................."):
+        d.add_paragraph(t)
+    d.add_paragraph("2.2.2. Воздействие объекта проектирования на территорию на")
+    d.add_paragraph("период эксплуатации")
+    for _ in range(3):
+        d.add_paragraph(long_)
+    d.add_paragraph("3.6. Мероприятия по уменьшению шума")
+    for _ in range(3):
+        d.add_paragraph(long_)
+    d.add_paragraph("Таблица 3.6 – Источники шума")
+    d.add_paragraph("Экскаватор | 80 дБА")
+    d.add_paragraph("3.3.1. Воздействие на атмосферный воздух в период реконструкции")
+    d.add_paragraph("В период проведения строительных работ источниками выбросов являются двигатели техники и сварочные посты, всего 12 источников.")
+    d.add_paragraph(long_)
+    d.add_paragraph(long_)
+    d.add_paragraph("К ставкам платы применяется повышающий коэффици-")
+    d.add_paragraph("ент 1,19. Далее идёт следующий самостоятельный абзац про плату за размещение отходов производства.")
+    src = tmp_path / "Том 6.1.docx"
+    d.save(str(src))
+    pp = project_paths("Р4")
+    pp["answers"].write_text(_json.dumps({"answers": [
+        {"number": "1", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 2.2.2", "edit_was": "",
+         "edit_shall": "Земли лесного фонда представлены кварталами 178 и 560.", "attachments": []},
+        {"number": "2", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, таблица 3.6", "edit_was": "",
+         "edit_shall": "Дополнить строкой: бульдозер | 82 дБА.", "attachments": []},
+        {"number": "3", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 3.3.1",
+         "edit_was": "3.3.1. Воздействие на атмосферный воздух в период реконструкции В период проведения строительных работ источниками выбросов являются двигатели техники и сварочные посты, всего 12 источников.",
+         "edit_shall": "3.3.1. Воздействие на атмосферный воздух в период реконструкции В период проведения строительных работ источниками выбросов являются двигатели техники, всего 14 источников.",
+         "attachments": []},
+        {"number": "4", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 7.4",
+         "edit_was": "К ставкам платы применяется повышающий коэффици-",
+         "edit_shall": "К ставкам платы применяются коэффициенты по распоряжению № 2409-р.", "attachments": []},
+        {"number": "5", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 3.6", "edit_was": "",
+         "edit_shall": "Высота источника: <значение по методике 2.2.2>.", "attachments": []},
+        {"number": "6", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 3.6",
+         "edit_was": "Экскаватор | 80 дБА", "edit_shall": "Экскаватор | 80 дБА.", "attachments": []},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    outs, failed = DW.write_corrected_volumes("Р4", [str(src)])
+    paras = [p.text for p in Document(str(outs[0])).paragraphs]
+    toc_end = paras.index("6. Прочее ..............................")
+    assert not any("изм. по замечанию" in t for t in paras[: toc_end + 1]), "в оглавление ничего не вставлено"
+    i1 = next(i for i, t in enumerate(paras) if "кварталами 178" in t)
+    assert paras[i1 - 1] == "период эксплуатации" and paras[i1 - 2].startswith("2.2.2."), "заголовок не разорван"
+    i2 = next(i for i, t in enumerate(paras) if "бульдозер" in t)
+    assert paras[i2 - 1].startswith("Таблица 3.6"), "правка к таблице — у подписи таблицы, а не в п. 3.6"
+    assert "3.3.1. Воздействие на атмосферный воздух в период реконструкции" in paras, "заголовок пункта сохранён"
+    i3 = next(i for i, t in enumerate(paras) if "всего 14 источников" in t)
+    assert not paras[i3].startswith("3.3.1")
+    joined = "\n".join(paras)
+    assert "ент 1,19" not in joined and "Далее идёт следующий самостоятельный абзац" in joined
+    body = joined.split("ТРЕБУЮЩИЕ РУЧНОГО РАЗМЕЩЕНИЯ")[0]
+    assert "<значение" not in body
+    rep = DW.last_report("Р4")
+    rows = {r["number"]: r for r in rep["volumes"][0]["rows"]}
+    assert rows["5"]["status"] == "вручную" and "заглушка" in rows["5"]["note"]
+    assert rows["6"]["status"] == "пропуск" and "совпадает" in rows["6"]["note"]
+    assert rows["1"]["status"].startswith("✓ вставлено") and rows["3"]["status"] == "✓ заменено"
 
 
 def test_strict_placement_reserved_appendix_and_final_check(tmp_path, monkeypatch):
@@ -1011,7 +1085,7 @@ def test_strict_placement_reserved_appendix_and_final_check(tmp_path, monkeypatc
     assert "ЗАРЕЗЕРВИРОВАНО" in txt and "Справка о фоновых концентрациях" in txt and "Расчёт шума" in txt
     rep = DW.last_report("Стр")
     rows = {r["number"]: r for r in rep["volumes"][0]["rows"]}
-    assert rows["1"]["status"] == "✓ по месту" and rows["2"]["status"] == "вручную"
+    assert rows["1"]["status"] == "✓ заменено" and rows["2"]["status"] == "вручную"
     assert rep["stats"]["reserved"] == 2 and rep["stats"]["missing"] == 0
     assert (project_paths("Стр")["out"] / "КОРР_финал-проверка.docx").exists()
 

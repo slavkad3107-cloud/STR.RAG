@@ -439,12 +439,18 @@ def _sig_words(text: str) -> set[str]:
     return out
 
 
-def _loc_hints(location: str) -> list[str]:
+def _loc_hints(location: str) -> list[tuple[str, str]]:
+    """[(вид, номер)] из «где править»: вид — "table" или "item". «Таблица 3.6»
+    ищется ТОЛЬКО как подпись таблицы и никогда не понижается до «п. 3.6»
+    (тестировщик №4: правка к таблице 3.6 вставала в п. 3.6 «шум»)."""
     import re as _re
-    hints = _re.findall(r"(?:п(?:ункт[аеуы]?|\.)|табл\w*\.?|разд\w*\.?)\s*№?\s*(\d+(?:\.\d+)*)",
-                        (location or "").lower())
-    multi = [h for h in hints if "." in h]
-    single = [h for h in hints if "." not in h]
+    out: list[tuple[str, str]] = []
+    for m in _re.finditer(r"(п(?:ункт[аеуы]?|\.)|табл\w*\.?|разд\w*\.?)\s*№?\s*(\d+(?:\.\d+)*)",
+                          (location or "").lower()):
+        kind = "table" if m.group(1).startswith("табл") else "item"
+        out.append((kind, m.group(2).rstrip(".")))
+    multi = [h for h in out if "." in h[1]]
+    single = [h for h in out if "." not in h[1]]
     return list(dict.fromkeys(multi + single))
 
 
@@ -509,6 +515,23 @@ class _Index:
         # длины вычёркивал 25 % строк тома — всё уходило «вручную»)
         self.noise: set[int] = {i for i, nrm in enumerate(self.norm)
                                 if nrm and 20 <= len(nrm) < 160 and cnt[nrm] >= 5}
+        # ОГЛАВЛЕНИЕ (тестировщик №4: 5 вставок легли в оглавление — двухстрочный
+        # пункт оглавления несёт отточие только во второй строке, и первая
+        # проходила как «заголовок»). Зона оглавления = самый плотный кластер
+        # строк с отточием в первых 40 % тома; вся зона исключается из поиска
+        self.toc: set[int] = set()
+        front = max(200, int(len(self.text) * 0.4))
+        dotted = [i for i, t in enumerate(self.text[:front]) if re.search(r"\.{5,}|…{3,}", t)]
+        groups: list[list[int]] = []
+        for i in dotted:
+            if groups and i - groups[-1][-1] <= 8:
+                groups[-1].append(i)
+            else:
+                groups.append([i])
+        best_g = max(groups, key=len) if groups else []
+        if len(best_g) >= 5:
+            self.toc = set(range(max(0, best_g[0] - 2), best_g[-1] + 1))
+            self.noise |= self.toc
         # слово → множество индексов абзацев (для предфильтра кандидатов)
         self.inv: dict[str, set[int]] = {}
         for i, ws in enumerate(self.words):
@@ -564,6 +587,46 @@ class _Index:
                     self.heads.append((i, ws, caps, title[:100], j - 1))
             i = j
         self._head_pos = [h[0] for h in self.heads]
+        self.head_lines: set[int] = set()
+        for h in self.heads:
+            self.head_lines.update(range(h[0], h[4] + 1))
+
+    def heading_end(self, i: int) -> int:
+        """Последняя строка заголовка, начатого строкой i: PDF рвёт длинный
+        заголовок на 2–3 строки, вставка «после заголовка» в первую из них
+        разрывала его (тестировщик №4: 5 разорванных заголовков)."""
+        n = len(self.text)
+        j = i
+        for _ in range(3):
+            cur = decode_garbled(self.text[j]).strip()
+            if j + 1 >= n or not cur or cur[-1] in ".:;!?":
+                break
+            nx = decode_garbled(self.text[j + 1]).strip()
+            if not nx or len(nx) > 120 or (j + 1) in self.noise or (j + 1) in self.holders:
+                break
+            nl = re.sub(r"[^А-ЯЁа-яёA-Za-z]", "", nx)
+            cl = re.sub(r"[^А-ЯЁа-яёA-Za-z]", "", cur)
+            caps_cont = bool(nl) and nl == nl.upper() and bool(cl) and cl == cl.upper() \
+                and not re.match(r"^\d", nx)
+            if not (caps_cont or nx[0].islower()):
+                break
+            j += 1
+        return j
+
+    def sentence_end(self, i: int) -> int:
+        """Строка, где кончается предложение, начатое в строке i (в PDF-конверсии
+        абзац = строка; вставка после середины предложения рвала его)."""
+        n = len(self.text)
+        j = i
+        for _ in range(8):
+            cur = decode_garbled(self.text[j]).strip()
+            if not cur or cur[-1] in ".!?;:" or j + 1 >= n:
+                break
+            if (j + 1) in self.holders or (j + 1) in self.noise or (j + 1) in self.head_lines \
+                    or _HEAD_LINE_RX.match(decode_garbled(self.text[j + 1])):
+                break
+            j += 1
+        return j
 
     def find_topic_heading(self, topic: set[str], *, strict: bool = False
                            ) -> tuple[int, int, float, str]:
@@ -662,7 +725,7 @@ class _Index:
                 r"\d+/\d+/\d+-|\.{4,}\s*\d*\s*$|\s\d{1,3}\s*$|^содержание|^оглавление")
         return bool(_Index._FRONT_RX.search(decode_garbled(self.text[i]).strip().lower()))
 
-    def find_heading(self, hint: str):
+    def find_heading(self, hint: str, kind: str = "item"):
         """Индекс ЗАГОЛОВКА пункта/таблицы «hint» В ТЕЛЕ тома: короткая строка,
         НАЧИНАЮЩАЯСЯ с номера (не «рис. 3.5.1» посреди текста), не из состава
         проекта/оглавления, и после неё идёт обычный текст (≥2 из следующих 6
@@ -672,7 +735,16 @@ class _Index:
         # строки таблиц «1 п п Наименование», списки «5 - Особо большой», текст
         # «7 время в течении…» — не заголовки (реальные промахи 05.09)
         # заголовок бывает и ЗАГЛАВНЫМИ («3.5.1 ИНТЕНСИВНОСТЬ ДВИЖЕНИЯ»)
-        rx = _re.compile(r"^(?i:п\.?|пункт|табл\w*\.?|таблица|раздел)?\s*№?\s*"
+        if kind == "table":
+            # только ПОДПИСЬ таблицы («Таблица 5.11 – …» в начале строки)
+            rx_t = _re.compile(r"^(?i:табл(?:ица|\.))\s*№?\s*" + _re.escape(hint) + r"(?!\d|\.\d)")
+            for i, t in enumerate(self.text):
+                dt = decode_garbled(t).strip()
+                if dt and len(dt) <= 200 and rx_t.match(dt) and i not in self.noise \
+                        and not self._is_front_matter(i):
+                    return i
+            return -1
+        rx = _re.compile(r"^(?i:п\.?|пункт|раздел)?\s*№?\s*"
                          + _re.escape(hint) + r"(?![\d])[.)]?\s+[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z]{2,}")
         n = len(self.text)
         for i, t in enumerate(self.text):
@@ -716,23 +788,35 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
              # документы, которых не хватает, — под них резервируется место
              # в конце тома (ТЗ 08.09: «оставить пустое место и выделить»)
              "attachments": [str(x) for x in (a.get("attachments") or []) if str(x).strip()]}
-        if not shall or a.get("no_change") or re.search(r"см\.\s*поле|edit_shall|edit_was", shall, re.I):
-            # нет текста правки / «стало» = «было» / мета-текст вместо правки
+        if not shall or a.get("no_change") or _same_text(was, shall):
+            # нет текста правки / «стало» = «было»
             e["mode"] = "skip"
-            e["hint"] = "без изменений" if a.get("no_change") else ("нет текста правки" if not shall
-                                                                     else "мета-текст вместо правки")
+            e["hint"] = "нет текста правки («стало»)" if not shall else "«стало» совпадает с «было» — менять нечего"
+            plan.append(e)
+            continue
+        meta = _META_RX.search(shall)
+        if meta:
+            # вместо текста правки — указание, что сделать («см. таблицу выше»,
+            # «<значение по методике>», «(существующие строки…)»): в том не вносим
+            e["hint"] = f"в «стало» не текст правки, а указание/заглушка: «{meta.group(0)[:50]}»"
             plan.append(e)
             continue
         if a.get("shall_unverified"):
             # «стало» с числами без источника при «Требуется…» — не вносить
-            e["hint"] = "«стало» содержит неподтверждённые числа (нужны данные)"
+            nums = "; ".join(str(x) for x in (a.get("unsupported_numbers") or [])[:8])
+            e["hint"] = "«стало» содержит неподтверждённые числа" + (f": {nums}" if nums else "") + " (нужны данные)"
             plan.append(e)
             continue
         # заголовки пунктов/таблиц из «где править» — В ТЕЛЕ тома (не в составе
         # проекта и не в оглавлении); окно поиска — сам пункт (до 400 строк)
         hints = _loc_hints(loc)
-        heads = [(h, ix.find_heading(h)) for h in hints]
+        heads = [(h, ix.find_heading(h, kind)) for kind, h in hints]
         heads = [(h, hi_) for h, hi_ in heads if hi_ >= 0]
+        if a.get("location_mismatch"):
+            # место из ответа не сходится с замечанием (чужой том/раздел) —
+            # по заголовку НЕ ставим; остаётся только дословное «было»
+            heads = []
+            e["hint"] = "место в ответе не соответствует замечанию — проверить том и пункт"
         i, k, s, via = -1, 0, 0.0, ""
         near = None
         if was:
@@ -751,8 +835,11 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
                 elif s2 >= 0.50:
                     near = (i2, k2, s2)
         if i >= 0:
+            i, k, kept = _trim_window(ix, i, k, was, used)
             used.update(range(i, i + k))
+            used.update(kept)
             e.update(mode="replace", idx=i, k=k, score=round(s, 2), via=via,
+                     kept_heading=decode_garbled(" ".join(ix.text[j] for j in kept)),
                      par_text=decode_garbled(" ".join(ix.text[i:i + k]))[:200])
         elif near:
             # похожее место есть, но не дословно: вставка «рядом» оставляла старый
@@ -768,10 +855,11 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
             # 3) сразу после заголовка нужного пункта/таблицы (в теле тома) —
             #    только для ДОБАВЛЯЕМОГО текста (без «было»)
             for h, hi_ in heads:
-                if hi_ not in used:
-                    e.update(mode="insert", idx=hi_, k=1, via=f"после заголовка п. {h}",
-                             par_text=decode_garbled(ix.text[hi_])[:160])
-                    used.add(hi_)
+                end_ = ix.heading_end(hi_)
+                if hi_ not in used and end_ not in used:
+                    e.update(mode="insert", idx=end_, k=1, via=f"после заголовка п. {h}",
+                             par_text=decode_garbled(" ".join(ix.text[hi_:end_ + 1]))[:160])
+                    used.update(range(hi_, end_ + 1))
                     break
             # 4) ПО ТЕМЕ: раздел тома, чей заголовок совпадает со значимыми
             #    словами «где править» + замечания (в PDF-конверсиях номеров
@@ -807,7 +895,7 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
                         i5, k5, s5 = ix.find(remark, used, ti, tend)
                         if s5 >= 0.40:
                             used.update(range(i5, i5 + k5))
-                            e.update(mode="insert", idx=i5 + k5 - 1, k=1, score=round(s5, 2),
+                            e.update(mode="insert", idx=ix.sentence_end(i5 + k5 - 1), k=1, score=round(s5, 2),
                                      via=f"цитата замечания в разделе «{ttitle[:40]}»",
                                      par_text=decode_garbled(" ".join(ix.text[i5:i5 + k5]))[:160])
                             placed = True
@@ -828,13 +916,78 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
             if e["mode"] == "manual" and remark:
                 i3, k3, s3 = ix.find(remark, used)
                 if s3 >= 0.50:
-                    last = i3 + k3 - 1
-                    used.update(range(i3, i3 + k3))
+                    last = ix.sentence_end(i3 + k3 - 1)
+                    used.update(range(i3, last + 1))
                     e.update(mode="insert", idx=last, k=1, score=round(s3, 2),
                              via="по цитате из замечания",
                              par_text=decode_garbled(" ".join(ix.text[i3:i3 + k3]))[:160])
         plan.append(e)
     return plan, ix
+
+
+_HEAD_LINE_RX = re.compile(r"^\s*\d{1,2}(?:\.\d{1,2}){1,4}\.?\s+[А-ЯЁA-Z]")
+_META_RX = re.compile(r"см\.\s*поле|edit_shall|edit_was|<[^<>\n]{2,80}>|\{[^{}\n]{2,60}\}|"
+                      r"\(существующ[^)]{0,80}\)|см\.\s*(?:таблиц\w*\s*)?(?:выше|ниже)|"
+                      r"^\s*в\s+раздел\w*\s+[^.]{0,60}\bдобавить", re.I | re.M)
+
+
+def _same_text(a: str, b: str) -> bool:
+    """«стало» ≈ «было» (без переносов, тире, ё, регистра, пробелов)."""
+    import difflib
+    na, nb = _norm(a or ""), _norm(b or "")
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if abs(len(na) - len(nb)) > 0.15 * max(len(na), len(nb)):
+        return False
+    return difflib.SequenceMatcher(None, na, nb, autojunk=False).ratio() >= 0.97
+
+
+def _trim_window(ix: "_Index", i: int, k: int, was: str, used: set[int]) -> tuple[int, int, list[int]]:
+    """Окно замены по ФАКТИЧЕСКИ совпавшим строкам (тестировщик №4): строки с
+    краёв, которых в «было» нет, не стираются; заголовок пункта, попавший в
+    «было», остаётся строкой (kept); окно, оборванное на переносе «коэффици-»,
+    дотягивается до следующей строки."""
+    wg = _grams(_norm(was))
+
+    def cover(j: int) -> float:
+        g = _grams(ix.norm[j])
+        return (len(g & wg) / len(g)) if g else 1.0
+    while k > 1 and cover(i + k - 1) < 0.3:
+        k -= 1
+    while k > 1 and cover(i) < 0.3:
+        i += 1
+        k -= 1
+    kept: list[int] = []
+    if k > 1 and (_HEAD_LINE_RX.match(decode_garbled(ix.text[i])) or i in ix.head_lines):
+        end_ = min(ix.heading_end(i), i + k - 2)
+        kept = list(range(i, end_ + 1))
+        k -= len(kept)
+        i = end_ + 1
+    last = i + k - 1
+    tail = decode_garbled(ix.text[last]).rstrip()
+    nxt = last + 1
+    if tail[-1:] in "-‐‑" and nxt < len(ix.text) and nxt not in used and nxt not in ix.noise \
+            and nxt not in ix.holders and nxt not in ix.head_lines:
+        k += 1
+    return i, k, kept
+
+
+def _strip_heading(shall: str, heading: str) -> str:
+    """Заголовок пункта сохранён строкой — не повторяем его в начале «стало»."""
+    m = re.match(r"^\s*(\d+(?:\.\d+)+)\.?\s*", heading or "")
+    if not m:
+        return shall
+    m2 = re.match(r"^\s*" + re.escape(m.group(1)) + r"\.?\s*", shall)
+    if not m2:
+        return shall
+    rest = shall[m2.end():]
+    title = heading[m.end():].strip()
+    nt = _norm(title)
+    if nt and _norm(rest).startswith(nt[: max(10, int(len(nt) * 0.8))]):
+        rest = rest[len(title):].lstrip(" .:–—-\n")
+    return rest.strip() or shall
 
 
 def _span_context(lines: list[str], was: str) -> tuple[str, str]:
@@ -859,6 +1012,19 @@ def _span_context(lines: list[str], was: str) -> tuple[str, str]:
         return "", ""
     s0 = blocks[0].a
     s1 = blocks[-1].a + blocks[-1].size
+    # НЕ РВЁМ СЛОВО: границы совпадения — по границам слов; перенос «коэффици-» +
+    # «ент» на следующей строке — одно слово (тестировщик №4: обрывки «ент 1,19.»)
+    while 0 < s0 < len(wt) and wt[s0 - 1].isalnum() and wt[s0].isalnum():
+        s0 -= 1
+    if 0 < s1 < len(wt) - 1 and wt[s1 - 1] in "-‐‑" and wt[s1] == "\n" and wt[s1 + 1].isalpha():
+        s1 += 1
+    while 0 < s1 < len(wt) and (wt[s1 - 1].isalnum() or wt[s1 - 1] == "\n") and wt[s1].isalnum():
+        s1 += 1
+    # короткий хвост ТОГО ЖЕ предложения (до 25 знаков) уходит вместе с «было»
+    if s1 > 0 and wt[s1 - 1] not in ".!?":
+        mt = re.match(r"[^.!?]{0,25}[.!?]", wt[s1:])
+        if mt:
+            s1 += mt.end()
     first_len = len(lines[0])
     last_start = len(wt) - len(lines[-1])
     pre = wt[:s0].strip() if s0 <= first_len else ""
@@ -866,8 +1032,9 @@ def _span_context(lines: list[str], was: str) -> tuple[str, str]:
     # знак препинания на стыке принадлежит заменяемой фразе — не дублируем
     post = post.lstrip(".,;:) ").strip()
     pre = pre.rstrip("(").strip()
-    # обрывки короче 3 знаков (знаки препинания) — не тащим
-    pre = pre if len(pre) >= 3 else ""
+    # обрывки короче 3 знаков (знаки препинания) — не тащим; номер в списке
+    # («1.», «2)», «–») — сохраняем
+    pre = pre if len(pre) >= 3 or re.fullmatch(r"\d{1,2}[.)]|[-–•]", pre) else ""
     post = post if len(post) >= 3 else ""
     return pre, post
 
@@ -1008,6 +1175,8 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
             # «было», текст до и после него в окне сохраняется
             lines = [ix.text[j] for j in range(e["idx"], e["idx"] + e["k"])]
             pre, post = _span_context(lines, e.get("was") or "")
+            if e.get("kept_heading"):
+                body = _strip_heading(body, e["kept_heading"])
             body_new = (pre + " " if pre else "") + body + (" " + post if post else "")
             _set_par(par, body_new)
             _mark(par, num)
@@ -1049,11 +1218,20 @@ def _apply_plan(doc, plan: list[dict], ix: "_Index") -> dict:
             _std_run(r1)
             r1.bold = True
             where = e["location"] or "место в замечании не указано"
+            if e.get("pdf_page"):
+                where += f"; в PDF тома — стр. {e['pdf_page']}" + (f" ({e['pdf_note']})" if e.get("pdf_note") else "")
             if e.get("hint"):
                 where += f" ({e['hint']})"
             r2 = p.add_run(f"Куда: {where}. ")
             _std_run(r2)
             r2.italic = True
+            if e.get("was"):
+                rw = p.add_run(f"БЫЛО: {e['was'][:600]} ")
+                _std_run(rw)
+                rw.italic = True
+                rs = p.add_run("СТАЛО: ")
+                _std_run(rs)
+                rs.bold = True
             r3 = p.add_run(e["shall"])
             _std_run(r3)
             _yellow(r3)
@@ -1114,7 +1292,7 @@ def verify_corrected(out_path, plan: list[dict]) -> list[dict]:
         mark = f"[изм. по замечанию №{num}]"
         cnt = full.count(mark)
         if e["mode"] == "skip":
-            status, note = "пропуск", "у ответа нет текста правки («стало»)"
+            status, note = "пропуск", e.get("hint") or "у ответа нет текста правки («стало»)"
         elif e["mode"] == "manual":
             ok = f"№{num}. " in full
             status = "вручную" if ok else "✗ НЕ ВНЕСЕНО"
@@ -1122,7 +1300,8 @@ def verify_corrected(out_path, plan: list[dict]) -> list[dict]:
                     if ok else "запись не найдена")
         else:
             if cnt == 1:
-                status, note = "✓ по месту", f"{e['mode']}: {e.get('via', '')}"
+                status = "✓ заменено" if e["mode"] == "replace" else "✓ вставлено (старый текст не тронут)"
+                note = f"{e['mode']}: {e.get('via', '')}"
             elif cnt == 0:
                 status, note = "✗ НЕ ВНЕСЕНО", "метка правки в томе не найдена"
             else:
@@ -1147,8 +1326,10 @@ def _write_report(project: str, report: dict) -> Path:
     set_default_font(doc)
     add_title(doc, "Финал-проверка откорректированного раздела")
     doc.add_paragraph(f"Объект: {project}. Сформировано: {report.get('at', '')}. "
-                      f"Итог: по месту {report['stats'].get('replace', 0) + report['stats'].get('insert', 0)}, "
+                      f"Итог: заменено по месту {report['stats'].get('replace', 0)}, "
+                      f"вставлено под заголовок пункта (старый текст не тронут) {report['stats'].get('insert', 0)}, "
                       f"вручную {report['stats'].get('manual', 0)}, "
+                      f"пропущено (нет правки / без изменений) {report['stats'].get('skip', 0)}, "
                       f"не внесено {report['stats'].get('missing', 0)}, "
                       f"приложений зарезервировано {report['stats'].get('reserved', 0)}.")
     # ПЕРЕЧЕНЬ ИЗМЕНЕНИЙ (вердикт dex 15.09: главный сдаваемый документ —
@@ -1287,7 +1468,16 @@ def _volume_answers(answers: list[dict], srcs: list, si: int, src) -> list[dict]
     out = []
     for a in mine:
         ve = (a.get("volume_edits") or {}).get(tok) if tok else None
-        if isinstance(ve, dict) and (ve.get("edit_shall") or "").strip():
+        top_shall = (a.get("edit_shall") or "").strip()
+        if isinstance(ve, dict) and (ve.get("edit_shall") or "").strip() \
+                and _META_RX.search(ve["edit_shall"]) and top_shall and not _META_RX.search(top_shall):
+            # ИИ в правке по тому сослался на общее поле («см. поле edit_shall») —
+            # берём общий текст правки, место и «было» — из правки по тому
+            a2 = dict(a)
+            a2["edit_location"] = ve.get("edit_location") or a.get("edit_location", "")
+            a2["edit_was"] = ve.get("edit_was") or a.get("edit_was", "")
+            out.append(a2)
+        elif isinstance(ve, dict) and (ve.get("edit_shall") or "").strip():
             a2 = dict(a)
             a2["edit_location"] = ve.get("edit_location") or a.get("edit_location", "")
             a2["edit_was"] = ve.get("edit_was") or ""
@@ -1374,6 +1564,27 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
         # кэше, и повторная запись вносила все правки второй раз)
         for k in [k for k in _PLAN_CACHE if k[0] == str(src)]:
             _PLAN_CACHE.pop(k, None)
+        # ПРАВКИ ПОВЕРХ ОРИГИНАЛЬНОГО PDF — ДО записи docx: PDF-модуль находит место
+        # точнее (тестировщик №4), его страницы идут в раздел ручного размещения
+        pdf_rep = None
+        orig_pdf = src.parent / "_orig" / f"{src.stem}.pdf"
+        if orig_pdf.exists():
+            try:
+                from .pdf_patch import annotate_pdf
+                items = [{"number": e["number"], "edit_was": e.get("was", ""),
+                          "edit_shall": e["shall"], "edit_location": e.get("location", ""),
+                          "location_mismatch": "не соответствует замечанию" in (e.get("hint") or "")}
+                         for e in plan if e["mode"] != "skip"]
+                pdf_rep = annotate_pdf(orig_pdf, items, out_dir / f"{src.stem}_ПРАВКИ.pdf")
+                by_num = {str(r.get("number")): r for r in pdf_rep.get("rows") or []}
+                for e in plan:
+                    r = by_num.get(str(e["number"]))
+                    if r and r.get("page") and r.get("status") != "сводка на стр. 1":
+                        e["pdf_page"] = r["page"]
+                        e["pdf_note"] = "цитата «было» подсвечена" if r.get("status") == "аннотация" else "выноска у пункта"
+            except Exception as ex:  # noqa: BLE001
+                pdf_rep = {"error": str(ex)[:200]}
+                print(f"[m5] {src.name}: PDF-аннотации не удались: {ex}", flush=True)
         stats = _apply_plan(doc, plan, ix)
         fixes = repair_structure(doc)
         if fixes:
@@ -1400,14 +1611,11 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
         vol_rep = {"volume": src.name, "output": out.name, "rows": rows, "stats": stats}
         # ПРАВКИ ПОВЕРХ ОРИГИНАЛЬНОГО PDF (v0.55): если том загружали как PDF,
         # оригинал лежит в _orig — кладём подсветки/выноски/закладки в его копию
-        orig_pdf = src.parent / "_orig" / f"{src.stem}.pdf"
-        if orig_pdf.exists():
+        if pdf_rep is not None:
             try:
-                from .pdf_patch import annotate_pdf
-                items = [{"number": e["number"], "edit_was": e.get("was", ""),
-                          "edit_shall": e["shall"], "edit_location": e.get("location", "")}
-                         for e in plan if e["mode"] != "skip"]
-                vol_rep["pdf"] = annotate_pdf(orig_pdf, items, out_dir / f"{src.stem}_ПРАВКИ.pdf")
+                vol_rep["pdf"] = pdf_rep
+                if pdf_rep.get("error"):
+                    raise RuntimeError(pdf_rep["error"])
                 report["stats"]["pdf_annotated"] = report["stats"].get("pdf_annotated", 0) + vol_rep["pdf"]["placed"]
                 report["stats"]["pdf_at_heading"] = report["stats"].get("pdf_at_heading", 0) + vol_rep["pdf"].get("at_heading", 0)
                 report["stats"]["pdf_loose"] = report["stats"].get("pdf_loose", 0) + vol_rep["pdf"].get("loose", 0)

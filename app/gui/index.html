@@ -763,7 +763,7 @@ function renderCorrReport(rep) {
   if (!rep.volumes) { box.innerHTML = ""; return; }
   const st = rep.stats || {};
   box.innerHTML = `<h3>Финал-проверка откорректированного раздела</h3>
-    <div class="msg">по месту ${(st.replace||0)+(st.insert||0)} · вручную ${st.manual||0} · не внесено ${st.missing||0} ·
+    <div class="msg">заменено ${st.replace||0} · вставлено под заголовок ${st.insert||0} · вручную ${st.manual||0} · пропущено ${st.skip||0} · не внесено ${st.missing||0} ·
       приложений зарезервировано ${st.reserved||0} ${rep.report_docx ? `<button class="sec" onclick="openPath(${JSON.stringify(rep.report_docx)})">Открыть отчёт</button>` : ""}</div>
     ${rep.volumes.map(v => `<b>${esc(v.volume)}</b>${v.error ? ` <span class="warn">⚠ ${esc(v.error)}</span>` : ""}
       ${v.pdf && v.pdf.output ? ` <span class="msg">· PDF поверх оригинала: по месту ${v.pdf.placed}, у пункта ${v.pdf.at_heading||0}, в сводке на стр. 1 — ${v.pdf.loose||0} (всего ${v.pdf.total})

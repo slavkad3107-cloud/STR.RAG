@@ -144,6 +144,8 @@ def find_location(doc, location: str, lines: list | None = None):
     отточие) пропускаются. → (pno, bbox, как нашли) либо None."""
     loc = location or ""
     lines = lines if lines is not None else page_lines(doc)
+    toc_pages = {pno for pno, pl in enumerate(lines)
+                 if sum(1 for t, _ in pl if re.search(r"\.{5,}|…{3,}", t)) >= 6}
     targets: list[tuple[str, re.Pattern]] = []
     for m in _LOC_TABLE_RX.finditer(loc):
         targets.append((f"таблица {m.group(1)}",
@@ -155,6 +157,8 @@ def find_location(doc, location: str, lines: list | None = None):
         targets.append((f"п. {num}", re.compile(r"^\s*" + re.escape(num) + r"\.?\s+[А-ЯЁA-Z«\"]")))
     for label, rx in targets:
         for pno, pl in enumerate(lines):
+            if pno in toc_pages:
+                continue
             for text, bbox in pl:
                 if not rx.search(text):
                     continue
@@ -170,6 +174,19 @@ def find_location(doc, location: str, lines: list | None = None):
     return None
 
 
+def _merge_line_rects(rects: list) -> list[tuple[float, float, float, float]]:
+    """Прямоугольники слов → прямоугольники строк (слова одной строки склеены)."""
+    out: list[list[float]] = []
+    for r in sorted(rects, key=lambda r: (round(r[1], 0), r[0])):
+        if out and abs(out[-1][1] - r[1]) < 3 and r[0] - out[-1][2] < 25:
+            out[-1][2] = max(out[-1][2], r[2])
+            out[-1][1] = min(out[-1][1], r[1])
+            out[-1][3] = max(out[-1][3], r[3])
+        else:
+            out.append([r[0], r[1], r[2], r[3]])
+    return [tuple(x) for x in out]
+
+
 def annotate_pdf(src_pdf: str | Path, items: list[dict], out_pdf: str | Path) -> dict:
     """items: [{number, edit_was, edit_shall, edit_location}] → копия PDF с
     подсветкой/выносками/закладками. Возвращает отчёт по каждому пункту."""
@@ -180,7 +197,7 @@ def annotate_pdf(src_pdf: str | Path, items: list[dict], out_pdf: str | Path) ->
     toc = doc.get_toc() or []
     placed = at_heading = 0
     lines = None
-    loose: list[tuple[str, str, str, str]] = []
+    loose: list[tuple] = []
     try:
         cache = page_tokens_cache(doc)
         for it in items:
@@ -197,8 +214,12 @@ def annotate_pdf(src_pdf: str | Path, items: list[dict], out_pdf: str | Path) ->
                 # (тестировщик №3: в PDF попадало 28 правок из 91)
                 if lines is None:
                     lines = page_lines(doc)
-                where = find_location(doc, it.get("edit_location") or "", lines)
+                # место из ответа не сходится с замечанием — у пункта не ставим
+                where = None if it.get("location_mismatch") else \
+                    find_location(doc, it.get("edit_location") or "", lines)
                 why = "цитата «было» в PDF не найдена" if was else "добавление (без «было»)"
+                if it.get("location_mismatch"):
+                    why += "; место в ответе не соответствует замечанию"
                 if where:
                     pno, bbox, label = where
                     r0 = fitz.Rect(*bbox)
@@ -215,19 +236,21 @@ def annotate_pdf(src_pdf: str | Path, items: list[dict], out_pdf: str | Path) ->
                     report.append({"number": num, "status": "выноска у пункта", "page": pno + 1,
                                    "note": f"{why}; выноска у «{label}», стр. {pno + 1}"})
                 else:
-                    loose.append((num, it.get("edit_location") or "—", was, shall))
+                    loose.append((num, it.get("edit_location") or "—", was, shall, why))
                     report.append({"number": num, "status": "сводка на стр. 1", "page": 1,
                                    "note": f"{why}; место в PDF не определено — см. сводку на первой странице"})
                 continue
             pno, rects, score = hit
             page = doc[pno]
-            for r in rects:
-                try:
-                    a = page.add_highlight_annot(fitz.Rect(*r))
-                    a.set_info(title=f"STR.RAG №{num}")
-                    a.update()
-                except Exception:  # noqa: BLE001
-                    pass
+            try:
+                # одна подсветка на правку: слова склеены в строки (тестировщик №4:
+                # ~1370 отдельных подсветок «по слову» в трёх томах)
+                quads = [fitz.Rect(*r).quad for r in _merge_line_rects(rects)]
+                a = page.add_highlight_annot(quads=quads)
+                a.set_info(title=f"STR.RAG №{num}")
+                a.update()
+            except Exception:  # noqa: BLE001
+                pass
             r0 = fitz.Rect(*rects[0])
             note = page.add_text_annot(fitz.Point(max(r0.x0 - 18, 5), r0.y0),
                                        f"ПРАВКА ПО ЗАМЕЧАНИЮ №{num}\n"
@@ -241,10 +264,10 @@ def annotate_pdf(src_pdf: str | Path, items: list[dict], out_pdf: str | Path) ->
             report.append({"number": num, "status": "аннотация", "page": pno + 1,
                            "score": score, "note": f"подсветка «было» + выноска со «стало», стр. {pno + 1}"})
         # сводка правок без определённого места — выноски столбиком на 1-й странице
-        for k, (num, loc, was, shall) in enumerate(loose):
+        for k, (num, loc, was, shall, why_l) in enumerate(loose):
             note = doc[0].add_text_annot(
                 fitz.Point(8, 30 + 22 * (k % 34)),
-                f"ПРАВКА ПО ЗАМЕЧАНИЮ №{num} — МЕСТО ОПРЕДЕЛИТЬ ВРУЧНУЮ\nГДЕ: {loc}\n"
+                f"ПРАВКА ПО ЗАМЕЧАНИЮ №{num} — МЕСТО ОПРЕДЕЛИТЬ ВРУЧНУЮ ({why_l})\nГДЕ: {loc}\n"
                 + (f"БЫЛО: {was[:400]}\n" if was else "") + f"СТАЛО / ДОБАВИТЬ: {shall[:1200]}",
                 icon="Help")
             note.set_info(title=f"STR.RAG №{num}")
