@@ -766,6 +766,14 @@ class _Index:
 # месту — найденное «было», цитата замечания или явный заголовок пункта/таблицы
 # из «где править». Тематическое угадывание раздела выключено.
 STRICT_PLACEMENT = True
+# ВСТАВКА ПОД ЗАГОЛОВОК ВЫКЛЮЧЕНА (тестировщик №5, 18.09): все 5 из 5 таких вставок
+# дали дубль или противоречие со старым текстом пункта. Добавления идут в ручной
+# раздел и выноской в PDF у заголовка пункта; включить можно в настройках
+# (corrections.insert_under_heading) — на свой риск.
+INSERT_UNDER_HEADING = False
+# ЗАМЕНА — только при почти дословном совпадении «было» (раньше 0.55: замена била
+# «не в то окно» — 6.1 №16, 6.2 №75)
+REPLACE_MIN_SCORE = 0.80
 
 
 def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
@@ -804,6 +812,12 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
             e["hint"] = f"в «стало» не текст правки, а указание/заглушка: «{meta.group(0)[:50]}»"
             plan.append(e)
             continue
+        if a.get("unsupported_requisites"):
+            # реквизиты (№ … от …, организации), которых нет в источниках, — не вносить
+            reqs = "; ".join(str(x) for x in (a.get("unsupported_requisites") or [])[:5])
+            e["hint"] = f"в «стало» реквизиты без источника: {reqs} — проверить и внести вручную"
+            plan.append(e)
+            continue
         if a.get("shall_unverified"):
             # «стало» с числами без источника при «Требуется…» — не вносить
             nums = "; ".join(str(x) for x in (a.get("unsupported_numbers") or [])[:8])
@@ -833,19 +847,30 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
             # 1) «было» внутри нужного пункта — самое надёжное место
             for h, hi_ in heads:
                 i2, k2, s2 = ix.find(was, used, hi_, min(len(ix.pars), hi_ + 400))
-                if s2 >= 0.45 and s2 > s:
+                if s2 >= REPLACE_MIN_SCORE and s2 > s:
                     i, k, s, via = i2, k2, s2, f"«было» в п. {h}"
+                elif s2 >= 0.50 and (near is None or s2 > near[2]):
+                    near = (i2, k2, s2)
             # 2) по всему тому — только при УВЕРЕННОМ сходстве (замена); при
             #    среднем 0.45–0.55 — вставка после найденного места. Ниже 0.45
             #    в чужой текст не лезем (05.09: 0.35 давало «куда попало»)
             if i < 0:
                 i2, k2, s2 = ix.find(was, used)
-                if s2 >= 0.55:
+                if s2 >= REPLACE_MIN_SCORE:
                     i, k, s, via = i2, k2, s2, "«было» найдено в томе"
-                elif s2 >= 0.50:
+                elif s2 >= 0.50 and (near is None or s2 > near[2]):
                     near = (i2, k2, s2)
         if i >= 0:
             i, k, kept = _trim_window(ix, i, k, was, used)
+            bad = _unsafe_replace(ix, i, k, was)
+            if bad:
+                # замена небезопасна (фрагмент таблицы / окно заметно больше «было») —
+                # в ручной раздел с найденным местом
+                e["hint"] = (f"{bad}; найденное место: «"
+                             f"{decode_garbled(' '.join(ix.text[i:i + k]))[:120]}»")
+                i = -1
+                near = None
+        if i >= 0:
             used.update(range(i, i + k))
             used.update(kept)
             e.update(mode="replace", idx=i, k=k, score=round(s, 2), via=via,
@@ -871,7 +896,10 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
                 e["hint"] = f"таблица {mt.group(1)} в томе уже есть — заменить её содержимое вручную"
             elif not insert_heads and table_hits:
                 e["hint"] = f"правка относится к таблице {table_hits[0]} — внести в таблицу вручную"
-            for h, hi_ in insert_heads:
+            if not INSERT_UNDER_HEADING and insert_heads and not e.get("hint"):
+                e["hint"] = (f"добавление в п. {insert_heads[0][0]} — внести вручную (авто-вставка под заголовок "
+                             f"выключена: оставляет старый текст пункта рядом с новым)")
+            for h, hi_ in (insert_heads if INSERT_UNDER_HEADING else []):
                 end_ = ix.heading_end(hi_)
                 if hi_ not in used and end_ not in used:
                     e.update(mode="insert", idx=end_, k=1, via=f"после заголовка п. {h}",
@@ -944,7 +972,8 @@ def plan_corrections(doc, answers: list[dict]) -> tuple[list[dict], "_Index"]:
 
 _HEAD_LINE_RX = re.compile(r"^\s*\d{1,2}(?:\.\d{1,2}){1,4}\.?\s+[А-ЯЁA-Z]")
 _META_RX = re.compile(r"см\.\s*поле|edit_shall|edit_was|<[^<>\n]{2,80}>|\{[^{}\n]{2,60}\}|"
-                      r"\(существующ[^)]{0,80}\)|см\.\s*(?:таблиц\w*\s*)?(?:выше|ниже)|"
+                      r"\(существующ\w+\s+(?:строк|данн|текст|значен)[^)]{0,80}\)|см\.\s*(?:таблиц\w*\s*)?(?:выше|ниже)|"
+                      r"паспорт\w*\s+проекта|таблиц\w*\s+[XХ](?:[./][YУ])?\b|№\s*[\w\-]*(?:…|\.{3})|"
                       r"^\s*в\s+раздел\w*\s+[^.]{0,60}\bдобавить", re.I | re.M)
 
 
@@ -992,6 +1021,24 @@ def _trim_window(ix: "_Index", i: int, k: int, was: str, used: set[int]) -> tupl
             and nxt not in ix.holders and nxt not in ix.head_lines:
         k += 1
     return i, k, kept
+
+
+def _unsafe_replace(ix: "_Index", i: int, k: int, was: str) -> str:
+    """Причина, по которой замену окна [i, i+k) делать нельзя («» — можно)."""
+    lines = [decode_garbled(ix.text[j]).strip() for j in range(i, i + k)]
+    nonempty = [l for l in lines if l]
+    short = [l for l in nonempty if len(l) < 28]
+    numeric = [l for l in nonempty if re.fullmatch(r"[\d\s.,%+\-–/()*]+", l)]
+    if len(nonempty) >= 4 and (len(short) / len(nonempty) >= 0.5 or len(numeric) >= 2):
+        return "«было» — фрагмент таблицы (ячейки по строкам): замена разрушила бы таблицу"
+    if "|" in was and was.count("|") >= 4:
+        return "«было» — строки таблицы: заменить в таблице вручную"
+    wn, win = len(_norm(was)), len("".join(ix.norm[i:i + k]))
+    first, last = len(ix.norm[i]), len(ix.norm[i + k - 1])
+    # окно может быть длиннее «было» только на «до» в первой строке и «после» в последней
+    if win - wn > first + last + 20:
+        return "найденное окно заметно больше «было» — стёрся бы соседний текст"
+    return ""
 
 
 def _strip_heading(shall: str, heading: str) -> str:
@@ -1593,7 +1640,8 @@ def write_corrected_volumes(project: str, sources: list) -> tuple[list[Path], li
                 from .pdf_patch import annotate_pdf
                 items = [{"number": e["number"], "edit_was": e.get("was", ""),
                           "edit_shall": e["shall"], "edit_location": e.get("location", ""),
-                          "location_mismatch": "не соответствует замечанию" in (e.get("hint") or "")}
+                          "location_mismatch": "не соответствует замечанию" in (e.get("hint") or ""),
+                          "warn": (e.get("hint") or "") if e["mode"] == "manual" else ""}
                          for e in plan if e["mode"] != "skip"]
                 pdf_rep = annotate_pdf(orig_pdf, items, out_dir / f"{src.stem}_ПРАВКИ.pdf")
                 by_num = {str(r.get("number")): r for r in pdf_rep.get("rows") or []}

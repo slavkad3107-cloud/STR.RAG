@@ -230,14 +230,21 @@ def _parse_status(text: str) -> tuple[bool, str, str]:
     return ok, need, rest
 
 
-def placeholder_text(unit: dict, extra_need: str = "", hits: int = 0) -> str:
+def placeholder_text(unit: dict, extra_need: str = "", hits: int = 0,
+                     sources: list[str] | None = None) -> str:
     need = unit.get("needs", "")
     if extra_need:
         need = f"{extra_need}. По форме раздела также: {need}"
-    reason = ("в базе проекта не найдено фрагментов по теме подраздела" if hits == 0
-              else f"найденных фрагментов ({hits}) недостаточно для текста по существу")
-    return (f"◈ ПОДРАЗДЕЛ НЕ СФОРМИРОВАН: {reason}.\n"
-            f"Для генерации добавьте в базу проекта: {need}.")
+    if hits == 0:
+        return ("◈ ПОДРАЗДЕЛ НЕ СФОРМИРОВАН: в базе проекта не найдено фрагментов по теме подраздела.\n"
+                f"Для генерации добавьте в базу проекта: {need}.")
+    # фрагменты ЕСТЬ, но ИИ счёл их недостаточными: совет «добавьте в базу» был неверен
+    # для 10 из 19 пустых подразделов (тестировщик №5) — показываем, что уже найдено
+    found = "; ".join((sources or [])[:4])
+    return (f"◈ ПОДРАЗДЕЛ НЕ СФОРМИРОВАН: найденных фрагментов ({hits}) ИИ счёл недостаточными для текста по существу.\n"
+            f"Нужные сведения: {need}.\n"
+            + (f"Уже найдено в базе (проверьте эти места — возможно, сведения там есть): {found}.\n" if found else "")
+            + "Если сведений действительно нет — дозагрузите документы и повторите генерацию.")
 
 
 # ───────────────────── состояние фонового процесса ─────────────────────
@@ -335,6 +342,15 @@ def _indicators_text(project: str) -> str:
         # РАСХОЖДЕНИЕ (тестировщик №3, 16.09: генерация тиражировала неверные
         # показатели — «10 км», «1,5 мес.»): при конфликте даём варианты с
         # источниками и запрещаем брать значение без сверки по фрагментам
+        try:
+            from .volumes import pk_of as _pk_of, volume_token as _vt
+            _pk = _pk_of(_vt(prov.get("file", "")))
+        except Exception:  # noqa: BLE001
+            _pk = ""
+        if _pk and rec.get("conflict"):
+            # «50,96 т/год» — отходы только ПК 3, «200 455 м²» — отвод только ПК 3
+            # (тестировщик №5: подавались как показатели всего объекта в 11 подразделах)
+            line += f" — ЗНАЧЕНИЕ ОТНОСИТСЯ ТОЛЬКО К ПУСКОВОМУ КОМПЛЕКСУ {_pk}, не к объекту в целом"
         if rec.get("conflict") and rec.get("source") == "auto":
             vars_ = [f"{x.get('value')} {x.get('unit', '')} [{(x.get('sources') or [{}])[0].get('file', '—')}, "
                      f"{(x.get('sources') or [{}])[0].get('loc', '')}]" for x in (rec.get("variants") or [])[:3]]
@@ -349,7 +365,7 @@ def _indicators_text(project: str) -> str:
         if len(omap) > 1:
             lines.append("ПО ПУСКОВЫМ КОМПЛЕКСАМ (значения не смешивать; в тексте указывать, "
                          "к какому комплексу относится число):")
-            lines.append(passport_text(project, omap))
+            lines.append(passport_text(project, omap, for_answer=False))
     except Exception:  # noqa: BLE001 — паспорт вторичен
         pass
     return "\n".join(lines) or "(показатели не собраны — соберите во вкладке ДАННЫЕ)"
@@ -392,6 +408,25 @@ def default_retriever(cfg, project: str, object_type: str, target: str) -> Calla
 
 
 # ───────────────────── основной проход ─────────────────────
+def _strip_own_heading(text: str, n: str, chapter: str) -> str:
+    """ИИ часто начинает текст строкой-заголовком подраздела — в docx он уже есть
+    (тестировщик №5: заголовок продублирован в 11 подразделах)."""
+    lines = text.splitlines()
+    b = chapter.lower().replace("ё", "е")
+    while lines:
+        first = re.sub(r"[#*_`]", "", lines[0]).strip()
+        bare = re.sub(r"^(?:подраздел\s*)?\d+(?:\.\d+)*\.?\s*", "", first, flags=re.I).strip(" .:")
+        a = bare.lower().replace("ё", "е")
+        same = bool(a) and (a == b or a.startswith(b[:40]) or b.startswith(a[:40])) and len(a) >= min(12, len(b))
+        if first and len(first) < 200 and same:
+            lines.pop(0)
+            while lines and not lines[0].strip():
+                lines.pop(0)
+        else:
+            break
+    return "\n".join(lines).strip() or text
+
+
 def _partial_path(project: str) -> Path:
     return _stop_path(project).parent / "section_gen_partial.json"
 
@@ -504,10 +539,10 @@ def run_section_gen(project: str, target: str = "OOS", *, cfg=None,
                        f"({str(e)[:160]})")
             ok, need, text = _parse_status(raw)
             if not ok or not text.strip():
-                res.update(text=placeholder_text(u, need, hits=len(hits)), placeholder=True,
+                res.update(text=placeholder_text(u, need, hits=len(hits), sources=srcs), placeholder=True,
                            ai_need=need)
             else:
-                res.update(text=text.strip())
+                res.update(text=_strip_own_heading(text.strip(), n, chapter))
             results.append(res)
             if not ai_failed:                 # отказ ИИ не запоминаем — повторим при перезапуске
                 cached[str(n)] = res
@@ -538,6 +573,10 @@ def run_section_gen(project: str, target: str = "OOS", *, cfg=None,
 def _demd(text: str) -> str:
     """Текст без значков markdown-выделения (строки таблиц «| … |» не трогаем)."""
     text = re.sub(r"\*\*|__|`", "", text or "")
+    text = re.sub(r"</?(?:sub|sup|b|i|br)\s*/?>", "", text, flags=re.I)
+    text = re.sub(r"(?<![*\w])\*(?=\S)([^*\n]{1,200}?)(?<=\S)\*(?![*\w])", lambda m: m.group(1), text)
+    text = re.sub(r";\s*;", ";", text)
+    text = re.sub(r"(?<!\.)\.\.(?!\.)", ".", text)
     return re.sub(r"(?m)^(?P<ind>[ \t]*)[*][ \t]+", lambda m: m.group("ind") + "— ", text)
 
 

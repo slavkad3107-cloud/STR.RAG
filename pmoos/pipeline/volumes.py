@@ -317,7 +317,17 @@ def _reflag(project: str, answers: list[dict], texts: dict[str, str]) -> dict:
         if not shall:
             continue
         toks = [t for t in (a.get("target_volumes") or []) if t in texts] or list(texts)
-        ctx = "\n".join(texts[t] for t in toks) + "\n" + (a.get("remark") or "") + "\n" + passport + "\n" + \
+        # из тома — ТОЛЬКО окрестность места правки (±1500 знаков вокруг «было»): сверка по
+        # всему тому подтверждала выдумки случайными совпадениями (тестировщик №5: «0,2 м»
+        # нашлось в «слой 0,1-0,2 м», «30 м» — в «берёза 20-30 м», «200 м» — в водоохранной зоне)
+        near_parts: list[str] = []
+        _w5 = re.findall(r"[А-Яа-яЁёA-Za-z0-9]+", (a.get("edit_was") or ""))[:6]
+        if len(_w5) >= 4:
+            _rx = re.compile(r"[\W_]+".join(re.escape(w) for w in _w5), re.I)
+            for t in toks:
+                for m in list(_rx.finditer(texts[t]))[:3]:
+                    near_parts.append(texts[t][max(0, m.start() - 1500): m.end() + 1500])
+        ctx = "\n".join(near_parts) + "\n" + (a.get("remark") or "") + "\n" + passport + "\n" + \
             "\n".join(str(x.get("snippet") or "") for x in (a.get("sources") or []) + (a.get("retrieved_sources") or []))
         old = list(a.get("unsupported_numbers") or [])
         new = unsupported_numbers(shall, ctx)
@@ -554,6 +564,8 @@ def passport(project: str) -> dict[str, dict]:
                 except ValueError:
                     return a == b
             for _, d in lst[1:]:
+                if d.get("section") not in prefer:
+                    continue
                 if not _close(d["value"], best["value"]) and d["section"] != best["section"] and \
                         all(not _close(d["value"], a["value"]) for a in alts):
                     alts.append(d)
@@ -561,7 +573,7 @@ def passport(project: str) -> dict[str, dict]:
     return dict(sorted(out.items()))
 
 
-def passport_text(project: str, oos_map: dict[str, str] | None = None) -> str:
+def passport_text(project: str, oos_map: dict[str, str] | None = None, *, for_answer: bool = True) -> str:
     from ..data import registry as R
     labels = {m["key"]: m["label"] for m in R.INDICATORS}
     pp = passport(project)
@@ -577,7 +589,7 @@ def passport_text(project: str, oos_map: dict[str, str] | None = None) -> str:
             s = f"{labels.get(k, k)}: {d['value']} {d['unit']} [{d['file']}, {d['loc']}]"
             if d.get("alts"):
                 s += " (РАСХОЖДЕНИЕ: " + "; ".join(f"{a['value']} {a['unit']} по {a['file']}" for a in d["alts"]) + \
-                     " — укажи расхождение в ответе)"
+                     (" — укажи расхождение в ответе)" if for_answer else " — в тексте использовать основное значение)")
             parts.append(s)
         lines.append(f"- {head}: " + "; ".join(parts))
     return "\n".join(lines)

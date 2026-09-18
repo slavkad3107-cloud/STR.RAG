@@ -226,6 +226,8 @@ def annotate_pdf(src_pdf: str | Path, items: list[dict], out_pdf: str | Path) ->
                     note = doc[pno].add_text_annot(
                         fitz.Point(max(r0.x0 - 18, 5), r0.y0),
                         f"ПРАВКА ПО ЗАМЕЧАНИЮ №{num} — РАЗМЕСТИТЬ В ЭТОМ ПУНКТЕ\n"
+                        + (f"⚠ ПРОВЕРИТЬ ПЕРЕД ВНЕСЕНИЕМ: {it['warn'][:300]}\n" if it.get("warn") else "")
+                        +
                         f"ГДЕ: {it.get('edit_location') or '—'}\n"
                         + (f"БЫЛО (не найдено дословно): {was[:400]}\n" if was else "")
                         + f"СТАЛО / ДОБАВИТЬ: {shall[:1200]}", icon="Insert")
@@ -254,6 +256,8 @@ def annotate_pdf(src_pdf: str | Path, items: list[dict], out_pdf: str | Path) ->
             r0 = fitz.Rect(*rects[0])
             note = page.add_text_annot(fitz.Point(max(r0.x0 - 18, 5), r0.y0),
                                        f"ПРАВКА ПО ЗАМЕЧАНИЮ №{num}\n"
+                                       + (f"⚠ ПРОВЕРИТЬ ПЕРЕД ВНЕСЕНИЕМ: {it['warn'][:300]}\n" if it.get("warn") else "")
+                                       +
                                        f"ГДЕ: {it.get('edit_location') or '—'}\n"
                                        f"БЫЛО: {was[:400]}\nСТАЛО: {shall[:1200]}",
                                        icon="Comment")

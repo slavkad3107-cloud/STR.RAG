@@ -364,6 +364,8 @@ def test_corrections_placement_rules(tmp_path, monkeypatch):
     # 1) том берётся из «Том X.Y» в тексте ответа; 2) заголовок пункта ищется
     # в ТЕЛЕ (не в составе проекта/оглавлении); 3) слабая похожесть → вручную.
     monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import pmoos.output.docx_writer as _DWflag
+    monkeypatch.setattr(_DWflag, "INSERT_UNDER_HEADING", True)   # тест проверяет саму логику вставки
     from pathlib import Path as _P
     from docx import Document
     from pmoos.output.docx_writer import (_match_volume, _volume_answers,
@@ -989,6 +991,8 @@ def test_round4_toc_headings_tables_and_meta(tmp_path, monkeypatch):
     # обрывок после переноса, мета-текст в томе, ложная причина пропуска
     import json as _json
     monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    import pmoos.output.docx_writer as _DWflag
+    monkeypatch.setattr(_DWflag, "INSERT_UNDER_HEADING", True)   # тест проверяет саму логику вставки
     from docx import Document
     from pmoos.paths import project_paths
     from pmoos.output import docx_writer as DW
@@ -1059,6 +1063,56 @@ def test_round4_toc_headings_tables_and_meta(tmp_path, monkeypatch):
     assert rows["5"]["status"] == "вручную" and "заглушка" in rows["5"]["note"]
     assert rows["6"]["status"] == "пропуск" and "совпадает" in rows["6"]["note"]
     assert rows["1"]["status"].startswith("✓ вставлено") and rows["3"]["status"] == "✓ заменено"
+
+
+def test_round5_safe_replace_and_no_auto_insert(tmp_path, monkeypatch):
+    # тестировщик №5 (18.09): все вставки под заголовок давали дубль → по умолчанию
+    # выключены; замена — только почти дословная и не в таблице; реквизиты без
+    # источника и «Паспорт проекта» в том не вносятся
+    import json as _json
+    monkeypatch.setenv("PMOOS_DATA_DIR", str(tmp_path))
+    from docx import Document
+    from pmoos.paths import project_paths
+    from pmoos.output import docx_writer as DW
+    assert DW.INSERT_UNDER_HEADING is False and DW.REPLACE_MIN_SCORE >= 0.8
+    long_ = "Текст раздела с описанием проектных решений и мероприятий, достаточно длинный для тела тома. "
+    d = Document()
+    d.add_paragraph("5.1. Виды и количество отходов")
+    for _ in range(3):
+        d.add_paragraph(long_)
+    d.add_paragraph("Отходы бетона образуются при разборке покрытия в количестве 13,4 т и вывозятся на полигон.")
+    for cell in ("Наименование", "Лом бетона", "13,4", "2,4", "т", "5,58"):
+        d.add_paragraph(cell)
+    src = tmp_path / "Том 6.1.docx"
+    d.save(str(src))
+    pp = project_paths("Р5")
+    pp["answers"].write_text(_json.dumps({"answers": [
+        {"number": "1", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 5.1", "edit_was": "",
+         "edit_shall": "Дополнительно образуются отходы грунта.", "attachments": []},
+        {"number": "2", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 5.1",
+         "edit_was": "Наименование Лом бетона 13,4 2,4 т 5,58", "edit_shall": "Наименование Лом бетона 15,0 2,4 т 6,25", "attachments": []},
+        {"number": "3", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 5.1",
+         "edit_was": "Отходы бетона образуются при разборке дорожной одежды и передаются подрядчику",   # пересказ
+         "edit_shall": "Отходы бетона передаются на утилизацию.", "attachments": []},
+        {"number": "4", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 5.1", "edit_was": "",
+         "edit_shall": "Согласно приказу № 123 от 15.03.2022 отходы учитываются.", "unsupported_requisites": ["№ 123 от 15.03.2022"], "attachments": []},
+        {"number": "5", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 5.1", "edit_was": "",
+         "edit_shall": "Протяжённость 7,3 км (согласно Паспорт проекта № 717).", "attachments": []},
+        {"number": "6", "status": "accepted", "remark": "х", "edit_location": "Том 6.1, п. 5.1",
+         "edit_was": "Отходы бетона образуются при разборке покрытия в количестве 13,4 т и вывозятся на полигон.",
+         "edit_shall": "Отходы бетона образуются при разборке покрытия в количестве 15,0 т и передаются на утилизацию.", "attachments": []},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    outs, failed = DW.write_corrected_volumes("Р5", [str(src)])
+    paras = [p.text for p in Document(str(outs[0])).paragraphs]
+    body = "\n".join(paras).split("ТРЕБУЮЩИЕ РУЧНОГО РАЗМЕЩЕНИЯ")[0]
+    assert "отходы грунта" not in body and "приказу № 123" not in body and "Паспорт проекта" not in body
+    assert "13,4" in paras and "5,58" in paras, "ячейки таблицы не тронуты"
+    assert "15,0 т и передаются на утилизацию" in body and "вывозятся на полигон" not in body
+    rows = {r["number"]: r for r in DW.last_report("Р5")["volumes"][0]["rows"]}
+    assert rows["6"]["status"] == "✓ заменено"
+    assert all(rows[n]["status"] == "вручную" for n in ("1", "2", "3", "4", "5"))
+    assert "выключена" in rows["1"]["note"] and "таблиц" in rows["2"]["note"]
+    assert "реквизиты" in rows["4"]["note"] and "заглушка" in rows["5"]["note"]
 
 
 def test_strict_placement_reserved_appendix_and_final_check(tmp_path, monkeypatch):
